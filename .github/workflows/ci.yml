@@ -20,8 +20,15 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   macos:
-    # Universal (arm64 + x86_64) so the same binaries run on Intel and Apple Silicon.
-    runs-on: macos-15
+    # Universal (arm64 + x86_64) so the same binaries run on Intel and Apple
+    # Silicon. Built and run on both kinds of runner: the Intel one also runs
+    # the x86_64 slice natively, and keeps CI going while arm64 runners are
+    # short on capacity.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
