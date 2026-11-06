@@ -1,0 +1,54 @@
+cmake_minimum_required(VERSION 3.21)
+
+# Phase 1 targets macOS 12.3+ so the 2016 Intel MacBook Pro (macOS 12) can be
+# tested. rdaccel 1.0.0 still assumes macOS 14 in one place
+# (lroel9527/rdaccel#39); until that lands, binaries run only on macOS 14+.
+# Set before project() so it also applies to the rdaccel submodule.
+if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
+endif()
+
+project(rdmachine VERSION 0.1.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(APPLE)
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 20)
+endif()
+
+option(RDM_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
+# The server and client need rdaccel's macOS backends; the protocol core does
+# not, so it also builds and tests on Linux CI.
+option(RDM_WITH_RDACCEL "Build rdaccel and the server/client" ${APPLE})
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+if(NOT MSVC)
+  add_compile_options(-Wall -Wextra)
+endif()
+
+include(FetchContent)
+FetchContent_Declare(nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
+
+add_subdirectory(core)
+
+if(RDM_WITH_RDACCEL)
+  if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rdaccel/CMakeLists.txt)
+    message(FATAL_ERROR "rdaccel submodule missing: run `git submodule update --init`")
+  endif()
+  add_subdirectory(third_party/rdaccel EXCLUDE_FROM_ALL)
+  add_subdirectory(server)
+  add_subdirectory(client)
+endif()
+
+if(RDM_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(core/tests)
+endif()
