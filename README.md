@@ -28,7 +28,7 @@ ctest --test-dir build
 ## 目录
 
 ```text
-core/              平台无关的产品核心（C++20）：控制协议，以后还有认证和会话逻辑
+core/              平台无关的产品核心（C++20）：控制协议、TLS 1.3 控制连接（mbedTLS）、登录与会话状态机
 server/            Mac 服务端（Objective-C++）
 client/            Mac 客户端（AppKit）
 third_party/rdaccel  rdaccel（git submodule，固定在发布版本）

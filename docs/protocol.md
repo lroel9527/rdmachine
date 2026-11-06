@@ -39,6 +39,7 @@ rdmachine 的客户端和服务端之间有两条连接：
   - 首次连接某台主机：显示指纹，用户确认后保存（和 SSH 首次连接一样）。服务端界面或命令行能显示本机指纹，供用户比对。
   - 之后连接：指纹必须一致，不一致时直接拒绝并明确提示“服务器身份已变化”，不提供“仍然连接”的快捷按钮。
 - 换证书（重装系统等）后，用户在客户端里删掉旧指纹再重新确认。
+- 实现：`core/include/rdmachine/tls.h`（基于 Mbed TLS 3.6，`GenerateTlsIdentity`、`CertificateFingerprint`、`TlsListener`、`TlsConnect`）。客户端拿到指纹后先交给 `ClientOptions::trust_server` 判断，通过之前不发送任何消息。
 
 ## 分帧
 
@@ -137,6 +138,13 @@ rdmachine 的客户端和服务端之间有两条连接：
 ### error（双向）
 
 `{"type":"error","code":"<错误码>","message":"<给人看的说明，可选>"}`，发完关闭连接。
+
+## 实现
+
+- 服务端：`ServerSession`（`core/include/rdmachine/server_session.h`）是不做 I/O 的状态机，按上面的规则处理每条消息；平台相关的部分（PAM 校验密码、启动 rdaccel Host）由 `ServerDelegate` 提供。`ControlServer` 在 TLS 上为每个连接开一个线程驱动它，负责 15 秒无流量发 `ping`、45 秒收不到消息发 `bye`（`idle_timeout`）后关闭。
+- 限流、配对码、一次性令牌：`core/include/rdmachine/auth_guards.h`。账号密码和配对码的失败都计入同一个按 IP 的限流。
+- 客户端：`ConnectAndStartSession`（`core/include/rdmachine/control_client.h`）走完 TLS、指纹确认、`hello`、`auth`、`session_request`，成功后把控制连接留给调用方在会话期间使用。除了上表的错误码，客户端还会报 `connect_failed`、`untrusted_server`、`timeout`、`connection_closed`、`bad_message`。
+- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、配对码、忙、坏帧、空闲超时）。
 
 ## 错误码
 

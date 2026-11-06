@@ -12,7 +12,10 @@ endif()
 add_executable(rdm_core_tests
   test_base64.cpp
   test_frame.cpp
-  test_messages.cpp)
+  test_messages.cpp
+  test_auth_guards.cpp
+  test_server_session.cpp
+  test_control.cpp)
 target_link_libraries(rdm_core_tests PRIVATE rdmachine::core GTest::gtest_main)
 
 include(GoogleTest)

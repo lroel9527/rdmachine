@@ -1,0 +1,55 @@
+#pragma once
+#include <atomic>
+#include <mutex>
+
+#include "rdmachine/server_session.h"
+
+namespace rdm::testing {
+
+class FakeDelegate : public ServerDelegate {
+ public:
+  std::string ServerName() override { return "test-mac"; }
+  bool CheckPassword(const std::string& user, const std::string& pass, std::string* error) override {
+    if (user == "alice" && pass == "secret") return true;
+    if (user == "bob") {
+      *error = "not_console_user";
+      return false;
+    }
+    *error = "bad_credentials";
+    return false;
+  }
+  std::optional<SessionGrant> StartSession(const SessionRequest& request, const SessionSecrets& secrets,
+                                           std::string* error) override {
+    std::lock_guard lock(mu);
+    if (busy) {
+      *error = "busy";
+      return std::nullopt;
+    }
+    if (request.display_index > 0) {
+      *error = "no_display";
+      return std::nullopt;
+    }
+    busy = true;
+    ++starts;
+    last_request = request;
+    last_secrets = secrets;
+    SessionGrant g;
+    g.transport = request.transport;
+    g.port = 4100;
+    g.displays.push_back(DisplayInfo{0, "Built-in", 2880, 1800, 2.0});
+    return g;
+  }
+  void EndSession() override {
+    std::lock_guard lock(mu);
+    busy = false;
+    ++ends;
+  }
+
+  std::mutex mu;
+  bool busy = false;
+  int starts = 0, ends = 0;
+  SessionRequest last_request;
+  SessionSecrets last_secrets;
+};
+
+}  // namespace rdm::testing

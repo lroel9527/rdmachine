@@ -9,12 +9,20 @@ jobs:
   core-linux:
     # The protocol core has no platform code; test it with sanitizers.
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ["address,undefined", "thread"]
+    name: core-linux (${{ matrix.sanitizer }})
     steps:
       - uses: actions/checkout@v4
-      - name: Build (ASan + UBSan)
+      - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRDM_WITH_RDACCEL=OFF \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+            -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }}" -DCMAKE_C_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
           cmake --build build -j4
       - name: Test
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
         run: ctest --test-dir build --output-on-failure
