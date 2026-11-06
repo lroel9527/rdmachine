@@ -34,20 +34,55 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
 # 只构建协议核心：加 -DRDM_WITH_RDACCEL=OFF
 ```
 
+## 打包和签名（macOS）
+
+没有 Apple Developer 账号时，用本机自签的证书签名。macOS 按“证书 + 应用标识”记住屏幕录制和辅助功能权限，所以证书固定下来以后，重新编译打包的应用不用再授权；不签或临时签名（ad hoc）的话，每次重编都得重新授权。
+
+1. **每台用来编译的 Mac 做一次**：创建签名证书。中途会弹窗要登录密码（把证书设为“代码签名”可信），之后第一次签名时如果问是否允许 codesign 使用钥匙串，点“始终允许”。
+
+   ```bash
+   packaging/macos/create-signing-identity.sh
+   # 在登录钥匙串里创建 “rdmachine Local Signing”，再运行一次不会重复创建
+   ```
+
+   这张证书要留着：删掉重建的话，两台 Mac 上的权限都要重新授予。想换到另一台 Mac 编译，在“钥匙串访问”里连私钥一起导出、到那台导入即可。
+
+2. **编译并打包**（通用二进制，Intel 和 Apple Silicon 通用）：
+
+   ```bash
+   packaging/macos/package.sh --build --zip
+   ```
+
+   产物在 `dist/`：
+
+   | 文件 | 用途 |
+   | --- | --- |
+   | `RDMachine.app` | 客户端 |
+   | `RDMachine Server.app` | 服务端（没有 Dock 图标，M1 再做菜单栏界面） |
+   | `rdmachine-server.sh` | 在终端里启动服务端，输出和配对码显示在终端 |
+   | `rdmachine-connect` | 命令行测试客户端 |
+   | `rdmachine-版本号-macos.zip` | 以上全部，拷到另一台 Mac 用 |
+
+   已经编译过的话去掉 `--build`，默认从 `build/bin` 取二进制（`--build-dir` 可改）。`--identity -` 是临时签名，只适合一次性试试。
+
+3. **拷到另一台 Mac**：用 U 盘、`scp` 或 AirDrop 拷 zip 过去解压，可以放进“应用程序”文件夹。自签证书不被别的 Mac 认可，第一次打开会被拦下：macOS 12–14 在应用上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。也可以直接 `xattr -dr com.apple.quarantine RDMachine*.app` 去掉下载标记。
+
 ## 试用（M0）
 
-被控的 Mac 上运行服务端（第一次运行时 macOS 会要求给运行它的程序，比如“终端”，授予“屏幕录制”权限；控制键鼠还需要“辅助功能”权限，没有的话只能看不能控）：
+被控的 Mac 上用脚本启动服务端：
 
 ```bash
-./build/bin/rdmachine-server --pairing-code
-# 打印本机指纹和一个 8 位配对码；按回车换新的配对码
+./dist/rdmachine-server.sh --pairing-code
+# 打印本机指纹和一个 8 位配对码；按回车换新的配对码，Ctrl-C 停止
 ```
 
-另一台 Mac 上打开 `build/bin/rdmachine-client`，输入服务端地址，用被控 Mac 当前登录账号的密码，或者用配对码登录。第一次连接会显示服务端指纹，和服务端打印的核对一致后再信任。
+第一次运行时 macOS 会请求权限，在“系统设置 → 隐私与安全性”里给 **RDMachine Server** 打开“屏幕录制”（画面）和“辅助功能”（键鼠控制，没有的话只能看不能控），然后 Ctrl-C 停掉再启动一次。脚本通过 `open` 启动应用，所以权限记在 RDMachine Server 名下，而不是“终端”名下。没有打包时也可以直接跑 `./build/bin/rdmachine-server --pairing-code`，这时权限要授给“终端”。
 
-不开窗口也能测试连接：`./build/bin/rdmachine-connect 服务端地址 --code=配对码`（或 `--user=账号`，密码从终端输入）。
+另一台 Mac 上打开 `RDMachine.app`（或未打包的 `build/bin/rdmachine-client`），输入服务端地址，用被控 Mac 当前登录账号的密码，或者用配对码登录。第一次连接会显示服务端指纹，和服务端打印的核对一致后再信任。
 
-端口：TCP 4100 是控制连接，UDP 4100 是画面，UDP 不通时画面改走 TCP 4101。
+不开窗口也能测试连接：`./dist/rdmachine-connect 服务端地址 --code=配对码`（或 `--user=账号`，密码从终端输入）。
+
+端口：TCP 4100 是控制连接，UDP 4100 是画面，UDP 不通时画面改走 TCP 4101。第一次运行时 macOS 防火墙（如果开着）会问是否允许 RDMachine Server 接受传入连接，选允许。
 
 ## 许可
 

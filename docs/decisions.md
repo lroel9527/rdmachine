@@ -11,5 +11,5 @@
 | D4 | TCP 4100 控制 + rdaccel UDP 画面，UDP 不通退回 rdaccel TCP | 换网络不断线以后靠 rdaccel 加连接 ID |
 | D5 | M0 只控制已登录用户的物理桌面，M1 补登录窗口和锁屏 | 无显示器的虚拟屏放到 M2 实验 |
 | 系统版本 | 最低 macOS 12.3 | 为了 2016 款 Intel MacBook Pro；依赖 [rdaccel#39](https://github.com/lroel9527/rdaccel/issues/39)，合入前二进制只能在 macOS 14+ 上跑 |
-| 签名 | 暂无 Apple Developer 账号，M0 用本机证书签名自测 | 不做公证分发；重新编译后可能要重新授予屏幕录制和辅助功能权限 |
+| 签名 | 暂无 Apple Developer 账号，M0 用本机证书签名自测 | 不做公证分发；用 `packaging/macos/create-signing-identity.sh` 建一张固定的自签证书，应用标识固定为 `org.rdmachine.server` / `org.rdmachine.client`，重新编译后权限不丢 |
 | rdaccel 改动 | 在 rdaccel 仓库提 issue，由 rdaccel 项目实现 | rdmachine 以 submodule 固定在 rdaccel 的发布版本上 |

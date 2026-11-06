@@ -34,3 +34,26 @@ jobs:
             lipo build/bin/$b -verify_arch arm64 x86_64
             ./build/bin/$b --version
           done
+      # Packaging as on a developer Mac: a self-signed certificate made by
+      # create-signing-identity.sh, here in a throwaway keychain so nothing
+      # waits for a password dialog.
+      - name: Package and sign
+        run: |
+          security create-keychain -p ci rdm-ci.keychain
+          kc=$(security list-keychains -d user | tr -d ' "' | grep rdm-ci)
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          packaging/macos/create-signing-identity.sh --keychain "$kc" --trust admin
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc" >/dev/null
+          packaging/macos/package.sh --keychain "$kc" --zip
+          # The second run must find the certificate and leave it alone.
+          packaging/macos/create-signing-identity.sh --keychain "$kc" --trust admin
+          "dist/RDMachine Server.app/Contents/MacOS/rdmachine-server" --version
+          dist/RDMachine.app/Contents/MacOS/rdmachine-client --version
+          dist/rdmachine-server.sh --version
+          codesign -d -r- "dist/RDMachine Server.app" 2>&1 | grep -q 'identifier "org.rdmachine.server" and certificate'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdmachine-macos-${{ matrix.runner }}
+          path: dist/*.zip
