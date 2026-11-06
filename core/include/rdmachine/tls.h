@@ -39,8 +39,9 @@ class TlsConnection {
   // Sends close_notify (best effort) and closes the socket. Idempotent.
   // Not thread-safe with Read/WriteAll; use Shutdown() from another thread.
   void Close();
-  // Shuts the socket down without touching TLS state, so that a Read()
-  // blocked on another thread returns. Safe to call from any thread.
+  // Shuts the socket's receiving side down without touching TLS state, so
+  // that a Read() blocked on another thread returns kClosed; writing still
+  // works. Safe to call from any thread.
   void Shutdown();
   // Server side: completes the TLS handshake of an accepted connection.
   bool ServerHandshake(int timeout_ms, std::string* error);

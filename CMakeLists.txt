@@ -20,9 +20,9 @@ if(APPLE)
 endif()
 
 option(RDM_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
-# The server and client need rdaccel's macOS backends; the protocol core does
-# not, so it also builds and tests on Linux CI.
-option(RDM_WITH_RDACCEL "Build rdaccel and the server/client" ${APPLE})
+# The server and client need rdaccel (macOS: system frameworks; Linux: FFmpeg,
+# X11 and PAM development packages). The protocol core does not.
+option(RDM_WITH_RDACCEL "Build rdaccel, the session library and the server/client" ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -57,7 +57,11 @@ if(RDM_WITH_RDACCEL)
   if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rdaccel/CMakeLists.txt)
     message(FATAL_ERROR "rdaccel submodule missing: run `git submodule update --init`")
   endif()
+  set(RDACCEL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(RDACCEL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(RDACCEL_INSTALL OFF CACHE BOOL "" FORCE)
   add_subdirectory(third_party/rdaccel EXCLUDE_FROM_ALL)
+  add_subdirectory(session)
   add_subdirectory(server)
   add_subdirectory(client)
 endif()
@@ -65,4 +69,7 @@ endif()
 if(RDM_BUILD_TESTS)
   enable_testing()
   add_subdirectory(core/tests)
+  if(RDM_WITH_RDACCEL)
+    add_subdirectory(session/tests)
+  endif()
 endif()

@@ -59,6 +59,12 @@ ServerSession::Output ServerSession::Handle(const Message& in) {
             return OnAuth(m);
           },
           [&](const SessionRequest& m) -> Output {
+            if (state_ == State::kInSession) {
+              // A new request replaces the running session, e.g. TCP after
+              // UDP did not get through (docs/protocol.md).
+              delegate_.EndSession();
+              state_ = State::kExpectSessionRequest;
+            }
             if (state_ != State::kExpectSessionRequest) return Fail("unexpected", "session_request not expected now");
             return OnSessionRequest(m);
           },

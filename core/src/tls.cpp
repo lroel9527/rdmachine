@@ -283,8 +283,9 @@ void TlsConnection::Close() {
 
 void TlsConnection::Shutdown() {
   // Only a syscall on the descriptor: safe from another thread while Read()
-  // is blocked, which then returns kClosed or kError.
-  if (impl_ && impl_->net.fd >= 0) ::shutdown(impl_->net.fd, SHUT_RDWR);
+  // is blocked, which then returns kClosed. The write side stays open so the
+  // owner can still send a last message (bye) before closing.
+  if (impl_ && impl_->net.fd >= 0) ::shutdown(impl_->net.fd, SHUT_RD);
 }
 
 bool TlsConnection::ServerHandshake(int timeout_ms, std::string* error) {

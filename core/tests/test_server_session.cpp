@@ -173,3 +173,20 @@ TEST_F(ServerSessionTest, StartSessionErrors) {
   EXPECT_EQ(ErrorCode(s.Handle(req)), "no_display");
   EXPECT_EQ(delegate_.ends, 0);
 }
+
+TEST_F(ServerSessionTest, SecondRequestReplacesSession) {
+  auto s = Make();
+  s.Handle(ClientHello{});
+  s.Handle(Password("alice", "secret"));
+  s.Handle(SessionRequest{});
+  const auto first_key = delegate_.last_secrets.key;
+  SessionRequest tcp;
+  tcp.transport = MediaTransport::kTcp;
+  auto out = s.Handle(tcp);
+  const auto& ready = std::get<SessionReady>(out.send.at(0));
+  EXPECT_EQ(ready.transport, MediaTransport::kTcp);
+  EXPECT_NE(ready.key, first_key);
+  EXPECT_EQ(delegate_.starts, 2);
+  EXPECT_EQ(delegate_.ends, 1);
+  EXPECT_EQ(s.state(), ServerSession::State::kInSession);
+}

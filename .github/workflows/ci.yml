@@ -6,23 +6,47 @@ on:
   pull_request:
 
 jobs:
-  core-linux:
-    # The protocol core has no platform code; test it with sanitizers.
+  linux:
+    # Everything but the AppKit window builds on Linux: the protocol core,
+    # and the session library, server and test client on rdaccel's Linux
+    # backends. The end-to-end tests capture an Xvfb screen.
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        sanitizer: ["address,undefined", "thread"]
-    name: core-linux (${{ matrix.sanitizer }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build pkg-config xvfb \
+            libavcodec-dev libavutil-dev libswscale-dev libx265-dev \
+            libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev libpam0g-dev
+      - name: Build (ASan + UBSan)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+          cmake --build build
+      - name: Test
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tools/lsan.supp
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build --output-on-failure
+      - name: Smoke test the binaries
+        env:
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tools/lsan.supp
+        run: xvfb-run -a -s "-screen 0 1280x800x24" tools/smoke_test.sh build/bin
+
+  core-tsan:
+    # The control server is multi-threaded; check the core for data races.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRDM_WITH_RDACCEL=OFF \
-            -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }}" -DCMAKE_C_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread" -DCMAKE_C_FLAGS="-fsanitize=thread"
           cmake --build build -j4
       - name: Test
         env:
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           TSAN_OPTIONS: halt_on_error=1
         run: ctest --test-dir build --output-on-failure

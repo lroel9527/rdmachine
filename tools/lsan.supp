@@ -1,0 +1,5 @@
+# Leaks inside system libraries rdaccel uses on Linux (not our code).
+leak:libx265
+leak:libX11
+leak:libavcodec
+leak:libavutil
