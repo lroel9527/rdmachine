@@ -3,12 +3,14 @@
 //
 //   rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]
 //                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
-//                     [--known-hosts=PATH]
+//                     [--known-hosts=PATH] [--clipboard=both|send|receive|off]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
 // --accept-new-host); it is then pinned in the known-hosts file. Exits 0
 // once --frames pictures arrived (default 1), 1 on failure or timeout.
+// On macOS the clipboard is shared while connected (--clipboard, default
+// both); other systems have no clipboard backend yet.
 #include <unistd.h>
 
 #include <algorithm>
@@ -26,6 +28,7 @@
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
+#include "rdmachine/session/system_clipboard.h"
 
 namespace {
 
@@ -60,7 +63,7 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
-               "                         [--known-hosts=PATH]\n");
+               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off]\n");
   return 2;
 }
 
@@ -108,6 +111,11 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--frames", &v)) want_frames = std::atoi(v.c_str());
     else if (Flag(a, "--seconds", &v)) seconds = std::atoi(v.c_str());
     else if (Flag(a, "--known-hosts", &v)) known_hosts_path = v;
+    else if (Flag(a, "--clipboard", &v)) {
+      auto m = rdm::ParseClipboardMode(v);
+      if (!m) return Usage();
+      opts.clipboard_mode = *m;
+    }
     else if (Flag(a, "--version", nullptr)) {
       std::printf("rdmachine-connect %s (protocol %d, rdaccel %s)\n", rdm::VersionString(), rdm::kProtocolVersion,
                   rda_version_string());
@@ -160,6 +168,8 @@ int main(int argc, char** argv) {
   opts.viewer.user = &stats;
   opts.viewer.on_stream_info = &OnStreamInfo;
   opts.viewer.on_frame = &OnFrame;
+  opts.clipboard = rdm::SystemClipboard();
+  opts.log = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
   opts.on_ended = [&](const std::string& reason) {
     std::fprintf(stderr, "session ended: %s\n", reason.c_str());
     stats.ended = true;

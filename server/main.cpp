@@ -2,7 +2,7 @@
 //
 //   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
-//                    [--fps=N] [--bitrate-kbps=N] [--fingerprint] [--version]
+//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--fingerprint] [--version]
 //
 // Listens for control connections (TLS 1.3, TCP --port) and serves one
 // session at a time over rdaccel (UDP --port, TCP fallback --port + 1).
@@ -11,6 +11,11 @@
 // prints a new one. The first run creates the server's identity in the
 // config directory; --fingerprint prints it for comparing with what clients
 // show.
+//
+// --clipboard shares the text clipboard with the client: both (default),
+// send (only from this computer to the client), receive (only from the
+// client) or off. View-only sessions never take the client's clipboard.
+// Only macOS has a clipboard backend so far.
 //
 // macOS needs two permissions for the program that runs this: Screen
 // Recording (capture) and Accessibility (input; without it sessions are
@@ -41,6 +46,7 @@
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/media_host.h"
 #include "rdmachine/session/system_auth.h"
+#include "rdmachine/session/system_clipboard.h"
 
 namespace {
 
@@ -81,7 +87,8 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
-               "                        [--fps=N] [--bitrate-kbps=N] [--fingerprint] [--version]\n");
+               "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
+               "                        [--fingerprint] [--version]\n");
   return 2;
 }
 
@@ -156,6 +163,10 @@ int main(int argc, char** argv) {
       mopts.fps = std::atoi(v.c_str());
     } else if (Flag(a, "--bitrate-kbps", &v)) {
       mopts.bitrate_bps = std::atoll(v.c_str()) * 1000;
+    } else if (Flag(a, "--clipboard", &v)) {
+      auto m = rdm::ParseClipboardMode(v);
+      if (!m) return Usage();
+      mopts.clipboard_mode = *m;
     } else if (Flag(a, "--fingerprint", nullptr)) {
       print_fingerprint = true;
     } else {
@@ -185,6 +196,7 @@ int main(int argc, char** argv) {
   mopts.udp_port = copts.port;
   mopts.tcp_port = static_cast<uint16_t>(copts.port + 1);
   mopts.log = &Log;
+  mopts.clipboard = rdm::SystemClipboard();
   rdm::MediaHost media(mopts);
   rdm::ControlServer server(media, *identity, copts);
   if (!server.Start(&error)) {

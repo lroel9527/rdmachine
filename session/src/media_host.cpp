@@ -50,6 +50,11 @@ void MediaHost::OnInput(void* user, const rda_input_event* ev) {
   if (self->injector_) rda_injector_inject(self->injector_, ev);
 }
 
+void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
+  auto* self = static_cast<MediaHost*>(user);
+  if (type == RDA_MSG_CLIPBOARD_TEXT && self->clipboard_) self->clipboard_->OnRemoteText(payload, n);
+}
+
 void MediaHost::OnState(void* user, rda_state state, rda_status reason) {
   auto* self = static_cast<MediaHost*>(user);
   switch (state) {
@@ -117,6 +122,25 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     }
   }
 
+  // Clipboard. A view-only client may still copy from this screen.
+  ClipboardMode clip_mode = options_.clipboard ? options_.clipboard_mode : ClipboardMode::kOff;
+  if (view_only && clip_mode != ClipboardMode::kOff) {
+    clip_mode = clip_mode == ClipboardMode::kReceive ? ClipboardMode::kOff : ClipboardMode::kSend;
+  }
+  if (clip_mode != ClipboardMode::kOff) {
+    ClipboardSync::Options so;
+    so.mode = clip_mode;
+    so.log = options_.log;
+    clipboard_ = std::make_unique<ClipboardSync>(
+        options_.clipboard,
+        [this](const std::string& text) {
+          rda_host* h = clipboard_host_.load();
+          return h && rda_host_send_message(h, RDA_MSG_CLIPBOARD_TEXT, reinterpret_cast<const uint8_t*>(text.data()),
+                                            text.size()) == RDA_OK;
+        },
+        so);
+  }
+
   // Transport.
   rda_transport* transport = nullptr;
   grant.transport = request.transport;
@@ -126,6 +150,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   if (ts != RDA_OK) {
     Log(std::string("cannot listen for media on port ") + std::to_string(grant.port) + ": " + rda_last_error());
     if (injector) rda_injector_destroy(injector);
+    clipboard_.reset();
     *error = "internal";
     return std::nullopt;
   }
@@ -143,6 +168,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   cfg.on_input = &MediaHost::OnInput;
   cfg.on_state = &MediaHost::OnState;
   cfg.on_error = &MediaHost::OnError;
+  cfg.on_message = &MediaHost::OnMessage;
   tokens_.Add(secrets.auth_token, Clock::now());
   injector_ = injector;
   rda_host* host = nullptr;
@@ -160,13 +186,19 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   if (!host) {
     injector_ = nullptr;
     if (injector) rda_injector_destroy(injector);
+    clipboard_.reset();
     tokens_.Consume(secrets.auth_token, Clock::now());
     *error = hs == RDA_ERR_PERMISSION ? "capture_denied" : "internal";
     return std::nullopt;
   }
   host_ = host;
+  if (clipboard_) {
+    clipboard_host_ = host;
+    clipboard_->Start();
+  }
   Log("session started on display " + std::to_string(request.display_index) + (view_only ? " (view only)" : "") +
-      ", media " + (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port));
+      ", media " + (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
+      ", clipboard " + ClipboardModeName(clip_mode));
   return grant;
 }
 
@@ -178,11 +210,14 @@ void MediaHost::EndSession() {
     host = host_;
     host_ = nullptr;
     if (!host) return;
+    if (clipboard_) clipboard_->Stop();  // its thread may be sending through the host
+    clipboard_host_ = nullptr;
     // Destroy the host under the lock so StartSession cannot bind the port
     // before it is free again.
     rda_host_destroy(host);
     injector = injector_;
     injector_ = nullptr;
+    clipboard_.reset();  // no on_message after rda_host_destroy
   }
   if (injector) rda_injector_destroy(injector);
   Log("session ended");

@@ -36,6 +36,7 @@
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
+#include "rdmachine/session/system_clipboard.h"
 
 namespace {
 
@@ -804,6 +805,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.viewer.on_stream_info = &OnStreamInfo;
   opts.viewer.on_frame = &OnFrame;
   opts.viewer.on_cursor = &OnCursor;
+  // Text copied on either Mac can be pasted on the other (both ways for now;
+  // a setting comes with the preferences window).
+  opts.clipboard = rdm::SystemClipboard();
+  opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
   opts.on_ended = [weakSelf, weakRemote](const std::string& reason) {
     NSString* why = NS(reason);

@@ -10,6 +10,7 @@
 
 #include <rdaccel/rdaccel.h>
 
+#include "rdmachine/clipboard_sync.h"
 #include "rdmachine/control_client.h"
 #include "rdmachine/session/known_hosts.h"
 
@@ -27,6 +28,12 @@ class RemoteSession {
   struct Options {
     ClientOptions control;    // request.transport is where it starts (UDP)
     rda_viewer_config viewer;  // the application's callbacks (rda_viewer_config_default first)
+    // Text clipboard shared with the server (docs/protocol.md, "剪贴板"); null
+    // = not shared. What is on the clipboard at connect time is sent too.
+    // Clipboard messages are then not passed to viewer.on_message.
+    std::shared_ptr<Clipboard> clipboard;
+    ClipboardMode clipboard_mode = ClipboardMode::kBoth;
+    std::function<void(const std::string&)> log;  // may be empty
     int udp_wait_ms = 4000;    // then fall back to TCP; 0 = no fallback
     // The session ended from the other side or the network: "server_closed",
     // "connection_lost", "media_lost", or the server's bye reason. Runs on
@@ -48,11 +55,21 @@ class RemoteSession {
  private:
   RemoteSession() = default;
   void KeepAlive();
+  // The viewer's callbacks go through these (user = this) so the session can
+  // take the clipboard messages; the rest are passed on to options_.viewer.
+  rda_viewer_config ViewerConfig();
+  static void OnStreamInfo(void* user, int32_t width, int32_t height);
+  static void OnFrame(void* user, const rda_image* bgra, const rda_rect* changed, size_t changed_count,
+                      const rda_frame_info* info);
+  static void OnCursor(void* user, const rda_cursor_state* state);
+  static void OnState(void* user, rda_state state, rda_status reason);
+  static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n);
 
   Options options_;
   std::unique_ptr<ClientConnection> control_;
   SessionReady session_;
   rda_viewer* viewer_ = nullptr;
+  std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};
   std::thread thread_;
 };

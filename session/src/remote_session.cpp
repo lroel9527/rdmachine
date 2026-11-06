@@ -68,6 +68,49 @@ bool AwaitReady(MessageChannel& ch, int timeout_ms, ConnectResult* result) {
 
 }  // namespace
 
+rda_viewer_config RemoteSession::ViewerConfig() {
+  const rda_viewer_config& app = options_.viewer;
+  rda_viewer_config c = app;
+  c.user = this;
+  c.on_stream_info = app.on_stream_info ? &RemoteSession::OnStreamInfo : nullptr;
+  c.on_frame = app.on_frame ? &RemoteSession::OnFrame : nullptr;
+  c.on_cursor = app.on_cursor ? &RemoteSession::OnCursor : nullptr;
+  c.on_state = app.on_state ? &RemoteSession::OnState : nullptr;
+  c.on_message = &RemoteSession::OnMessage;
+  return c;
+}
+
+void RemoteSession::OnStreamInfo(void* user, int32_t width, int32_t height) {
+  const auto& app = static_cast<RemoteSession*>(user)->options_.viewer;
+  app.on_stream_info(app.user, width, height);
+}
+
+void RemoteSession::OnFrame(void* user, const rda_image* bgra, const rda_rect* changed, size_t changed_count,
+                            const rda_frame_info* info) {
+  const auto& app = static_cast<RemoteSession*>(user)->options_.viewer;
+  app.on_frame(app.user, bgra, changed, changed_count, info);
+}
+
+void RemoteSession::OnCursor(void* user, const rda_cursor_state* state) {
+  const auto& app = static_cast<RemoteSession*>(user)->options_.viewer;
+  app.on_cursor(app.user, state);
+}
+
+void RemoteSession::OnState(void* user, rda_state state, rda_status reason) {
+  const auto& app = static_cast<RemoteSession*>(user)->options_.viewer;
+  app.on_state(app.user, state, reason);
+}
+
+void RemoteSession::OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
+  auto* self = static_cast<RemoteSession*>(user);
+  if (type == RDA_MSG_CLIPBOARD_TEXT && self->clipboard_) {
+    self->clipboard_->OnRemoteText(payload, n);
+    return;
+  }
+  const auto& app = self->options_.viewer;
+  if (app.on_message) app.on_message(app.user, type, payload, n);
+}
+
 std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResult* result) {
   *result = ConnectAndStartSession(options.control);
   if (!result->error.empty()) return nullptr;
@@ -76,11 +119,25 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
   s->options_ = std::move(options);
   s->control_ = std::move(result->connection);
   const int connect_ms = s->options_.control.timeout_ms;
+  if (s->options_.clipboard && s->options_.clipboard_mode != ClipboardMode::kOff) {
+    ClipboardSync::Options so;
+    so.mode = s->options_.clipboard_mode;
+    so.send_on_start = true;  // copy here, connect, paste there
+    so.log = s->options_.log;
+    RemoteSession* raw = s.get();
+    s->clipboard_ = std::make_unique<ClipboardSync>(
+        s->options_.clipboard,
+        [raw](const std::string& text) {
+          return rda_viewer_send_message(raw->viewer_, RDA_MSG_CLIPBOARD_TEXT,
+                                         reinterpret_cast<const uint8_t*>(text.data()), text.size()) == RDA_OK;
+        },
+        so);
+  }
 
   for (int attempt = 0;; ++attempt) {
     s->session_ = result->session;
     std::string error;
-    if (CreateSessionViewer(s->options_.control.host, s->session_, s->options_.viewer, &s->viewer_, &error) != RDA_OK) {
+    if (CreateSessionViewer(s->options_.control.host, s->session_, s->ViewerConfig(), &s->viewer_, &error) != RDA_OK) {
       result->error = "media_failed";
       result->detail = error;
       return nullptr;
@@ -107,6 +164,8 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     if (!AwaitReady(s->control_->channel(), connect_ms, result)) return nullptr;
   }
   result->session = s->session_;
+  // viewer_ stays the same from here on, so the clipboard thread may use it.
+  if (s->clipboard_) s->clipboard_->Start();
   s->thread_ = std::thread([raw = s.get()] { raw->KeepAlive(); });
   return s;
 }
@@ -155,6 +214,7 @@ void RemoteSession::KeepAlive() {
 }
 
 void RemoteSession::Close() {
+  if (clipboard_) clipboard_->Stop();  // before the viewer it sends through
   stop_ = true;
   if (thread_.joinable()) thread_.join();
   if (viewer_) {

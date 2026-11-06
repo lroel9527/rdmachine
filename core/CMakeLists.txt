@@ -11,7 +11,8 @@ add_library(rdm_core STATIC
   src/channel.cpp
   src/server_session.cpp
   src/control_server.cpp
-  src/control_client.cpp)
+  src/control_client.cpp
+  src/clipboard_sync.cpp)
 add_library(rdmachine::core ALIAS rdm_core)
 target_include_directories(rdm_core PUBLIC include)
 target_link_libraries(rdm_core

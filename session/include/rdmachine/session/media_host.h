@@ -2,13 +2,16 @@
 // The server's ServerDelegate: checks passwords with the system and runs one
 // rdaccel host per session (capture, encode, input injection), admitting only
 // the viewer that presents the session's one-time token.
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 
 #include <rdaccel/rdaccel.h>
 
 #include "rdmachine/auth_guards.h"
+#include "rdmachine/clipboard_sync.h"
 #include "rdmachine/server_session.h"
 
 namespace rdm {
@@ -24,6 +27,11 @@ struct MediaHostOptions {
   std::function<bool(const std::string& user, const std::string& password, std::string* error)> check_password;
   std::string pam_service;
   bool inject_input = true;  // false: every session is view-only
+  // Text clipboard shared with the client (docs/protocol.md, "剪贴板"); null =
+  // not shared. kSend = only from this computer to the client. View-only
+  // sessions never take the client's clipboard.
+  std::shared_ptr<Clipboard> clipboard;
+  ClipboardMode clipboard_mode = ClipboardMode::kBoth;
   int32_t fps = 0;           // 0 = rdaccel's default
   int64_t bitrate_bps = 0;   // 0 = rdaccel's default
   std::function<void(const std::string&)> log;  // may be empty
@@ -48,6 +56,7 @@ class MediaHost : public ServerDelegate {
   static void OnInput(void* user, const rda_input_event* ev);
   static void OnState(void* user, rda_state state, rda_status reason);
   static void OnError(void* user, rda_status status, const char* message);
+  static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n);
   void Log(const std::string& line);
 
   const MediaHostOptions options_;
@@ -55,6 +64,9 @@ class MediaHost : public ServerDelegate {
   std::mutex mu_;  // guards host_ and injector_ changes
   rda_host* host_ = nullptr;
   rda_injector* injector_ = nullptr;  // null for view-only sessions
+  // Set before the host exists, cleared after it is destroyed (as injector_).
+  std::unique_ptr<ClipboardSync> clipboard_;
+  std::atomic<rda_host*> clipboard_host_{nullptr};  // where clipboard_ sends
 };
 
 }  // namespace rdm

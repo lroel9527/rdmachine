@@ -139,12 +139,29 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 `{"type":"error","code":"<错误码>","message":"<给人看的说明，可选>"}`，发完关闭连接。
 
+## 剪贴板
+
+文本剪贴板不走控制连接，而是走画面连接上 rdaccel 的应用消息：类型 `RDA_MSG_CLIPBOARD_TEXT`（1），内容是 UTF-8 文本，不带结尾的 NUL。rdaccel 的应用消息可靠、有序、加密，和画面分开走，不会卡住画面。控制协议因此没有新消息，版本仍是 0。
+
+规则（两端相同）：
+
+- **什么时候发**：各自轮询本机剪贴板（macOS 的 `NSPasteboard.changeCount`，每 250 毫秒一次），内容变了就把纯文本发给对方。客户端连上时还会把当时剪贴板里的文本发一次（先复制、再连接、再粘贴）；服务端只发连上之后的变化。画面连接还没连通时发不出去，连通后补发最新的一次。
+- **收到之后**：写进本机剪贴板，替换原有内容。几条消息来不及写时只写最新的一条。
+- **不回传**：从对方收到的文本不会再发回去（记住最后一次收发的文本，并且用写入剪贴板时得到的 changeCount 区分“自己写的”和“用户复制的”），所以两端不会来回弹。
+- **不发**：空文本、非文本内容（图片、文件，以后再加）、密码管理器标记为 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的内容。
+- **大小**：超过 4 MiB 的文本两端都不发也不收（rdaccel 允许每条 16 MiB），只在日志里记一行。收到不合法的 UTF-8 直接丢弃。
+- **方向**：每端可以设 `both`（默认）、`send`（只从本机发给对方）、`receive`（只收对方的）或 `off`，和 NoMachine 的四档对应。服务端：`rdmachine-server --clipboard=…`；命令行客户端：`rdmachine-connect --clipboard=…`；Mac 客户端暂时固定 `both`，设置项等偏好设置窗口一起做。
+- **只看不控**：`view_only` 的会话（客户端请求或服务端 `--view-only`）里，服务端不接收客户端的剪贴板，只把自己的发出去。不想让对方拿到被控端剪贴板时用 `--clipboard=receive` 或 `off`。
+- 被拒收的方向静默丢弃，不回错误，也不断开连接。
+
+实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`，平台无关，Linux 上用内存剪贴板测试），macOS 剪贴板在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
+
 ## 实现
 
 - 服务端：`ServerSession`（`core/include/rdmachine/server_session.h`）是不做 I/O 的状态机，按上面的规则处理每条消息；平台相关的部分（PAM 校验密码、启动 rdaccel Host）由 `ServerDelegate` 提供。`ControlServer` 在 TLS 上为每个连接开一个线程驱动它，负责 15 秒无流量发 `ping`、45 秒收不到消息发 `bye`（`idle_timeout`）后关闭。
 - 限流、配对码、一次性令牌：`core/include/rdmachine/auth_guards.h`。账号密码和配对码的失败都计入同一个按 IP 的限流。
 - 客户端：`ConnectAndStartSession`（`core/include/rdmachine/control_client.h`）走完 TLS、指纹确认、`hello`、`auth`、`session_request`，成功后把控制连接留给调用方在会话期间使用。除了上表的错误码，客户端还会报 `connect_failed`、`untrusted_server`、`timeout`、`connection_closed`、`bad_message`。
-- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、配对码、忙、坏帧、空闲超时）。
+- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、配对码、忙、坏帧、空闲超时）；剪贴板见 `core/tests/test_clipboard_sync.cpp` 和 `session/tests/test_media_e2e.cpp`（Xvfb 上两端真实连接，内存剪贴板）。
 
 ## 错误码
 

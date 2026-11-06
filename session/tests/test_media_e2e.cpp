@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <thread>
 
+#include "fake_clipboard.h"
 #include "rdmachine/control_server.h"
 #include "rdmachine/session/media_host.h"
 #include "rdmachine/session/remote_session.h"
@@ -72,6 +73,8 @@ class MediaE2E : public ::testing::Test {
       *error = "bad_credentials";
       return false;
     };
+    mo.clipboard = server_clipboard_;
+    Configure(mo);
     media_ = std::make_unique<MediaHost>(mo);
     std::string error;
     static const TlsIdentity id = *GenerateTlsIdentity("xvfb", &error);
@@ -98,7 +101,10 @@ class MediaE2E : public ::testing::Test {
     return o;
   }
 
+  virtual void Configure(MediaHostOptions&) {}
+
   uint16_t media_port_ = 0;
+  std::shared_ptr<FakeClipboard> server_clipboard_ = std::make_shared<FakeClipboard>();
   std::unique_ptr<MediaHost> media_;
   std::unique_ptr<ControlServer> server_;
 };
@@ -179,4 +185,59 @@ TEST_F(MediaE2E, ServerStopEndsClientSession) {
   EXPECT_TRUE(WaitFor([&] { return ended.load(); }));
   EXPECT_EQ(reason, "server_shutdown");
   EXPECT_FALSE(media_->session_running());
+}
+
+namespace {
+
+// Sessions that may control the server (so the clipboard goes both ways);
+// XTest on the Xvfb screen.
+class ClipboardE2E : public MediaE2E {
+ protected:
+  void Configure(MediaHostOptions& mo) override { mo.inject_input = true; }
+};
+
+}  // namespace
+
+TEST_F(ClipboardE2E, TextGoesBothWays) {
+  Frames frames;
+  auto client_clipboard = std::make_shared<FakeClipboard>();
+  client_clipboard->Copy("copied before connecting");
+  auto o = Options(&frames);
+  o.clipboard = client_clipboard;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+
+  // What the client had is pasted on the server.
+  EXPECT_TRUE(WaitFor([&] { return server_clipboard_->text() == "copied before connecting"; }));
+  // Server to client, including non-ASCII text.
+  server_clipboard_->Copy("服务端的文字 ✓");
+  EXPECT_TRUE(WaitFor([&] { return client_clipboard->text() == "服务端的文字 ✓"; }));
+  // Client to server again.
+  client_clipboard->Copy("client again");
+  EXPECT_TRUE(WaitFor([&] { return server_clipboard_->text() == "client again"; }));
+  // No echo: each side wrote exactly what it received.
+  std::this_thread::sleep_for(500ms);
+  EXPECT_EQ(server_clipboard_->writes(), 2);
+  EXPECT_EQ(client_clipboard->writes(), 1);
+  s->Close();
+}
+
+TEST_F(MediaE2E, ViewOnlySessionDoesNotTakeTheClientsClipboard) {
+  // The fixture's server does not inject input, so every session is view
+  // only: the server's clipboard still reaches the client.
+  Frames frames;
+  auto client_clipboard = std::make_shared<FakeClipboard>();
+  client_clipboard->Copy("from the client");
+  auto o = Options(&frames);
+  o.clipboard = client_clipboard;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  server_clipboard_->Copy("from the server");
+  EXPECT_TRUE(WaitFor([&] { return client_clipboard->text() == "from the server"; }));
+  client_clipboard->Copy("from the client, later");
+  std::this_thread::sleep_for(700ms);
+  EXPECT_EQ(server_clipboard_->text(), "from the server");
+  EXPECT_EQ(server_clipboard_->writes(), 0);
 }
