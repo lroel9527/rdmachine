@@ -85,8 +85,8 @@ jobs:
         run: |
           ./build/bin/rdm_session_tests --gtest_filter='MediaE2E.*'
           dir=$(mktemp -d)
-          ./build/bin/rdmachine-server --port=4400 --pairing-code --view-only --config-dir="$dir/s" > "$dir/log" 2>&1 < /dev/zero &
+          sleep 60 | ./build/bin/rdmachine-server --port=4400 --pairing-code --view-only --config-dir="$dir/s" > "$dir/log" 2>&1 &
           sleep 3; cat "$dir/log"
           code=$(grep -o "pairing code: [0-9]*" "$dir/log" | awk '{print $3}')
           RDMACHINE_CONFIG_DIR="$dir/c" ./build/bin/rdmachine-connect 127.0.0.1:4400 --code="$code" --accept-new-host --seconds=20
-          kill %1 || true; cat "$dir/log"
+          pkill -f "rdmachine-server --port=4400" || true; sleep 1; cat "$dir/log"
