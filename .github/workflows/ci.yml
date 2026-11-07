@@ -82,7 +82,7 @@ jobs:
         env:
           RDM_TEST_CAPTURE: "1"
         run: |
-          ./build/bin/rdm_session_tests --gtest_filter='MediaE2E.*'
+          ./build/bin/rdm_session_tests --gtest_filter='MediaE2E.*:ClipboardE2E.*'
           dir=$(mktemp -d)
           sleep 60 | ./build/bin/rdmachine-server --port=4400 --pairing-code --view-only --config-dir="$dir/s" > "$dir/log" 2>&1 &
           sleep 3; cat "$dir/log"
