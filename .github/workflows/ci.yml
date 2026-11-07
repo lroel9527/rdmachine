@@ -75,3 +75,19 @@ jobs:
             ./build/bin/$b --version
             if arch -x86_64 /usr/bin/true 2>/dev/null; then arch -x86_64 ./build/bin/$b --version; fi
           done
+      - name: Screen capture end to end
+        # Hosted macOS runners allow screen capture (checked 2026-11-07), so
+        # the capture tests and a real server/client run are required here.
+        timeout-minutes: 5
+        env:
+          RDM_TEST_CAPTURE: "1"
+        run: |
+          ./build/bin/rdm_session_tests --gtest_filter='MediaE2E.*'
+          dir=$(mktemp -d)
+          sleep 60 | ./build/bin/rdmachine-server --port=4400 --pairing-code --view-only --config-dir="$dir/s" > "$dir/log" 2>&1 &
+          sleep 3; cat "$dir/log"
+          code=$(grep -o "pairing code: [0-9]*" "$dir/log" | awk '{print $3}')
+          status=0
+          RDMACHINE_CONFIG_DIR="$dir/c" ./build/bin/rdmachine-connect 127.0.0.1:4400 --code="$code" --accept-new-host --seconds=20 || status=$?
+          pkill -f "rdmachine-server --port=4400" || true; sleep 1; cat "$dir/log"
+          exit $status
