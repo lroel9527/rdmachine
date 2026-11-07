@@ -75,3 +75,18 @@ jobs:
             ./build/bin/$b --version
             if arch -x86_64 /usr/bin/true 2>/dev/null; then arch -x86_64 ./build/bin/$b --version; fi
           done
+      - name: Screen capture end to end (informational)
+        # Needs the Screen Recording permission, which hosted runners may not
+        # grant; a failure here does not fail the PR.
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          RDM_TEST_CAPTURE: "1"
+        run: |
+          ./build/bin/rdm_session_tests --gtest_filter='MediaE2E.*'
+          dir=$(mktemp -d)
+          ./build/bin/rdmachine-server --port=4400 --pairing-code --view-only --config-dir="$dir/s" > "$dir/log" 2>&1 < /dev/zero &
+          sleep 3; cat "$dir/log"
+          code=$(grep -o "pairing code: [0-9]*" "$dir/log" | awk '{print $3}')
+          RDMACHINE_CONFIG_DIR="$dir/c" ./build/bin/rdmachine-connect 127.0.0.1:4400 --code="$code" --accept-new-host --seconds=20
+          kill %1 || true; cat "$dir/log"
