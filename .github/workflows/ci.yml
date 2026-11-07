@@ -96,8 +96,9 @@ jobs:
       # waits for a password dialog.
       - name: Package and sign
         run: |
-          security create-keychain -p ci rdm-ci.keychain
-          kc=$(security list-keychains -d user | tr -d ' "' | grep rdm-ci)
+          set -x
+          kc=$RUNNER_TEMP/rdm-ci.keychain-db
+          security create-keychain -p ci "$kc"
           security set-keychain-settings "$kc"
           security unlock-keychain -p ci "$kc"
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
