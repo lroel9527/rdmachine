@@ -50,7 +50,7 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
 2. **编译并打包**（通用二进制，Intel 和 Apple Silicon 通用）：
 
    ```bash
-   packaging/macos/package.sh --build --zip
+   packaging/macos/package.sh --build --zip --dmg
    ```
 
    产物在 `dist/`：
@@ -62,10 +62,11 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
    | `rdmachine-server.sh` | 在终端里启动服务端，输出和配对码显示在终端 |
    | `rdmachine-connect` | 命令行测试客户端 |
    | `rdmachine-版本号-macos.zip` | 以上全部，拷到另一台 Mac 用 |
+   | `RDMachine-版本号.dmg` | 安装盘：打开后把两个应用拖进“应用程序”，命令行工具在 `Command Line Tools` 文件夹里 |
 
    已经编译过的话去掉 `--build`，默认从 `build/bin` 取二进制（`--build-dir` 可改）。`--identity -` 是临时签名，只适合一次性试试。
 
-3. **拷到另一台 Mac**：用 U 盘、`scp` 或 AirDrop 拷 zip 过去解压，可以放进“应用程序”文件夹。自签证书不被别的 Mac 认可，第一次打开会被拦下：macOS 12–14 在应用上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。也可以直接 `xattr -dr com.apple.quarantine RDMachine*.app` 去掉下载标记。
+3. **拷到另一台 Mac**：用 U 盘、`scp` 或 AirDrop 拷 dmg 过去，打开后把应用拖进“应用程序”；或者拷 zip 过去解压。自签证书不被别的 Mac 认可，第一次打开会被拦下：macOS 12–14 在应用上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。也可以直接 `xattr -dr com.apple.quarantine RDMachine*.app` 去掉下载标记。
 
 ## 试用（M0）
 

@@ -7,7 +7,7 @@
 #   dist/rdmachine-connect       command-line test client
 #
 #   packaging/macos/package.sh [--build-dir DIR] [--out DIR] [--identity NAME]
-#                              [--keychain PATH] [--build] [--zip]
+#                              [--keychain PATH] [--build] [--zip] [--dmg]
 #
 #   --build-dir  CMake build directory with bin/ (default: build)
 #   --out        output directory, replaced on each run (default: dist)
@@ -18,6 +18,9 @@
 #   --keychain   keychain holding the identity (default: the search list)
 #   --build      configure and build a universal Release build first
 #   --zip        also write dist/rdmachine-VERSION-macos.zip
+#   --dmg        also write dist/RDMachine-VERSION.dmg: both apps next to an
+#                Applications shortcut (drag to install), the command-line
+#                tools in a folder of their own; signed like the apps
 #
 # Bundle identifiers are fixed (org.rdmachine.client, org.rdmachine.server).
 # Together with the fixed certificate they are what macOS remembers the
@@ -32,6 +35,7 @@ identity="rdmachine Local Signing"
 keychain=""
 do_build=0
 do_zip=0
+do_dmg=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --build-dir) build_dir=${2:?}; shift 2 ;;
@@ -44,7 +48,8 @@ while [ $# -gt 0 ]; do
     --keychain=*) keychain=${1#*=}; shift ;;
     --build) do_build=1; shift ;;
     --zip) do_zip=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --dmg) do_dmg=1; shift ;;
+    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -120,4 +125,22 @@ if [ "$do_zip" = 1 ]; then
   ditto -c -k --sequesterRsrc --keepParent "$stage/rdmachine-$version" "$zip"
   rm -rf "$stage"
   echo "$zip"
+fi
+
+if [ "$do_dmg" = 1 ]; then
+  dmg="$out/RDMachine-$version.dmg"
+  stage=$(mktemp -d)
+  ditto "$out/RDMachine.app" "$stage/RDMachine.app"
+  ditto "$out/RDMachine Server.app" "$stage/RDMachine Server.app"
+  ln -s /Applications "$stage/Applications"
+  # rdmachine-server.sh finds the server app in /Applications once it is
+  # installed, so the tools need not sit next to it.
+  mkdir "$stage/Command Line Tools"
+  ditto "$out/rdmachine-server.sh" "$stage/Command Line Tools/rdmachine-server.sh"
+  ditto "$out/rdmachine-connect" "$stage/Command Line Tools/rdmachine-connect"
+  hdiutil create -quiet -volname "RDMachine $version" -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg"
+  rm -rf "$stage"
+  codesign "${sign_args[@]}" "$dmg"
+  hdiutil verify -quiet "$dmg"
+  echo "$dmg"
 fi
