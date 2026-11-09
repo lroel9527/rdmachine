@@ -5,9 +5,9 @@
 
 namespace rdm {
 
-// The PAM service used when none is configured: "login" on Linux. On macOS
-// "authorization" (Open Directory, the same check as unlocking a settings
-// pane).
+// The PAM service used when none is configured: "login" on Linux, and
+// "chkpasswd" on macOS (Open Directory; the "authorization" and "checkpw"
+// stacks there use use_first_pass and reject every password).
 const char* DefaultPamService();
 
 // Runs pam_authenticate and pam_acct_mgmt for `username` with `password`.

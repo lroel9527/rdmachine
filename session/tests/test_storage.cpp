@@ -7,6 +7,7 @@
 
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/known_hosts.h"
+#include "rdmachine/session/system_auth.h"
 
 using namespace rdm;
 
@@ -94,4 +95,19 @@ TEST(KnownHosts, KeepsComments) {
   ASSERT_TRUE(text);
   EXPECT_NE(text->find("# my servers"), std::string::npos);
   EXPECT_EQ(k.Lookup("mac:4100"), "sha256:aa");
+}
+
+// Real PAM, no mocks. The right-password check needs an account's password,
+// so it runs only when RDM_TEST_PAM_USER and RDM_TEST_PAM_PASSWORD are set
+// (run it by hand on a Mac: this is how the "authorization" service was
+// found to reject every password).
+TEST(SystemAuth, RealPamWithDefaultService) {
+  const char* user = std::getenv("RDM_TEST_PAM_USER");
+  const char* password = std::getenv("RDM_TEST_PAM_PASSWORD");
+  if (!user || !password) GTEST_SKIP() << "set RDM_TEST_PAM_USER and RDM_TEST_PAM_PASSWORD";
+  std::string error, detail;
+  EXPECT_TRUE(rdm::CheckSystemPassword(rdm::DefaultPamService(), user, password, &error, &detail))
+      << error << ": " << detail;
+  EXPECT_FALSE(rdm::CheckSystemPassword(rdm::DefaultPamService(), user, std::string(password) + "x", &error, &detail));
+  EXPECT_EQ(error, "bad_credentials") << detail;
 }
