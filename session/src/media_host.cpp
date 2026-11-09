@@ -36,6 +36,19 @@ bool MediaHost::session_running() {
   return host_ != nullptr;
 }
 
+MediaHostStatus MediaHost::Status() {
+  std::lock_guard lock(mu_);
+  MediaHostStatus s = status_;
+  if (!host_) return s;
+  s.media_connected = media_connected_;
+  s.stats.struct_size = sizeof(s.stats);
+  if (rda_host_get_stats(host_, &s.stats) != RDA_OK) s.stats = rda_host_stats{};
+  char enc[64] = {};
+  rda_host_encoder_name(host_, enc, sizeof enc);
+  s.encoder = enc;
+  return s;
+}
+
 int MediaHost::OnAuth(void* user, const uint8_t* token, size_t n) {
   auto* self = static_cast<MediaHost*>(user);
   const bool ok = self->tokens_.Consume(std::span<const uint8_t>(token, token ? n : 0), Clock::now());
@@ -59,9 +72,11 @@ void MediaHost::OnState(void* user, rda_state state, rda_status reason) {
   auto* self = static_cast<MediaHost*>(user);
   switch (state) {
     case RDA_STATE_CONNECTED:
+      self->media_connected_ = true;
       self->Log("media connected");
       break;
     case RDA_STATE_DISCONNECTED:
+      self->media_connected_ = false;
       self->Log(std::string("media disconnected: ") + rda_status_str(reason));
       break;
     default:
@@ -75,7 +90,7 @@ void MediaHost::OnError(void* user, rda_status status, const char* message) {
 }
 
 std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& request, const SessionSecrets& secrets,
-                                                    std::string* error) {
+                                                    const SessionOrigin& origin, std::string* error) {
   std::lock_guard lock(mu_);
   if (host_) {
     *error = "busy";
@@ -192,6 +207,15 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     return std::nullopt;
   }
   host_ = host;
+  status_ = MediaHostStatus{};
+  status_.running = true;
+  status_.origin = origin;
+  status_.transport = grant.transport;
+  status_.view_only = injector == nullptr;
+  status_.started = std::chrono::steady_clock::now();
+  status_.width = infos[static_cast<size_t>(request.display_index)].width;
+  status_.height = infos[static_cast<size_t>(request.display_index)].height;
+  media_connected_ = false;
   if (clipboard_) {
     clipboard_host_ = host;
     clipboard_->Start();
@@ -210,6 +234,8 @@ void MediaHost::EndSession() {
     host = host_;
     host_ = nullptr;
     if (!host) return;
+    status_ = MediaHostStatus{};
+    media_connected_ = false;
     if (clipboard_) clipboard_->Stop();  // its thread may be sending through the host
     clipboard_host_ = nullptr;
     // Destroy the host under the lock so StartSession cannot bind the port

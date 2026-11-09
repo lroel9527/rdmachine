@@ -24,10 +24,11 @@
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>@MIN_MACOS@</string>
-	<!-- No Dock icon or menu: the server has no window of its own (the menu
-	     bar app comes in M1). It is an app bundle so that macOS records the
-	     Screen Recording and Accessibility permissions against this bundle
-	     and its signature instead of against Terminal. -->
+	<!-- A menu bar app: an icon in the menu bar (status, pairing codes,
+	     settings, the statistics panel), no Dock icon or main menu. It is an
+	     app bundle so that macOS records the Screen Recording and
+	     Accessibility permissions against this bundle and its signature
+	     instead of against Terminal. -->
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

@@ -19,7 +19,7 @@ class FakeDelegate : public ServerDelegate {
     return false;
   }
   std::optional<SessionGrant> StartSession(const SessionRequest& request, const SessionSecrets& secrets,
-                                           std::string* error) override {
+                                           const SessionOrigin& origin, std::string* error) override {
     std::lock_guard lock(mu);
     if (busy) {
       *error = "busy";
@@ -33,6 +33,7 @@ class FakeDelegate : public ServerDelegate {
     ++starts;
     last_request = request;
     last_secrets = secrets;
+    last_origin = origin;
     SessionGrant g;
     g.transport = request.transport;
     g.port = 4100;
@@ -50,6 +51,7 @@ class FakeDelegate : public ServerDelegate {
   int starts = 0, ends = 0;
   SessionRequest last_request;
   SessionSecrets last_secrets;
+  SessionOrigin last_origin;
 };
 
 }  // namespace rdm::testing

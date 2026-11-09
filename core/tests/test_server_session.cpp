@@ -68,6 +68,9 @@ TEST_F(ServerSessionTest, HappyPathWithPassword) {
   EXPECT_NE(ready.key, ready.auth_token);
   EXPECT_TRUE(delegate_.last_request.view_only);
   EXPECT_EQ(s.state(), ServerSession::State::kInSession);
+  EXPECT_EQ(delegate_.last_origin.method, AuthMethod::kPassword);
+  EXPECT_EQ(delegate_.last_origin.username, "alice");
+  EXPECT_EQ(delegate_.last_origin.peer_ip, "10.0.0.2");
 
   out = s.Handle(Ping{7});
   EXPECT_EQ(std::get<Pong>(out.send.at(0)).id, 7);
@@ -155,6 +158,9 @@ TEST_F(ServerSessionTest, PairingCode) {
   EXPECT_EQ(AsAuthResult(s.Handle(Code("12345678"))).error, "code_expired");  // none issued
   std::string code = pairing_.Issue(now_);
   EXPECT_TRUE(AsAuthResult(s.Handle(Code(code))).ok);
+  s.Handle(SessionRequest{});
+  EXPECT_EQ(delegate_.last_origin.method, AuthMethod::kPairingCode);
+  EXPECT_EQ(delegate_.last_origin.username, "");
 }
 
 TEST_F(ServerSessionTest, PairingCodeOff) {

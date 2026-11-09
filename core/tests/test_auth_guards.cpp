@@ -49,8 +49,10 @@ TEST(PairingCodes, IssuesEightDigits) {
 TEST(PairingCodes, SingleUseAndTolerantOfGrouping) {
   PairingCodes p;
   std::string code = p.Issue(T0);
+  EXPECT_EQ(p.remaining(T0 + 1min), 4min);
   std::string grouped = code.substr(0, 4) + " - " + code.substr(4);
   EXPECT_EQ(p.Check(grouped, T0 + 1s), PairingCodes::Result::kOk);
+  EXPECT_EQ(p.remaining(T0 + 2s), Clock::duration::zero());  // used
   EXPECT_EQ(p.Check(code, T0 + 2s), PairingCodes::Result::kNone);
 }
 
@@ -59,6 +61,7 @@ TEST(PairingCodes, Expires) {
   std::string code = p.Issue(T0);
   EXPECT_EQ(p.Check(code, T0 + 5min), PairingCodes::Result::kExpired);
   EXPECT_FALSE(p.active(T0 + 5min));
+  EXPECT_EQ(p.remaining(T0 + 5min), Clock::duration::zero());
 }
 
 TEST(PairingCodes, VoidAfterThreeWrongAttempts) {

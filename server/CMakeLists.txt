@@ -1,7 +1,10 @@
-# Server (phase 1: command line on macOS; also builds on Linux for tests).
-# The menu bar app around it comes with M1's login-window work.
-add_executable(rdmachine-server main.cpp)
+# Server. On macOS a menu bar app (status, pairing codes, settings, a
+# statistics panel for debugging); --headless and Linux: command line only.
+add_executable(rdmachine-server main.cpp server_runtime.cpp)
 target_link_libraries(rdmachine-server PRIVATE rdmachine::session)
 if(APPLE)
-  target_link_libraries(rdmachine-server PRIVATE "-framework CoreFoundation")
+  target_sources(rdmachine-server PRIVATE mac_app.mm)
+  set_source_files_properties(mac_app.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+  target_link_libraries(rdmachine-server PRIVATE "-framework CoreFoundation" "-framework AppKit"
+                        "-framework ApplicationServices" "-framework CoreGraphics")
 endif()

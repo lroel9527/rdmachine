@@ -36,6 +36,13 @@ class ControlServer {
 
   // The code to show on the server's screen; empty if pairing is off.
   std::string IssuePairingCode();
+  // Time left on the last issued code; zero once it was used, voided or
+  // expired (or pairing is off).
+  Clock::duration PairingCodeRemaining();
+
+  // Closes every open control connection, which ends a running session
+  // (the client sees the connection drop). The server keeps listening.
+  void CloseConnections();
 
   // Number of connections being served (for tests and status).
   int active_connections() const { return active_.load(); }

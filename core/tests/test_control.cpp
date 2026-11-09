@@ -217,6 +217,30 @@ TEST_F(ControlTest, StopWithOpenSession) {
   EXPECT_EQ(delegate_.ends, 1);
 }
 
+TEST_F(ControlTest, CloseConnectionsEndsSessionAndKeepsListening) {
+  auto r = ConnectAndStartSession(Options());
+  ASSERT_EQ(r.error, "") << r.detail;
+  {
+    std::lock_guard lock(delegate_.mu);
+    EXPECT_EQ(delegate_.last_origin.peer_ip, "127.0.0.1");
+    EXPECT_EQ(delegate_.last_origin.username, "alice");
+  }
+  server_->CloseConnections();
+  for (int i = 0; i < 100 && server_->active_connections() > 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(server_->active_connections(), 0);
+  {
+    std::lock_guard lock(delegate_.mu);
+    EXPECT_EQ(delegate_.ends, 1);
+  }
+  // The client notices: its connection is gone.
+  auto got = r.connection->channel().Receive(2000);
+  EXPECT_EQ(got.status, MessageChannel::Received::kClosed);
+  // And the next client gets in.
+  auto again = ConnectAndStartSession(Options());
+  EXPECT_EQ(again.error, "") << again.detail;
+}
+
 TEST(ControlServer, PortInUse) {
   FakeDelegate d;
   ControlServerOptions opts;

@@ -4,6 +4,8 @@
 # so the Linux CI can test it end to end against an X server (Xvfb).
 add_library(rdm_session STATIC
   src/config_store.cpp
+  src/live_stats.cpp
+  src/server_settings.cpp
   src/known_hosts.cpp
   src/system_auth.cpp
   src/media_host.cpp

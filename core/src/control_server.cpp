@@ -38,6 +38,15 @@ void ControlServer::Stop() {
   listener_.reset();
 }
 
+Clock::duration ControlServer::PairingCodeRemaining() {
+  return options_.offer_pairing_codes ? pairing_.remaining(Clock::now()) : Clock::duration::zero();
+}
+
+void ControlServer::CloseConnections() {
+  std::lock_guard lock(conns_mu_);
+  for (TlsConnection* c : conns_) c->Shutdown();
+}
+
 uint16_t ControlServer::port() const { return listener_ ? listener_->port() : 0; }
 
 std::string ControlServer::IssuePairingCode() {

@@ -1,5 +1,6 @@
 add_executable(rdm_session_tests
   test_storage.cpp
+  test_live_stats.cpp
   test_media_e2e.cpp)
 if(APPLE)
   # The real NSPasteboard; the macOS CI runner has a pasteboard server.
@@ -9,4 +10,7 @@ endif()
 target_link_libraries(rdm_session_tests PRIVATE rdmachine::session GTest::gtest_main)
 target_include_directories(rdm_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests)
 include(GoogleTest)
-gtest_discover_tests(rdm_session_tests DISCOVERY_TIMEOUT 30)
+# One at a time: the end-to-end tests capture the real screen (two
+# ScreenCaptureKit streams starting at once can hang on macOS) and the Mac
+# clipboard tests share the system pasteboard.
+gtest_discover_tests(rdm_session_tests DISCOVERY_TIMEOUT 30 PROPERTIES RESOURCE_LOCK rdm_screen_and_pasteboard)

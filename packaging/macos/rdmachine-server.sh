@@ -1,6 +1,7 @@
 #!/bin/bash
 # Starts "RDMachine Server.app" from Terminal, with the server's output and
-# input (Enter for a new pairing code) in this window. Takes the same options
+# input (Enter for a new pairing code) in this window; the menu bar icon
+# appears as when the app is opened from Finder. Takes the same options
 # as rdmachine-server, for example:
 #
 #   ./rdmachine-server.sh --pairing-code

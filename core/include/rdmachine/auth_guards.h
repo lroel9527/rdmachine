@@ -57,6 +57,8 @@ class PairingCodes {
   void Revoke();
   Result Check(const std::string& code, Clock::time_point now);
   bool active(Clock::time_point now);
+  // Time left on the current code; zero once used, voided or expired.
+  Clock::duration remaining(Clock::time_point now);
 
  private:
   const Clock::duration lifetime_;

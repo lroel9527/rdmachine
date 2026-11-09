@@ -7,6 +7,7 @@
 
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/known_hosts.h"
+#include "rdmachine/session/server_settings.h"
 #include "rdmachine/session/system_auth.h"
 
 using namespace rdm;
@@ -110,4 +111,39 @@ TEST(SystemAuth, RealPamWithDefaultService) {
       << error << ": " << detail;
   EXPECT_FALSE(rdm::CheckSystemPassword(rdm::DefaultPamService(), user, std::string(password) + "x", &error, &detail));
   EXPECT_EQ(error, "bad_credentials") << detail;
+}
+
+TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
+  TempDir t;
+  std::string error;
+  ServerSettings s;
+  ASSERT_TRUE(LoadServerSettings(t.path(), &s, &error)) << error;
+  EXPECT_EQ(s, ServerSettings{});  // no file yet
+
+  s.port = 4200;
+  s.offer_pairing_codes = false;
+  s.view_only = true;
+  s.clipboard_mode = ClipboardMode::kSend;
+  s.fps = 30;
+  s.bitrate_kbps = 6000;
+  s.show_stats_overlay = true;
+  ASSERT_TRUE(SaveServerSettings(t.path() + "/new", s, &error)) << error;
+  EXPECT_EQ(Mode(ServerSettingsPath(t.path() + "/new")), 0600);
+  ServerSettings back;
+  ASSERT_TRUE(LoadServerSettings(t.path() + "/new", &back, &error)) << error;
+  EXPECT_EQ(back, s);
+
+  // Out of range or wrong type: that key keeps its default; unknown keys are ignored.
+  ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()),
+                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "x": 1})",
+                               &error));
+  ASSERT_TRUE(LoadServerSettings(t.path(), &back, &error)) << error;
+  EXPECT_EQ(back.port, kDefaultPort);
+  EXPECT_EQ(back.fps, 0);
+  EXPECT_EQ(back.clipboard_mode, ClipboardMode::kBoth);
+  EXPECT_TRUE(back.view_only);
+
+  // Not JSON: an error, so the app does not overwrite what the user wrote.
+  ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()), "port = 4200", &error));
+  EXPECT_FALSE(LoadServerSettings(t.path(), &back, &error));
 }

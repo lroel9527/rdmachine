@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 Mac ↔ Mac（Intel 和 Apple Silicon，macOS 12.3+）。现在处于 M0（可用原型）开发中：命令行服务端和 Mac 客户端窗口已经有了，还没在真机上验证过。
+第一阶段只支持 Mac ↔ Mac（Intel 和 Apple Silicon，macOS 12.3+）。现在处于 M0（可用原型）开发中：服务端（菜单栏应用，也能在命令行跑）和 Mac 客户端窗口已经有了，还没在两台真机之间验证过。
 
 ## 文档
 
@@ -58,7 +58,7 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
    | 文件 | 用途 |
    | --- | --- |
    | `RDMachine.app` | 客户端 |
-   | `RDMachine Server.app` | 服务端（没有 Dock 图标，M1 再做菜单栏界面） |
+   | `RDMachine Server.app` | 服务端（菜单栏应用，没有 Dock 图标） |
    | `rdmachine-server.sh` | 在终端里启动服务端，输出和配对码显示在终端 |
    | `rdmachine-connect` | 命令行测试客户端 |
    | `rdmachine-版本号-macos.zip` | 以上全部，拷到另一台 Mac 用 |
@@ -69,12 +69,22 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
 
 ## 试用（M0）
 
-被控的 Mac 上用脚本启动服务端：
+被控的 Mac 上双击打开 `RDMachine Server.app`，菜单栏会出现一个显示器图标，点开可以：
+
+- 看当前状态：监听的端口、有没有人连着（谁、从哪个地址、走 UDP 还是 TCP、连了多久），以及“断开当前连接”；
+- 生成配对码（自动复制，5 分钟内有效，用一次就失效）、复制本机指纹；
+- 看屏幕录制和辅助功能权限是否已经允许，没允许的话点一下打开对应的系统设置；
+- 打开“显示调试浮窗”：屏幕右上角一个半透明的小窗，每秒刷新连接时长、通道（UDP/TCP）、分辨率、帧率（发送/采集）、码率、带宽估计、延迟、丢包/重传和编码器。浮窗可以拖动，右键可以隐藏。它会跟着画面一起传到客户端，在客户端那边调试时也能看到；
+- “设置…”：端口、是否允许配对码、只看不控、剪贴板方向、帧率和码率上限、调试浮窗。保存在 `~/Library/Application Support/rdmachine/server-settings.json`；改了端口等设置后服务会重新监听，正在进行的连接会断开。
+
+想在终端里看日志，用脚本启动（菜单栏图标照样有）：
 
 ```bash
 ./dist/rdmachine-server.sh --pairing-code
 # 打印本机指纹和一个 8 位配对码；按回车换新的配对码，Ctrl-C 停止
 ```
+
+命令行参数（`--port`、`--view-only`、`--fps` 等）只对这一次运行生效，优先于保存的设置；`--headless` 不显示菜单栏图标。
 
 第一次运行时 macOS 会请求权限，在“系统设置 → 隐私与安全性”里给 **RDMachine Server** 打开“屏幕录制”（画面）和“辅助功能”（键鼠控制，没有的话只能看不能控），然后 Ctrl-C 停掉再启动一次。脚本通过 `open` 启动应用，所以权限记在 RDMachine Server 名下，而不是“终端”名下。没有打包时也可以直接跑 `./build/bin/rdmachine-server --pairing-code`，这时权限要授给“终端”。
 

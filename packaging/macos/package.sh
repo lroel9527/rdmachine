@@ -2,7 +2,7 @@
 # Packages the macOS build into signed app bundles:
 #
 #   dist/RDMachine.app           the client (rdmachine-client)
-#   dist/RDMachine Server.app    the server (rdmachine-server), no Dock icon
+#   dist/RDMachine Server.app    the server (rdmachine-server), a menu bar app
 #   dist/rdmachine-server.sh     starts the server app from Terminal
 #   dist/rdmachine-connect       command-line test client
 #

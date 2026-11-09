@@ -23,6 +23,14 @@ struct SessionGrant {
   std::vector<DisplayInfo> displays;
 };
 
+// Who a session is for, as the control connection saw it (for status
+// displays and logs; not used for any security decision).
+struct SessionOrigin {
+  std::string peer_ip;
+  AuthMethod method = AuthMethod::kPassword;
+  std::string username;  // empty for pairing-code logins
+};
+
 // What the platform provides (on macOS: PAM and the rdaccel host).
 class ServerDelegate {
  public:
@@ -35,7 +43,7 @@ class ServerDelegate {
   // registers the token for on_auth). On failure sets an error code:
   // no_display, capture_denied, busy, internal.
   virtual std::optional<SessionGrant> StartSession(const SessionRequest& request, const SessionSecrets& secrets,
-                                                   std::string* error) = 0;
+                                                   const SessionOrigin& origin, std::string* error) = 0;
   // The control connection of a started session ended.
   virtual void EndSession() = 0;
 };
@@ -71,6 +79,7 @@ class ServerSession {
   ServerDelegate& delegate_;
   ServerGuards guards_;
   std::string peer_ip_;
+  SessionOrigin origin_;  // filled at login
   std::function<Clock::time_point()> now_;
   State state_ = State::kExpectHello;
 };

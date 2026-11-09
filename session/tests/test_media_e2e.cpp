@@ -122,8 +122,23 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
   EXPECT_EQ(frames.width, s->session().displays[0].width);
   EXPECT_TRUE(media_->session_running());
+
+  // What the menu bar app shows.
+  MediaHostStatus st = media_->Status();
+  EXPECT_TRUE(st.running);
+  EXPECT_TRUE(st.media_connected);
+  EXPECT_EQ(st.origin.username, "alice");
+  EXPECT_EQ(st.origin.peer_ip, "127.0.0.1");
+  EXPECT_EQ(st.transport, MediaTransport::kUdp);
+  EXPECT_TRUE(st.view_only);  // inject_input = false
+  EXPECT_EQ(st.width, s->session().displays[0].width);
+  EXPECT_GT(st.stats.frames_encoded, 0u);
+  EXPECT_GT(st.stats.packets_sent, 0u);  // UDP measures the path (rdaccel 1.1)
+  EXPECT_FALSE(st.encoder.empty());
+
   s->Close();
   EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
+  EXPECT_FALSE(media_->Status().running);
 }
 
 TEST_F(MediaE2E, PictureArrivesOverTcp) {

@@ -76,6 +76,12 @@ bool PairingCodes::active(Clock::time_point now) {
   return !code_.empty() && now < expires_;
 }
 
+Clock::duration PairingCodes::remaining(Clock::time_point now) {
+  std::lock_guard lock(mu_);
+  if (code_.empty() || now >= expires_) return Clock::duration::zero();
+  return expires_ - now;
+}
+
 PairingCodes::Result PairingCodes::Check(const std::string& code, Clock::time_point now) {
   std::lock_guard lock(mu_);
   if (code_.empty()) return Result::kNone;

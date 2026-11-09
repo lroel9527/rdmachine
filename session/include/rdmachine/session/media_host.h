@@ -3,6 +3,7 @@
 // rdaccel host per session (capture, encode, input injection), admitting only
 // the viewer that presents the session's one-time token.
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -37,6 +38,19 @@ struct MediaHostOptions {
   std::function<void(const std::string&)> log;  // may be empty
 };
 
+// A snapshot of the running session, for status displays.
+struct MediaHostStatus {
+  bool running = false;          // an rdaccel host exists (session started)
+  bool media_connected = false;  // the viewer's picture connection is up
+  SessionOrigin origin;
+  MediaTransport transport = MediaTransport::kUdp;
+  bool view_only = false;
+  std::chrono::steady_clock::time_point started{};
+  int32_t width = 0, height = 0;  // the shared display, pixels
+  std::string encoder;            // empty before the first frame
+  rda_host_stats stats{};         // cumulative; zero when not running
+};
+
 class MediaHost : public ServerDelegate {
  public:
   explicit MediaHost(MediaHostOptions options);
@@ -45,11 +59,13 @@ class MediaHost : public ServerDelegate {
   std::string ServerName() override;
   bool CheckPassword(const std::string& username, const std::string& password, std::string* error) override;
   std::optional<SessionGrant> StartSession(const SessionRequest& request, const SessionSecrets& secrets,
-                                           std::string* error) override;
+                                           const SessionOrigin& origin, std::string* error) override;
   void EndSession() override;
 
   // Whether an rdaccel host is running (for tests and status).
   bool session_running();
+  // Thread-safe; cheap enough to poll a few times a second.
+  MediaHostStatus Status();
 
  private:
   static int OnAuth(void* user, const uint8_t* token, size_t n);
@@ -67,6 +83,8 @@ class MediaHost : public ServerDelegate {
   // Set before the host exists, cleared after it is destroyed (as injector_).
   std::unique_ptr<ClipboardSync> clipboard_;
   std::atomic<rda_host*> clipboard_host_{nullptr};  // where clipboard_ sends
+  MediaHostStatus status_;  // guarded by mu_; stats filled in by Status()
+  std::atomic<bool> media_connected_{false};
 };
 
 }  // namespace rdm

@@ -12,7 +12,7 @@ port=$((43000 + RANDOM % 2000))
 trap 'kill $server_pid 2>/dev/null || true; rm -rf "$dir"' EXIT
 
 # stdin stays open (the server reads Enter for new pairing codes).
-sleep 120 | "$bin/rdmachine-server" --port=$port --pairing-code --view-only --config-dir="$dir/server" \
+sleep 120 | "$bin/rdmachine-server" --port=$port --pairing-code --view-only --headless --config-dir="$dir/server" \
   >"$dir/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 50); do grep -q "pairing code:" "$dir/server.log" 2>/dev/null && break; sleep 0.1; done

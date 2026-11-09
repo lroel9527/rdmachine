@@ -144,6 +144,9 @@ ServerSession::Output ServerSession::OnAuth(const Auth& m) {
     return {{Refused(error)}, false};
   }
   guards_.limiter->RecordSuccess(peer_ip_);
+  origin_.peer_ip = peer_ip_;
+  origin_.method = m.method;
+  origin_.username = m.method == AuthMethod::kPassword ? m.username : std::string();
   state_ = State::kExpectSessionRequest;
   AuthResult r;
   r.ok = true;
@@ -155,7 +158,7 @@ ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
   SessionSecrets secrets;
   if (!RandomBytes(secrets.key) || !RandomBytes(secrets.auth_token)) return Fail("internal", "random source failed");
   std::string error;
-  std::optional<SessionGrant> grant = delegate_.StartSession(m, secrets, &error);
+  std::optional<SessionGrant> grant = delegate_.StartSession(m, secrets, origin_, &error);
   if (!grant) {
     std::fill(secrets.key.begin(), secrets.key.end(), 0);
     return Fail(error.empty() ? "internal" : error.c_str(), "could not start the session");

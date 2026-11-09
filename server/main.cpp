@@ -2,7 +2,14 @@
 //
 //   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
-//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--fingerprint] [--version]
+//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--headless]
+//                    [--fingerprint] [--version]
+//
+// On macOS it puts an icon in the menu bar: connection status, pairing codes,
+// the fingerprint, disconnect, settings and a floating statistics panel for
+// debugging (server/mac_app.mm). --headless runs without it, as on Linux.
+// Settings live in <config dir>/server-settings.json (the menu bar app edits
+// them); the options above override them for one run.
 //
 // Listens for control connections (TLS 1.3, TCP --port) and serves one
 // session at a time over rdaccel (UDP --port, TCP fallback --port + 1).
@@ -41,12 +48,13 @@
 
 #include <rdaccel/rdaccel.h>
 
-#include "rdmachine/control_server.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
-#include "rdmachine/session/media_host.h"
 #include "rdmachine/session/system_auth.h"
-#include "rdmachine/session/system_clipboard.h"
+#include "server_runtime.h"
+#if defined(__APPLE__)
+#include "mac_app.h"
+#endif
 
 namespace {
 
@@ -88,7 +96,7 @@ int Usage() {
                "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
                "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
-               "                        [--fingerprint] [--version]\n");
+               "                        [--headless] [--fingerprint] [--version]\n");
   return 2;
 }
 
@@ -132,10 +140,10 @@ void WaitForSignal() {
 }  // namespace
 
 int main(int argc, char** argv) {
-  rdm::ControlServerOptions copts;
-  rdm::MediaHostOptions mopts;
+  rdm::ServerRuntime::Options ropts;
+  rdm::SettingsOverrides& ov = ropts.overrides;
   std::string config_dir = rdm::DefaultConfigDir();
-  bool print_fingerprint = false, issue_code = false;
+  bool print_fingerprint = false, issue_code = false, headless = false;
   std::string v;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
@@ -146,34 +154,36 @@ int main(int argc, char** argv) {
     } else if (Flag(a, "--port", &v)) {
       const int p = std::atoi(v.c_str());
       if (p <= 0 || p >= 65535) return Usage();
-      copts.port = static_cast<uint16_t>(p);
+      ov.port = static_cast<uint16_t>(p);
     } else if (Flag(a, "--bind", &v)) {
-      copts.bind_address = v;
+      ropts.bind_address = v;
     } else if (Flag(a, "--pairing-code", nullptr)) {
       issue_code = true;
     } else if (Flag(a, "--no-pairing", nullptr)) {
-      copts.offer_pairing_codes = false;
+      ov.offer_pairing_codes = false;
     } else if (Flag(a, "--view-only", nullptr)) {
-      mopts.inject_input = false;
+      ov.view_only = true;
     } else if (Flag(a, "--pam-service", &v)) {
-      mopts.pam_service = v;
+      ropts.pam_service = v;
     } else if (Flag(a, "--config-dir", &v)) {
       config_dir = v;
     } else if (Flag(a, "--fps", &v)) {
-      mopts.fps = std::atoi(v.c_str());
+      ov.fps = std::atoi(v.c_str());
     } else if (Flag(a, "--bitrate-kbps", &v)) {
-      mopts.bitrate_bps = std::atoll(v.c_str()) * 1000;
+      ov.bitrate_kbps = std::atoi(v.c_str());
     } else if (Flag(a, "--clipboard", &v)) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();
-      mopts.clipboard_mode = *m;
+      ov.clipboard_mode = *m;
+    } else if (Flag(a, "--headless", nullptr)) {
+      headless = true;
     } else if (Flag(a, "--fingerprint", nullptr)) {
       print_fingerprint = true;
     } else {
       return Usage();
     }
   }
-  if (issue_code && !copts.offer_pairing_codes) return Usage();
+  if (issue_code && ov.offer_pairing_codes == false) return Usage();
 
   std::string error;
   auto identity = rdm::LoadOrCreateServerIdentity(config_dir, HostName(), &error);
@@ -192,30 +202,44 @@ int main(int argc, char** argv) {
   pthread_sigmask(SIG_BLOCK, &stop, nullptr);
 #endif
   rda_set_log(&RdaLog, nullptr, RDA_LOG_WARN);
-  mopts.server_name = HostName();
-  mopts.udp_port = copts.port;
-  mopts.tcp_port = static_cast<uint16_t>(copts.port + 1);
-  mopts.log = &Log;
-  mopts.clipboard = rdm::SystemClipboard();
-  rdm::MediaHost media(mopts);
-  rdm::ControlServer server(media, *identity, copts);
-  if (!server.Start(&error)) {
+  ropts.config_dir = config_dir;
+  ropts.server_name = HostName();
+  ropts.log = &Log;
+  rdm::ServerRuntime runtime(ropts, *identity);
+  if (!runtime.Start(&error)) {
     std::fprintf(stderr, "rdmachine-server: %s\n", error.c_str());
+#if defined(__APPLE__)
+    if (!headless) rdm::ShowStartupError(error);
+#endif
     return 1;
   }
-  Log("rdmachine-server " + std::string(rdm::VersionString()) + " listening on port " + std::to_string(server.port()) +
-      " as " + rdm::CurrentUserName());
+  Log("rdmachine-server " + std::string(rdm::VersionString()) + " on port " + std::to_string(runtime.port()) + " as " +
+      rdm::CurrentUserName());
   Log("fingerprint: " + rdm::FormatFingerprint(fingerprint));
+  if (const std::string o = ov.Describe(); !o.empty()) Log("command line overrides the saved settings: " + o);
   if (issue_code) {
-    Log("pairing code: " + server.IssuePairingCode() + " (valid 5 minutes; press Enter for a new one)");
-    std::thread([&server] {
+    Log("pairing code: " + runtime.IssuePairingCode() + " (valid 5 minutes; press Enter for a new one)");
+    std::thread([&runtime] {
       std::string line;
-      while (std::getline(std::cin, line)) Log("pairing code: " + server.IssuePairingCode());
+      while (std::getline(std::cin, line)) Log("pairing code: " + runtime.IssuePairingCode());
     }).detach();
   }
 
+#if defined(__APPLE__)
+  if (!headless) {
+    rdm::MenuBarAppInfo info;
+    info.fingerprint = rdm::FormatFingerprint(fingerprint);
+    info.user = rdm::CurrentUserName();
+    info.version = rdm::VersionString();
+    rdm::RunMenuBarApp(runtime, info);  // until Quit, SIGINT or SIGTERM
+  } else {
+    WaitForSignal();
+  }
+#else
+  (void)headless;
   WaitForSignal();
+#endif
   Log("shutting down");
-  server.Stop();
+  runtime.Stop();
   return 0;
 }
