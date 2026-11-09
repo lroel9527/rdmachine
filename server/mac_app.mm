@@ -158,7 +158,9 @@ static NSArray<NSString*>* StatsKeys() {
     [self setValue:(port ? [NSString stringWithFormat:@"等待连接 · 端口 %u", port] : @"服务未运行") row:0];
   } else {
     [self setValue:[NSString stringWithFormat:@"%@%@%@", PeerText(st), st.media_connected ? @"" : @" · 等待画面",
-                                              st.view_only ? @" · 只看" : @""]
+                                              st.input_unavailable ? @" · 只看（缺辅助功能权限）"
+                                              : st.view_only       ? @" · 只看"
+                                                                   : @""]
                row:0];
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - st.started);
     [self setValue:HMS(secs) row:1];
@@ -413,6 +415,9 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     [self add:[NSString stringWithFormat:@"已连接：%@ · %@ · %@", PeerText(st),
                                          st.transport == rdm::MediaTransport::kUdp ? @"UDP" : @"TCP", HMS(secs)]
         action:nullptr];
+    if (st.input_unavailable) {
+      [self add:@"这次连接只能看不能控：没有辅助功能权限" action:@selector(openAccessibility:)];
+    }
     [self add:@"断开当前连接" action:@selector(disconnect:)];
   } else {
     [self add:@"无连接" action:nullptr];
@@ -437,11 +442,15 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 
   [menu addItem:NSMenuItem.separatorItem];
   const bool capture = CGPreflightScreenCaptureAccess();
-  const bool access = AXIsProcessTrusted();
+  // The same check rdaccel makes before it injects input.
+  const bool input = CGPreflightPostEventAccess();
   [self add:(capture ? @"屏幕录制：已允许" : @"屏幕录制：未允许（点此打开系统设置）")
       action:(capture ? nullptr : @selector(openScreenRecording:))];
-  [self add:(access ? @"辅助功能：已允许" : @"辅助功能：未允许，只能看不能控（点此打开系统设置）")
-      action:(access ? nullptr : @selector(openAccessibility:))];
+  [self add:(input ? @"辅助功能：已允许" : @"辅助功能：未允许，只能看不能控（点此打开系统设置）")
+      action:(input ? nullptr : @selector(openAccessibility:))];
+  if (!capture || !input) {
+    [self add:@"    在系统设置里打开 RDMachine Server 的开关；下次连接还不行就退出重开" action:nullptr];
+  }
 
   [menu addItem:NSMenuItem.separatorItem];
   NSMenuItem* overlay = [self add:@"显示调试浮窗" action:@selector(toggleStats:)];
@@ -478,6 +487,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 }
 
 - (void)openAccessibility:(id)sender {
+  CGRequestPostEventAccess();  // adds the app to the list (asks once)
   [NSWorkspace.sharedWorkspace
       openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
 }
@@ -549,6 +559,13 @@ void RunMenuBarApp(ServerRuntime& runtime, const MenuBarAppInfo& info) {
       dispatch_resume(src);
       sources.push_back(src);
     }
+
+    // Ask for both permissions up front. Without a request macOS neither
+    // shows a prompt nor lists the app under Privacy & Security, so there
+    // would be no switch to turn on; input would silently be refused and
+    // every session view-only. Each request prompts only once per app.
+    if (!CGPreflightScreenCaptureAccess()) CGRequestScreenCaptureAccess();
+    if (!CGPreflightPostEventAccess()) CGRequestPostEventAccess();
 
     RDMMenuBarController* controller = [[RDMMenuBarController alloc] initWithRuntime:&runtime info:info];
     [NSApp run];

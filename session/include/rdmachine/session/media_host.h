@@ -44,7 +44,9 @@ struct MediaHostStatus {
   bool media_connected = false;  // the viewer's picture connection is up
   SessionOrigin origin;
   MediaTransport transport = MediaTransport::kUdp;
-  bool view_only = false;
+  bool view_only = false;          // in effect (asked for, or no input injection)
+  bool input_unavailable = false;  // control was wanted but input injection failed
+                                   // (on macOS: no Accessibility permission)
   std::chrono::steady_clock::time_point started{};
   int32_t width = 0, height = 0;  // the shared display, pixels
   std::string encoder;            // empty before the first frame

@@ -131,6 +131,7 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   EXPECT_EQ(st.origin.peer_ip, "127.0.0.1");
   EXPECT_EQ(st.transport, MediaTransport::kUdp);
   EXPECT_TRUE(st.view_only);  // inject_input = false
+  EXPECT_FALSE(st.input_unavailable);  // view only by choice, not for want of permission
   EXPECT_EQ(st.width, s->session().displays[0].width);
   EXPECT_GT(st.stats.frames_encoded, 0u);
   EXPECT_GT(st.stats.packets_sent, 0u);  // UDP measures the path (rdaccel 1.1)

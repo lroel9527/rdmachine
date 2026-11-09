@@ -212,6 +212,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   status_.origin = origin;
   status_.transport = grant.transport;
   status_.view_only = injector == nullptr;
+  status_.input_unavailable = !view_only && injector == nullptr;
   status_.started = std::chrono::steady_clock::now();
   status_.width = infos[static_cast<size_t>(request.display_index)].width;
   status_.height = infos[static_cast<size_t>(request.display_index)].height;
