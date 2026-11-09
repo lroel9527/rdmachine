@@ -1,6 +1,6 @@
 // The real macOS clipboard (NSPasteboard) behind SystemClipboard(). Runs on
-// the macOS CI runner; keeps and restores whatever text was on the
-// clipboard so running it locally does not lose what you copied.
+// any Mac with a logged-in session; keeps and restores whatever text was
+// on the clipboard so running it does not lose what you copied.
 #import <AppKit/AppKit.h>
 #include <gtest/gtest.h>
 

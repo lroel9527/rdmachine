@@ -1,6 +1,6 @@
 // The whole session over loopback: ControlServer + MediaHost capturing a real
-// X display, RemoteSession receiving pictures. Needs an X server (CI runs it
-// under xvfb-run); skipped without DISPLAY.
+// X display, RemoteSession receiving pictures. On Linux it needs an X server
+// (run it under xvfb-run); skipped without DISPLAY.
 #include <gtest/gtest.h>
 #include <unistd.h>
 

@@ -1,7 +1,7 @@
 # Session library: everything between the protocol core and a user interface
 # that needs rdaccel or the OS (PAM login, the rdaccel host and viewer, the
 # server identity and the client's known hosts). Plain C++ on macOS and Linux,
-# so the Linux CI can test it end to end against an X server (Xvfb).
+# so it can also be tested end to end on Linux against an X server (Xvfb).
 add_library(rdm_session STATIC
   src/config_store.cpp
   src/live_stats.cpp

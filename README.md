@@ -24,7 +24,7 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-除了 Mac 客户端窗口，其余部分也能在 Linux 上构建和测试（CI 就是这样跑的）。需要 FFmpeg、X11 和 PAM 的开发包：
+除了 Mac 客户端窗口，其余部分也能在 Linux 上构建和测试。需要 FFmpeg、X11 和 PAM 的开发包：
 
 ```bash
 sudo apt-get install ninja-build pkg-config xvfb libavcodec-dev libavutil-dev libswscale-dev libx265-dev \

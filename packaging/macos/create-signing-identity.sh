@@ -14,7 +14,7 @@
 #   --keychain  keychain to import into (default: the login keychain)
 #   --trust     how to trust the certificate for code signing: "user" (default,
 #               asks for your password in a dialog), "admin" (system-wide, uses
-#               sudo, works without a GUI, e.g. on CI) or "none"
+#               sudo, works without a GUI, e.g. over SSH) or "none"
 #
 # Running it again with the same name does nothing. Keep the certificate:
 # deleting it and making a new one means granting the permissions again. To
