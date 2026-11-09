@@ -12,7 +12,11 @@ namespace rdm {
 
 const char* DefaultPamService() {
 #if defined(__APPLE__)
-  return "authorization";
+  // Not "authorization" or "checkpw": on macOS those stacks run
+  // pam_opendirectory with use_first_pass and never call the conversation,
+  // so even the right password fails with PAM_AUTH_ERR (seen on a real Mac).
+  // "chkpasswd" checks the password against Open Directory and works.
+  return "chkpasswd";
 #else
   return "login";
 #endif
@@ -70,7 +74,16 @@ bool CheckSystemPassword(const std::string& service, const std::string& username
     if (detail) *detail = "pam_start failed";
     return false;
   }
+#if defined(__APPLE__)
+  // Modules configured with use_first_pass / try_first_pass read the
+  // password from PAM_AUTHTOK instead of asking through the conversation.
+  // OpenPAM lets the application set it; Linux-PAM refuses (PAM_BAD_ITEM)
+  // and its modules use the conversation anyway.
+  ret = pam_set_item(pamh, PAM_AUTHTOK, password.c_str());
+  if (ret == PAM_SUCCESS) ret = pam_authenticate(pamh, PAM_DISALLOW_NULL_AUTHTOK);
+#else
   ret = pam_authenticate(pamh, PAM_DISALLOW_NULL_AUTHTOK);
+#endif
   if (ret == PAM_SUCCESS) ret = pam_acct_mgmt(pamh, PAM_DISALLOW_NULL_AUTHTOK);
   const bool ok = ret == PAM_SUCCESS;
   if (!ok) {
