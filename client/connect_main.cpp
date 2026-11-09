@@ -4,6 +4,7 @@
 //   rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]
 //                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
+//                     [--save-frame=PATH.bmp]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -15,6 +16,8 @@
 // --click=X,Y moves the server's pointer to pixel (X, Y) of the shared
 // display and clicks the left button once the pictures arrived, then waits
 // two seconds: for checking input end to end without the window.
+// --save-frame=PATH.bmp writes the last picture received (after the
+// click, if any): what a client would show.
 #include <unistd.h>
 
 #include <algorithm>
@@ -24,8 +27,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <rdaccel/rdaccel.h>
 
@@ -40,7 +45,27 @@ struct Stats {
   std::atomic<int> frames{0};
   std::atomic<int> width{0}, height{0};
   std::atomic<bool> ended{false};
+  // --save-frame: the latest picture, tightly packed BGRA.
+  bool keep_last = false;
+  std::mutex mu;
+  std::vector<uint8_t> last;
+  int32_t last_w = 0, last_h = 0;
 };
+
+// A 32-bit BMP, top-down: readable by Preview and `sips` with no library.
+bool WriteBmp(const std::string& path, const std::vector<uint8_t>& bgra, int32_t w, int32_t h) {
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return false;
+  const uint32_t pixels = static_cast<uint32_t>(w) * static_cast<uint32_t>(h) * 4, offset = 14 + 40;
+  auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+  auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+  std::fwrite("BM", 1, 2, f);
+  u32(offset + pixels); u32(0); u32(offset);
+  u32(40); u32(static_cast<uint32_t>(w)); u32(static_cast<uint32_t>(-h)); u16(1); u16(32);
+  u32(0); u32(pixels); u32(2835); u32(2835); u32(0); u32(0);
+  const bool ok = std::fwrite(bgra.data(), 1, pixels, f) == pixels;
+  return std::fclose(f) == 0 && ok;
+}
 
 void OnStreamInfo(void* user, int32_t w, int32_t h) {
   auto* s = static_cast<Stats*>(user);
@@ -48,8 +73,18 @@ void OnStreamInfo(void* user, int32_t w, int32_t h) {
   s->height = h;
 }
 
-void OnFrame(void* user, const rda_image*, const rda_rect*, size_t, const rda_frame_info*) {
-  ++static_cast<Stats*>(user)->frames;
+void OnFrame(void* user, const rda_image* img, const rda_rect*, size_t, const rda_frame_info*) {
+  auto* s = static_cast<Stats*>(user);
+  if (s->keep_last && img && img->data) {
+    std::lock_guard lock(s->mu);
+    s->last_w = img->width;
+    s->last_h = img->height;
+    s->last.resize(static_cast<size_t>(img->width) * img->height * 4);
+    for (int32_t y = 0; y < img->height; ++y)
+      std::memcpy(s->last.data() + static_cast<size_t>(y) * img->width * 4, img->data + static_cast<size_t>(y) * img->stride,
+                  static_cast<size_t>(img->width) * 4);
+  }
+  ++s->frames;
 }
 
 bool Flag(const char* arg, const char* name, std::string* value) {
@@ -67,7 +102,7 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
-               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]\n");
+               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH]\n");
   return 2;
 }
 
@@ -105,6 +140,7 @@ int main(int argc, char** argv) {
   bool accept_new = false;
   int want_frames = 1, seconds = 20;
   int click_x = -1, click_y = -1;
+  std::string save_frame;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -116,6 +152,7 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--frames", &v)) want_frames = std::atoi(v.c_str());
     else if (Flag(a, "--seconds", &v)) seconds = std::atoi(v.c_str());
     else if (Flag(a, "--known-hosts", &v)) known_hosts_path = v;
+    else if (Flag(a, "--save-frame", &v)) save_frame = v;
     else if (Flag(a, "--click", &v)) {
       if (std::sscanf(v.c_str(), "%d,%d", &click_x, &click_y) != 2 || click_x < 0 || click_y < 0) return Usage();
     }
@@ -172,6 +209,7 @@ int main(int argc, char** argv) {
       changed);
 
   Stats stats;
+  stats.keep_last = !save_frame.empty();
   rda_viewer_config_default(&opts.viewer);
   opts.viewer.user = &stats;
   opts.viewer.on_stream_info = &OnStreamInfo;
@@ -227,6 +265,14 @@ int main(int argc, char** argv) {
     std::printf("clicked at %d,%d\n", click_x, click_y);
     std::fflush(stdout);
     std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+  if (!save_frame.empty()) {
+    std::lock_guard lock(stats.mu);
+    if (stats.last.empty() || !WriteBmp(save_frame, stats.last, stats.last_w, stats.last_h)) {
+      std::fprintf(stderr, "could not write %s\n", save_frame.c_str());
+    } else {
+      std::printf("saved the last picture (%dx%d) to %s\n", stats.last_w, stats.last_h, save_frame.c_str());
+    }
   }
   session->Close();
   return stats.frames >= want_frames ? 0 : 1;

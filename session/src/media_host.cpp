@@ -178,6 +178,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   cfg.display_index = request.display_index;
   cfg.encryption_key = secrets.key.data();  // copied by rdaccel
   cfg.keep_serving = 0;                      // one viewer per session
+  // The server's own menu bar menu, statistics panel and dialogs are part
+  // of the desktop being shared: without this macOS capture leaves them
+  // out, and a remote user clicks into a menu they cannot see.
+  cfg.capture_own_windows = 1;
   cfg.user = this;
   cfg.on_auth = &MediaHost::OnAuth;
   cfg.on_input = &MediaHost::OnInput;
