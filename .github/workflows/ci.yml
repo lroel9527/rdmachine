@@ -91,3 +91,27 @@ jobs:
           RDMACHINE_CONFIG_DIR="$dir/c" ./build/bin/rdmachine-connect 127.0.0.1:4400 --code="$code" --accept-new-host --seconds=20 || status=$?
           pkill -f "rdmachine-server --port=4400" || true; sleep 1; cat "$dir/log"
           exit $status
+      # Packaging as on a developer Mac: a self-signed certificate made by
+      # create-signing-identity.sh, here in a throwaway keychain so nothing
+      # waits for a password dialog.
+      - name: Package and sign
+        run: |
+          set -x
+          kc=$RUNNER_TEMP/rdm-ci.keychain-db
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          packaging/macos/create-signing-identity.sh --keychain "$kc" --trust admin
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc" >/dev/null
+          packaging/macos/package.sh --keychain "$kc" --zip
+          # The second run must find the certificate and leave it alone.
+          packaging/macos/create-signing-identity.sh --keychain "$kc" --trust admin
+          "dist/RDMachine Server.app/Contents/MacOS/rdmachine-server" --version
+          dist/RDMachine.app/Contents/MacOS/rdmachine-client --version
+          dist/rdmachine-server.sh --version
+          codesign -d -r- "dist/RDMachine Server.app" 2>&1 | grep 'identifier "org.rdmachine.server" and certificate'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdmachine-macos
+          path: dist/*.zip
