@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # Phase 1 targets macOS 12.3+ so the 2016 Intel MacBook Pro (macOS 12) can be
-# tested. rdaccel 1.0.0 still assumes macOS 14 in one place
-# (lroel9527/rdaccel#39); until that lands, binaries run only on macOS 14+.
+# tested. rdaccel supports 12.3 from 1.0.1 (lroel9527/rdaccel#39).
 # Set before project() so it also applies to the rdaccel submodule.
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
