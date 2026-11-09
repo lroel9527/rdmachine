@@ -3,7 +3,7 @@
 //
 //   rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]
 //                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
-//                     [--known-hosts=PATH] [--clipboard=both|send|receive|off]
+//                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -11,6 +11,10 @@
 // once --frames pictures arrived (default 1), 1 on failure or timeout.
 // On macOS the clipboard is shared while connected (--clipboard, default
 // both); other systems have no clipboard backend yet.
+//
+// --click=X,Y moves the server's pointer to pixel (X, Y) of the shared
+// display and clicks the left button once the pictures arrived, then waits
+// two seconds: for checking input end to end without the window.
 #include <unistd.h>
 
 #include <algorithm>
@@ -63,7 +67,7 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
-               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off]\n");
+               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]\n");
   return 2;
 }
 
@@ -100,6 +104,7 @@ int main(int argc, char** argv) {
   std::string target, user, code, known_hosts_path = rdm::DefaultConfigDir() + "/known_hosts", v;
   bool accept_new = false;
   int want_frames = 1, seconds = 20;
+  int click_x = -1, click_y = -1;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -111,6 +116,9 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--frames", &v)) want_frames = std::atoi(v.c_str());
     else if (Flag(a, "--seconds", &v)) seconds = std::atoi(v.c_str());
     else if (Flag(a, "--known-hosts", &v)) known_hosts_path = v;
+    else if (Flag(a, "--click", &v)) {
+      if (std::sscanf(v.c_str(), "%d,%d", &click_x, &click_y) != 2 || click_x < 0 || click_y < 0) return Usage();
+    }
     else if (Flag(a, "--clipboard", &v)) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();
@@ -201,6 +209,25 @@ int main(int argc, char** argv) {
   while (stats.frames < want_frames && !stats.ended && std::chrono::steady_clock::now() < deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   std::printf("received %d frame(s) of %dx%d\n", stats.frames.load(), stats.width.load(), stats.height.load());
+  if (click_x >= 0 && stats.frames > 0) {
+    auto send = [&](rda_input_kind kind) {
+      rda_input_event ev;
+      rda_input_event_default(&ev);
+      ev.kind = kind;
+      ev.x = click_x;
+      ev.y = click_y;
+      if (kind != RDA_INPUT_MOUSE_MOVE) ev.code = RDA_BUTTON_LEFT;
+      rda_viewer_send_input(session->viewer(), &ev);
+    };
+    send(RDA_INPUT_MOUSE_MOVE);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    send(RDA_INPUT_MOUSE_DOWN);
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    send(RDA_INPUT_MOUSE_UP);
+    std::printf("clicked at %d,%d\n", click_x, click_y);
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
   session->Close();
   return stats.frames >= want_frames ? 0 : 1;
 }

@@ -339,6 +339,8 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   rdm::LiveStatsSampler _sampler;
   std::chrono::steady_clock::time_point _sessionStarted;
   bool _wasRunning;
+  bool _menuOpen;
+  NSString* _symbol;  // the icon now shown
 }
 
 - (instancetype)initWithRuntime:(rdm::ServerRuntime*)runtime info:(const rdm::MenuBarAppInfo&)info {
@@ -346,6 +348,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _runtime = runtime;
   _info = info;
   _wasRunning = false;
+  _menuOpen = false;
   _item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
   _item.button.toolTip = @"RDMachine Server";
   _menu = [[NSMenu alloc] init];
@@ -379,11 +382,20 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _wasRunning = st.running;
   const rdm::LiveStats ls = st.running ? _sampler.Update(st.stats, std::chrono::steady_clock::now()) : rdm::LiveStats{};
 
+  // Only when it changes: setting the image relays out the status item,
+  // which can swallow a click that is in progress.
   NSString* symbol = st.running ? @"rectangle.inset.filled.and.person.filled" : @"display";
-  NSImage* img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:@"RDMachine Server"];
-  [img setTemplate:YES];  // not img.template: a C++ keyword in Objective-C++
-  _item.button.image = img;
-  _item.button.title = img ? @"" : (st.running ? @"RD●" : @"RD");
+  if (![symbol isEqualToString:_symbol]) {
+    _symbol = symbol;
+    NSImage* img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:@"RDMachine Server"];
+    [img setTemplate:YES];  // not img.template: a C++ keyword in Objective-C++
+    _item.button.image = img;
+    _item.button.title = img ? @"" : (st.running ? @"RD●" : @"RD");
+  }
+  // Keep the menu filled at all times: macOS 26 and later host status items
+  // out of process and do not open one whose menu is empty, so filling it
+  // only in menuNeedsUpdate: left a menu that never opened.
+  if (!_menuOpen) [self rebuildMenu];
 
   const bool show = _runtime->saved_settings().show_stats_overlay;
   if (show) {
@@ -401,7 +413,20 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   return item;
 }
 
+- (void)menuWillOpen:(NSMenu*)menu {
+  _menuOpen = true;
+}
+
+- (void)menuDidClose:(NSMenu*)menu {
+  _menuOpen = false;
+}
+
 - (void)menuNeedsUpdate:(NSMenu*)menu {
+  [self rebuildMenu];
+}
+
+- (void)rebuildMenu {
+  NSMenu* menu = _menu;
   [menu removeAllItems];
   const rdm::MediaHostStatus st = _runtime->Status();
   const uint16_t port = _runtime->port();

@@ -154,6 +154,7 @@ NSString* DescribeError(const rdm::ConnectResult& r) {
 - (NSCursor*)remoteCursor;
 - (void)placeCursor;
 - (void)key:(NSEvent*)e;
+- (BOOL)localShortcut:(NSEvent*)e;
 // Library threads.
 - (void)frame:(const rda_image*)img changed:(const rda_rect*)changed count:(size_t)count;
 - (void)streamInfo:(int32_t)w height:(int32_t)h;
@@ -311,7 +312,7 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
                                                       handler:^NSEvent*(NSEvent* e) {
                                                         RemoteWindowController* me = weakSelf;
                                                         if (!me || e.window != me.window) return e;
-                                                        [me key:e];
+                                                        if (![me localShortcut:e]) [me key:e];
                                                         return nil;
                                                       }];
 }
@@ -345,6 +346,62 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
 - (void)windowWillClose:(NSNotification*)note {
   [self endSession];
   if (self.onClose) self.onClose();
+}
+
+// ⌃⌥⌘F stays on this Mac and toggles full screen; every other key goes to
+// the server. Full screen hides this Mac's menu bar and Dock completely, so
+// this is the way out.
+- (BOOL)localShortcut:(NSEvent*)e {
+  if (e.type != NSEventTypeKeyDown && e.type != NSEventTypeKeyUp) return NO;
+  const NSEventModifierFlags want = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+  const NSEventModifierFlags mods =
+      e.modifierFlags & (want | NSEventModifierFlagShift);
+  if (mods != want || e.keyCode != 3 /* kVK_ANSI_F */) return NO;
+  if (e.type == NSEventTypeKeyDown && !e.isARepeat) {
+    [self releaseHeld];  // the server saw ⌃⌥⌘ go down; let them go there
+    [_window toggleFullScreen:nil];
+  }
+  return YES;
+}
+
+// Full screen: hide this Mac's menu bar and Dock outright instead of letting
+// them slide in at the screen's edges, where they would cover the server's
+// menu bar and Dock and take the clicks meant for them.
+- (NSApplicationPresentationOptions)window:(NSWindow*)window
+      willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposed {
+  proposed &= ~(NSApplicationPresentationAutoHideMenuBar | NSApplicationPresentationAutoHideDock);
+  return proposed | NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock |
+         NSApplicationPresentationHideMenuBar;
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification*)note {
+  [self releaseHeld];
+  CATextLayer* hint = [CATextLayer layer];
+  hint.string = @"Press ⌃⌥⌘F to leave full screen";
+  hint.font = (__bridge CFTypeRef)[NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
+  hint.fontSize = 15;
+  hint.alignmentMode = kCAAlignmentCenter;
+  hint.foregroundColor = NSColor.whiteColor.CGColor;
+  hint.backgroundColor = [NSColor colorWithWhite:0 alpha:0.7].CGColor;
+  hint.cornerRadius = 8;
+  hint.contentsScale = _window.backingScaleFactor;
+  const CGSize size = CGSizeMake(300, 34);
+  const CGRect b = _layer.bounds;
+  hint.frame = CGRectMake((b.size.width - size.width) / 2, b.size.height - size.height - 40, size.width, size.height);
+  hint.zPosition = 10;
+  [_layer addSublayer:hint];
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    [CATransaction begin];
+    [CATransaction setCompletionBlock:^{
+      [hint removeFromSuperlayer];
+    }];
+    hint.opacity = 0;
+    [CATransaction commit];
+  });
+}
+
+- (void)windowDidExitFullScreen:(NSNotification*)note {
+  [self releaseHeld];
 }
 
 - (void)windowDidResignKey:(NSNotification*)note {
@@ -705,6 +762,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
   [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
   editItem.submenu = edit;
+  NSMenuItem* viewItem = [[NSMenuItem alloc] init];
+  [bar addItem:viewItem];
+  NSMenu* view = [[NSMenu alloc] initWithTitle:@"View"];
+  // In a remote window the key goes through localShortcut: instead (every
+  // key there goes to the server); the menu item is for finding it.
+  NSMenuItem* fs = [view addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+  fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+  viewItem.submenu = view;
   NSApp.mainMenu = bar;
 }
 
