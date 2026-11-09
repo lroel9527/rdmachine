@@ -16,6 +16,7 @@
 // Over the picture the pointer is this Mac's own, in the remote cursor's
 // shape; outside the window the remote cursor is drawn where it is.
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>  // kTISNotifySelectedKeyboardInputSourceChanged
 #import <IOSurface/IOSurface.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -33,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "rdmachine/input_source_sync.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
@@ -53,6 +55,16 @@ uint32_t Modifiers(NSEventModifierFlags f) {
 }
 
 // The modifier flag that a modifier key's keyCode (kVK_*) changes, or 0.
+// View > Sync Keyboard Language: the server follows this Mac's input source
+// (docs/protocol.md, "键盘语言同步"). On unless turned off.
+NSString* const kSyncKeyboardLanguageKey = @"SyncKeyboardLanguage";
+NSString* const kSyncKeyboardLanguageChanged = @"RDMSyncKeyboardLanguageChanged";
+
+bool SyncKeyboardLanguage() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
+}
+
 NSEventModifierFlags FlagOfModifierKey(unsigned short keyCode) {
   switch (keyCode) {
     case 56: case 60: return NSEventModifierFlagShift;    // kVK_Shift, kVK_RightShift
@@ -257,6 +269,7 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
   int32_t _cursorW, _cursorH, _hotX, _hotY;
   int32_t _streamW, _streamH;  // main thread
   id _keyMonitor;
+  std::string _sentInputSource;  // id last sent to the server; main thread
 
   std::unique_ptr<rdm::RemoteSession> _session;  // main thread
   rda_viewer* _viewer;                           // _session's, while attached
@@ -304,6 +317,18 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
   _viewer = _session->viewer();
   [_window makeKeyAndOrderFront:nil];
   [_window makeFirstResponder:_view];
+  // Input source sync: whatever switches it here (Caps Lock, ⌃Space, the
+  // menu) posts this distributed notification.
+  [NSDistributedNotificationCenter.defaultCenter addObserver:self
+                                                    selector:@selector(inputSourceChanged:)
+                                                        name:(__bridge NSString*)kTISNotifySelectedKeyboardInputSourceChanged
+                                                      object:nil
+                                          suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(syncSettingChanged:)
+                                             name:kSyncKeyboardLanguageChanged
+                                           object:nil];
+  [self sendInputSource:YES];
   // Keys go through a local monitor rather than keyDown: it also sees
   // Command shortcuts (and their key-up, which AppKit otherwise swallows).
   __weak RemoteWindowController* weakSelf = self;
@@ -320,6 +345,8 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
 // Main thread. Lets go of held keys, says bye, frees everything. No viewer
 // callback runs after it returns.
 - (void)endSession {
+  [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
   if (_keyMonitor) {
     [NSEvent removeMonitor:_keyMonitor];
     _keyMonitor = nil;
@@ -402,6 +429,36 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
 
 - (void)windowDidExitFullScreen:(NSNotification*)note {
   [self releaseHeld];
+}
+
+// Main thread. Tells the server which input source this Mac uses, unless it
+// already knows (`force`: say it anyway, e.g. when the session starts).
+- (void)sendInputSource:(BOOL)force {
+  if (!_viewer || !SyncKeyboardLanguage()) return;
+  rda_input_source_info cur{};
+  cur.struct_size = sizeof(cur);
+  if (rda_current_input_source(&cur) != RDA_OK) return;
+  if (!force && _sentInputSource == cur.id) return;
+  const rdm::InputSourceState s{cur.id, cur.name, cur.language, cur.input_method != 0, cur.ascii_capable != 0};
+  const std::string payload = rdm::EncodeInputSource(s);
+  if (rda_viewer_send_message(_viewer, rdm::kInputSourceMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
+                              payload.size()) == RDA_OK) {
+    _sentInputSource = cur.id;
+  }
+}
+
+- (void)inputSourceChanged:(NSNotification*)note {
+  [self sendInputSource:NO];
+}
+
+- (void)syncSettingChanged:(NSNotification*)note {
+  _sentInputSource.clear();
+  [self sendInputSource:YES];
+}
+
+- (void)windowDidBecomeKey:(NSNotification*)note {
+  // It may have been switched while another window was in front.
+  [self sendInputSource:NO];
 }
 
 - (void)windowDidResignKey:(NSNotification*)note {
@@ -747,6 +804,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSApp activateIgnoringOtherApps:YES];
 }
 
+- (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
+  const bool on = !SyncKeyboardLanguage();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kSyncKeyboardLanguageKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kSyncKeyboardLanguageChanged object:nil];
+}
+
 - (void)buildMenu {
   NSMenu* bar = [[NSMenu alloc] init];
   NSMenuItem* appItem = [[NSMenuItem alloc] init];
@@ -769,6 +833,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // key there goes to the server); the menu item is for finding it.
   NSMenuItem* fs = [view addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
   fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+  [view addItem:NSMenuItem.separatorItem];
+  NSMenuItem* sync = [view addItemWithTitle:@"Sync Keyboard Language"
+                                     action:@selector(toggleSyncKeyboardLanguage:)
+                              keyEquivalent:@""];
+  sync.target = self;
+  sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
+  sync.toolTip = @"The server switches to the input source used on this Mac (Pinyin, ABC, ...), "
+                 @"including when Caps Lock switches it.";
   viewItem.submenu = view;
   NSApp.mainMenu = bar;
 }

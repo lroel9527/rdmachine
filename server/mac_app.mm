@@ -35,6 +35,14 @@ NSString* PeerText(const rdm::MediaHostStatus& st) {
   return [NSString stringWithFormat:@"%@@%@", NS(st.origin.username), NS(st.origin.peer_ip)];
 }
 
+// Keyboard input source sync, for the panel and the menu.
+NSString* InputSourceText(const rdm::MediaHostStatus& st) {
+  if (st.client_input_source.empty()) return @"未同步（客户端没有发来）";
+  if (st.input_source.empty()) return [NSString stringWithFormat:@"本机没有对应「%@」的输入法", NS(st.client_input_source)];
+  if (st.input_source == st.client_input_source) return NS(st.input_source);
+  return [NSString stringWithFormat:@"%@（客户端：%@）", NS(st.input_source), NS(st.client_input_source)];
+}
+
 NSString* GroupedCode(const std::string& code) {
   if (code.size() != 8) return NS(code);
   return [NSString stringWithFormat:@"%@ %@", NS(code.substr(0, 4)), NS(code.substr(4))];
@@ -80,7 +88,7 @@ void StopApp() {
 }
 
 static NSArray<NSString*>* StatsKeys() {
-  return @[ @"状态", @"时长", @"通道", @"分辨率", @"帧率", @"码率", @"带宽", @"延迟", @"丢包/重传", @"丢帧", @"编码器" ];
+  return @[ @"状态", @"时长", @"通道", @"分辨率", @"帧率", @"码率", @"带宽", @"延迟", @"丢包/重传", @"丢帧", @"编码器", @"输入法" ];
 }
 
 - (instancetype)initWithMenu:(NSMenu*)menu {
@@ -184,6 +192,7 @@ static NSArray<NSString*>* StatsKeys() {
                                               static_cast<unsigned long long>(ls.keyframes)]
                row:9];
     [self setValue:(st.encoder.empty() ? @"–" : NS(st.encoder)) row:10];
+    [self setValue:InputSourceText(st) row:11];
   }
   // Grow or shrink with the text, keeping the top left corner in place.
   const NSPoint topLeft = NSMakePoint(NSMinX(_panel.frame), NSMaxY(_panel.frame));
@@ -440,6 +449,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     [self add:[NSString stringWithFormat:@"已连接：%@ · %@ · %@", PeerText(st),
                                          st.transport == rdm::MediaTransport::kUdp ? @"UDP" : @"TCP", HMS(secs)]
         action:nullptr];
+    [self add:[NSString stringWithFormat:@"键盘语言：%@", InputSourceText(st)] action:nullptr];
     if (st.input_unavailable) {
       [self add:@"这次连接只能看不能控：没有辅助功能权限" action:@selector(openAccessibility:)];
     }

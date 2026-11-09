@@ -16,7 +16,8 @@ add_executable(rdm_core_tests
   test_auth_guards.cpp
   test_server_session.cpp
   test_control.cpp
-  test_clipboard_sync.cpp)
+  test_clipboard_sync.cpp
+  test_input_source_sync.cpp)
 target_link_libraries(rdm_core_tests PRIVATE rdmachine::core GTest::gtest_main)
 
 include(GoogleTest)

@@ -156,6 +156,15 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`，平台无关，Linux 上用内存剪贴板测试），macOS 剪贴板在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
 
+## 键盘语言同步
+
+客户端用 Caps Lock、⌃空格或菜单切换输入源（简体拼音 ↔ ABC 等）时，服务端跟着切到对应的输入源。切换不能当按键传：macOS 只对物理键盘的 Caps Lock 切换输入源，注入的 Caps Lock 不起作用。
+
+- 消息：rdaccel 应用消息，类型 `0x10001`（`RDA_MSG_USER_FIRST + 1`，`kInputSourceMessageType`），客户端到服务端，内容是 JSON：`{"id":"com.apple.inputmethod.SCIM.ITABC","name":"简体拼音","language":"zh-Hans","input_method":true,"ascii_capable":false}`。`id` 必填，其余可缺。
+- 客户端在会话开始、系统发出“输入源已改变”通知（`kTISNotifySelectedKeyboardInputSourceChanged`）、远程窗口回到前台时发送；和上次发的一样就不重复发。菜单 View → Sync Keyboard Language 可以关掉（默认打开）。
+- 服务端按 `ChooseInputSource`（`core/include/rdmachine/input_source_sync.h`）在本机已启用的输入源里挑：同一个 `id` 优先；输入法找同一语言的输入法（先精确匹配 `zh-Hans`，再看主语言 `zh`）；普通键盘布局找能直接打 ASCII 的布局（同语言优先）；都没有就不动。只看会话不跟随。当前已经是它就不重复切换。
+- 读取和切换输入源用 rdaccel 1.2 的 `rda_current_input_source`、`rda_list_input_sources`、`rda_injector_select_input_source`（macOS Text Input Sources）。服务端菜单和浮窗显示同步结果。
+
 ## 实现
 
 - 服务端：`ServerSession`（`core/include/rdmachine/server_session.h`）是不做 I/O 的状态机，按上面的规则处理每条消息；平台相关的部分（PAM 校验密码、启动 rdaccel Host）由 `ServerDelegate` 提供。`ControlServer` 在 TLS 上为每个连接开一个线程驱动它，负责 15 秒无流量发 `ping`、45 秒收不到消息发 `bye`（`idle_timeout`）后关闭。

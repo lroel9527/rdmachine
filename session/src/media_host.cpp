@@ -1,10 +1,21 @@
 #include "rdmachine/session/media_host.h"
 
+#include <algorithm>
 #include <vector>
 
 #include "rdmachine/session/system_auth.h"
 
 namespace rdm {
+
+static_assert(kInputSourceMessageType == RDA_MSG_USER_FIRST + 1, "an application message type");
+
+namespace {
+
+InputSourceState FromRda(const rda_input_source_info& i) {
+  return InputSourceState{i.id, i.name, i.language, i.input_method != 0, i.ascii_capable != 0};
+}
+
+}  // namespace
 
 MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {}
 
@@ -66,6 +77,55 @@ void MediaHost::OnInput(void* user, const rda_input_event* ev) {
 void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   auto* self = static_cast<MediaHost*>(user);
   if (type == RDA_MSG_CLIPBOARD_TEXT && self->clipboard_) self->clipboard_->OnRemoteText(payload, n);
+  if (type == kInputSourceMessageType) {
+    if (auto wanted = DecodeInputSource(std::string(reinterpret_cast<const char*>(payload), n))) {
+      self->SyncInputSource(*wanted);
+    }
+  }
+}
+
+// Transport thread. The rdaccel input source calls run on the main thread,
+// which may be waiting for mu_ (Status()), so mu_ is not held across them.
+void MediaHost::SyncInputSource(const InputSourceState& wanted) {
+  std::string selected;
+  if (!injector_) {
+    // View only: the keys do not come from the client, nor should the input source.
+    Log("input source from the client (" + wanted.id + ") ignored: this session is view only");
+  } else {
+    size_t count = 0;
+    std::vector<InputSourceState> available;
+    if (rda_list_input_sources(nullptr, 0, &count) == RDA_OK && count > 0) {
+      std::vector<rda_input_source_info> infos(count);
+      infos[0].struct_size = sizeof(rda_input_source_info);
+      if (rda_list_input_sources(infos.data(), infos.size(), &count) == RDA_OK) {
+        infos.resize(std::min(count, infos.size()));
+        for (const auto& i : infos) available.push_back(FromRda(i));
+      }
+    }
+    rda_input_source_info cur{};
+    cur.struct_size = sizeof(cur);
+    const bool have_cur = rda_current_input_source(&cur) == RDA_OK;
+    if (auto id = ChooseInputSource(wanted, available)) {
+      for (const auto& a : available) {
+        if (a.id == *id) selected = a.name.empty() ? a.id : a.name;
+      }
+      if (have_cur && *id == cur.id) {
+        // Already there (the user at this computer, or an earlier message).
+      } else if (rda_injector_select_input_source(injector_, id->c_str()) == RDA_OK) {
+        Log("input source: " + *id + " (client uses " + wanted.id + ")");
+      } else {
+        Log("input source " + *id + " could not be selected: " + rda_last_error());
+        selected.clear();
+      }
+    } else {
+      Log("input source: nothing here matches the client's " + wanted.id +
+          (available.empty() ? std::string(" (cannot list input sources: ") + rda_last_error() + ")" : ""));
+    }
+  }
+  std::lock_guard lock(mu_);
+  if (!host_) return;
+  status_.client_input_source = wanted.name.empty() ? wanted.id : wanted.name;
+  status_.input_source = selected;
 }
 
 void MediaHost::OnState(void* user, rda_state state, rda_status reason) {

@@ -13,6 +13,7 @@
 
 #include "rdmachine/auth_guards.h"
 #include "rdmachine/clipboard_sync.h"
+#include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
 
 namespace rdm {
@@ -50,6 +51,11 @@ struct MediaHostStatus {
   std::chrono::steady_clock::time_point started{};
   int32_t width = 0, height = 0;  // the shared display, pixels
   std::string encoder;            // empty before the first frame
+  // Keyboard input source sync (docs/protocol.md, "键盘语言同步"): what the
+  // client last reported, and what this computer selected for it (empty:
+  // nothing fits, or not synced yet).
+  std::string client_input_source;
+  std::string input_source;
   rda_host_stats stats{};         // cumulative; zero when not running
 };
 
@@ -75,6 +81,7 @@ class MediaHost : public ServerDelegate {
   static void OnState(void* user, rda_state state, rda_status reason);
   static void OnError(void* user, rda_status status, const char* message);
   static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n);
+  void SyncInputSource(const InputSourceState& wanted);
   void Log(const std::string& line);
 
   const MediaHostOptions options_;

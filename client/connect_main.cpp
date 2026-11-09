@@ -4,7 +4,7 @@
 //   rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]
 //                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
-//                     [--save-frame=PATH.bmp]
+//                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -18,6 +18,8 @@
 // two seconds: for checking input end to end without the window.
 // --save-frame=PATH.bmp writes the last picture received (after the
 // click, if any): what a client would show.
+// --send-input-source=JSON sends a keyboard input source sync message (as
+// the window client does when the input source changes) once connected.
 #include <unistd.h>
 
 #include <algorithm>
@@ -34,6 +36,7 @@
 
 #include <rdaccel/rdaccel.h>
 
+#include "rdmachine/input_source_sync.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
@@ -102,7 +105,7 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
-               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH]\n");
+               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n");
   return 2;
 }
 
@@ -140,7 +143,7 @@ int main(int argc, char** argv) {
   bool accept_new = false;
   int want_frames = 1, seconds = 20;
   int click_x = -1, click_y = -1;
-  std::string save_frame;
+  std::string save_frame, input_source_json;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -153,6 +156,10 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--seconds", &v)) seconds = std::atoi(v.c_str());
     else if (Flag(a, "--known-hosts", &v)) known_hosts_path = v;
     else if (Flag(a, "--save-frame", &v)) save_frame = v;
+    else if (Flag(a, "--send-input-source", &v)) {
+      if (!rdm::DecodeInputSource(v)) return Usage();
+      input_source_json = v;
+    }
     else if (Flag(a, "--click", &v)) {
       if (std::sscanf(v.c_str(), "%d,%d", &click_x, &click_y) != 2 || click_x < 0 || click_y < 0) return Usage();
     }
@@ -247,6 +254,14 @@ int main(int argc, char** argv) {
   while (stats.frames < want_frames && !stats.ended && std::chrono::steady_clock::now() < deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   std::printf("received %d frame(s) of %dx%d\n", stats.frames.load(), stats.width.load(), stats.height.load());
+  if (!input_source_json.empty()) {
+    const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kInputSourceMessageType,
+                                                  reinterpret_cast<const uint8_t*>(input_source_json.data()),
+                                                  input_source_json.size());
+    std::printf("sent input source: %s\n", st == RDA_OK ? "ok" : rda_last_error());
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
   if (click_x >= 0 && stats.frames > 0) {
     auto send = [&](rda_input_kind kind) {
       rda_input_event ev;
