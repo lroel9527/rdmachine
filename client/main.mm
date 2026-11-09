@@ -23,6 +23,8 @@
 #include <rdaccel/rdaccel.h>
 
 #include <algorithm>
+#include <chrono>
+#include <optional>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -36,6 +38,7 @@
 
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/protocol.h"
+#include "rdmachine/session_stats.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
 #include "rdmachine/session/system_clipboard.h"
@@ -63,6 +66,51 @@ NSString* const kSyncKeyboardLanguageChanged = @"RDMSyncKeyboardLanguageChanged"
 bool SyncKeyboardLanguage() {
   NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
   return [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
+}
+
+// View > Statistics: the overlay in the remote window's top right corner
+// (figures from the server, docs/protocol.md "会话统计"). Clicks go through it.
+NSString* const kStatsShownKey = @"StatsOverlay";
+NSString* const kStatsFieldsKey = @"StatsFields";
+NSString* const kStatsOpacityKey = @"StatsOpacity";
+NSString* const kStatsChanged = @"RDMStatsChanged";
+
+struct StatsField {
+  NSString* key;
+  NSString* title;
+  bool on_by_default;
+};
+const StatsField kStatsFields[] = {
+    {@"time", @"Connection Time", true},  {@"transport", @"Transport (UDP/TCP)", true},
+    {@"fps", @"Frame Rate", true},        {@"latency", @"Latency", true},
+    {@"loss", @"Packet Loss", true},      {@"bitrate", @"Bitrate", false},
+    {@"bandwidth", @"Bandwidth", false},  {@"resolution", @"Resolution", false},
+    {@"encoder", @"Encoder", false},      {@"input", @"Input Source", false},
+};
+const int kStatsOpacities[] = {15, 35, 60};  // background, percent
+
+bool StatsShown() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kStatsShownKey] ? [d boolForKey:kStatsShownKey] : true;
+}
+
+NSSet<NSString*>* StatsFieldsOn() {
+  NSArray* saved = [NSUserDefaults.standardUserDefaults arrayForKey:kStatsFieldsKey];
+  if (saved) return [NSSet setWithArray:saved];
+  NSMutableSet* on = [NSMutableSet set];
+  for (const auto& f : kStatsFields) {
+    if (f.on_by_default) [on addObject:f.key];
+  }
+  return on;
+}
+
+int StatsOpacity() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kStatsOpacityKey] ? static_cast<int>([d integerForKey:kStatsOpacityKey]) : 35;
+}
+
+NSString* StatsKbps(double kbps) {
+  return kbps >= 1000 ? [NSString stringWithFormat:@"%.1f Mbps", kbps / 1000] : [NSString stringWithFormat:@"%.0f kbps", kbps];
 }
 
 NSEventModifierFlags FlagOfModifierKey(unsigned short keyCode) {
@@ -171,6 +219,7 @@ NSString* DescribeError(const rdm::ConnectResult& r) {
 - (void)frame:(const rda_image*)img changed:(const rda_rect*)changed count:(size_t)count;
 - (void)streamInfo:(int32_t)w height:(int32_t)h;
 - (void)cursor:(const rda_cursor_state*)c;
+- (void)statsReport:(const rdm::SessionStatsReport&)r;
 @end
 
 static void OnStreamInfo(void* user, int32_t w, int32_t h) {
@@ -180,6 +229,12 @@ static void OnFrame(void* user, const rda_image* img, const rda_rect* changed, s
   [(__bridge RemoteWindowController*)user frame:img changed:changed count:n];
 }
 static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteWindowController*)user cursor:c]; }
+static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
+  if (type != rdm::kSessionStatsMessageType) return;
+  if (auto r = rdm::DecodeSessionStats(std::string(reinterpret_cast<const char*>(payload), n))) {
+    [(__bridge RemoteWindowController*)user statsReport:*r];
+  }
+}
 
 @implementation RemoteView {
   NSTrackingArea* _tracking;
@@ -270,6 +325,10 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
   int32_t _streamW, _streamH;  // main thread
   id _keyMonitor;
   std::string _sentInputSource;  // id last sent to the server; main thread
+  CALayer* _statsLayer;          // the statistics overlay's background; main thread
+  CATextLayer* _statsText;       // its text
+  std::optional<rdm::SessionStatsReport> _stats;
+  std::chrono::steady_clock::time_point _connectedAt;
 
   std::unique_ptr<rdm::RemoteSession> _session;  // main thread
   rda_viewer* _viewer;                           // _session's, while attached
@@ -296,6 +355,7 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
                                             defer:NO];
   _window.title = title;
   _window.releasedWhenClosed = NO;
+  _window.animationBehavior = NSWindowAnimationBehaviorNone;  // as the connect window
   _window.delegate = self;
   _window.acceptsMouseMovedEvents = YES;
   _view = [[RemoteView alloc] initWithFrame:_window.contentView.bounds];
@@ -305,10 +365,20 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
   _layer = _view.layer;
   _layer.backgroundColor = NSColor.blackColor.CGColor;
   _layer.contentsGravity = kCAGravityResizeAspect;
+  // A layer, not a window or view: it takes no mouse events, so clicks reach
+  // the remote screen under it.
+  _statsLayer = [CALayer layer];
+  _statsLayer.hidden = YES;
+  _statsLayer.zPosition = 20;
+  _statsLayer.cornerRadius = 6;
+  _statsText = [CATextLayer layer];
+  _statsText.wrapped = NO;
+  [_statsLayer addSublayer:_statsText];
   _cursorLayer = [CALayer layer];
   _cursorLayer.anchorPoint = CGPointZero;
   _cursorLayer.hidden = YES;
   [_layer addSublayer:_cursorLayer];
+  [_layer addSublayer:_statsLayer];
   return self;
 }
 
@@ -329,6 +399,8 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
                                              name:kSyncKeyboardLanguageChanged
                                            object:nil];
   [self sendInputSource:YES];
+  _connectedAt = std::chrono::steady_clock::now();
+  [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(renderStats) name:kStatsChanged object:nil];
   // Keys go through a local monitor rather than keyDown: it also sees
   // Command shortcuts (and their key-up, which AppKit otherwise swallows).
   __weak RemoteWindowController* weakSelf = self;
@@ -347,6 +419,7 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
 - (void)endSession {
   [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
   if (_keyMonitor) {
     [NSEvent removeMonitor:_keyMonitor];
     _keyMonitor = nil;
@@ -465,7 +538,72 @@ static void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteW
   [self releaseHeld];
 }
 
+// Transport thread -> main thread.
+- (void)statsReport:(const rdm::SessionStatsReport&)r {
+  __weak RemoteWindowController* weakSelf = self;
+  const rdm::SessionStatsReport copy = r;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    RemoteWindowController* me = weakSelf;
+    if (!me) return;
+    me->_stats = copy;
+    [me renderStats];
+  });
+}
+
+// Main thread.
+- (void)renderStats {
+  if (!StatsShown() || !_stats || !_viewer) {
+    _statsLayer.hidden = YES;
+    return;
+  }
+  const rdm::SessionStatsReport& r = *_stats;
+  NSSet<NSString*>* on = StatsFieldsOn();
+  NSMutableArray<NSString*>* lines = [NSMutableArray array];
+  auto add = [&](NSString* key, NSString* text) {
+    if ([on containsObject:key]) [lines addObject:text];
+  };
+  const long long secs =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _connectedAt).count();
+  add(@"time", [NSString stringWithFormat:@"%02lld:%02lld:%02lld", secs / 3600, secs / 60 % 60, secs % 60]);
+  add(@"transport", r.transport == "tcp" ? @"TCP (UDP blocked)" : @"UDP");
+  add(@"fps", [NSString stringWithFormat:@"%.0f fps", r.encoded_fps]);
+  add(@"latency", r.rtt_ms <= 0   ? @"RTT –"
+                  : r.rtt_ms < 10 ? [NSString stringWithFormat:@"RTT %.1f ms", r.rtt_ms]
+                                  : [NSString stringWithFormat:@"RTT %.0f ms", r.rtt_ms]);
+  add(@"loss", r.recent_loss_pct >= 0 ? [NSString stringWithFormat:@"Loss %.1f%%", r.recent_loss_pct] : @"Loss –");
+  add(@"bitrate", StatsKbps(r.bitrate_kbps));
+  add(@"bandwidth", r.bandwidth_kbps > 0 ? [@"BW " stringByAppendingString:StatsKbps(r.bandwidth_kbps)] : @"BW –");
+  add(@"resolution", [NSString stringWithFormat:@"%d×%d", r.width, r.height]);
+  add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
+  add(@"input", r.input_source.empty() ? @"Input –" : NS(r.input_source));
+  if (lines.count == 0) {
+    _statsLayer.hidden = YES;
+    return;
+  }
+  NSDictionary* attrs = @{
+    NSFontAttributeName : [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium],
+    NSForegroundColorAttributeName : NSColor.whiteColor,
+  };
+  NSAttributedString* text = [[NSAttributedString alloc] initWithString:[lines componentsJoinedByString:@"\n"]
+                                                             attributes:attrs];
+  const NSSize size = [text boundingRectWithSize:NSMakeSize(400, 400) options:NSStringDrawingUsesLineFragmentOrigin].size;
+  const CGFloat padX = 7, padY = 4, margin = 8;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  const CGRect b = _layer.bounds;
+  const CGFloat tw = std::ceil(size.width), th = std::ceil(size.height);
+  const CGFloat w = tw + 2 * padX, h = th + 2 * padY;
+  _statsLayer.frame = CGRectMake(b.size.width - w - margin, b.size.height - h - margin, w, h);
+  _statsLayer.backgroundColor = [NSColor colorWithWhite:0 alpha:StatsOpacity() / 100.0].CGColor;
+  _statsText.frame = CGRectMake(padX, padY, tw, th);
+  _statsText.contentsScale = _window.backingScaleFactor;
+  _statsText.string = text;
+  _statsLayer.hidden = NO;
+  [CATransaction commit];
+}
+
 - (void)windowDidResize:(NSNotification*)note {
+  [self renderStats];
   [self rebuildCursor];
   [self placeCursor];
 }
@@ -760,6 +898,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
                                                    defer:NO];
   _connectWindow.title = @"rdmachine";
   _connectWindow.releasedWhenClosed = NO;
+  // No zoom-in animation: it showed a small translucent frame before the
+  // window, which looked like a stray window flashing at start.
+  _connectWindow.animationBehavior = NSWindowAnimationBehaviorNone;
   NSView* v = _connectWindow.contentView;
   NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
 
@@ -800,8 +941,47 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
   [_connectWindow center];
   [_connectWindow makeKeyAndOrderFront:nil];
-  [_connectWindow makeFirstResponder:_host.stringValue.length ? _password : _host];
+  // Not the password field: macOS shows its Passwords AutoFill popup under a
+  // focused password field, which flashed up with the window at every start.
+  [_connectWindow makeFirstResponder:_host];
   [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)toggleStatsShown:(NSMenuItem*)item {
+  [NSUserDefaults.standardUserDefaults setBool:!StatsShown() forKey:kStatsShownKey];
+  [NSNotificationCenter.defaultCenter postNotificationName:kStatsChanged object:nil];
+}
+
+- (void)toggleStatsField:(NSMenuItem*)item {
+  NSMutableSet* on = [StatsFieldsOn() mutableCopy];
+  NSString* key = item.representedObject;
+  if ([on containsObject:key]) {
+    [on removeObject:key];
+  } else {
+    [on addObject:key];
+  }
+  [NSUserDefaults.standardUserDefaults setObject:on.allObjects forKey:kStatsFieldsKey];
+  [NSNotificationCenter.defaultCenter postNotificationName:kStatsChanged object:nil];
+}
+
+- (void)setStatsOpacity:(NSMenuItem*)item {
+  [NSUserDefaults.standardUserDefaults setInteger:item.tag forKey:kStatsOpacityKey];
+  [NSNotificationCenter.defaultCenter postNotificationName:kStatsChanged object:nil];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem*)item {
+  if (item.action == @selector(toggleStatsShown:)) {
+    item.state = StatsShown() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleStatsField:)) {
+    item.state = [StatsFieldsOn() containsObject:item.representedObject] ? NSControlStateValueOn : NSControlStateValueOff;
+    return StatsShown();
+  } else if (item.action == @selector(setStatsOpacity:)) {
+    item.state = item.tag == StatsOpacity() ? NSControlStateValueOn : NSControlStateValueOff;
+    return StatsShown();
+  } else if (item.action == @selector(toggleSyncKeyboardLanguage:)) {
+    item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
+  }
+  return YES;
 }
 
 - (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
@@ -841,6 +1021,28 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
   sync.toolTip = @"The server switches to the input source used on this Mac (Pinyin, ABC, ...), "
                  @"including when Caps Lock switches it.";
+  [view addItem:NSMenuItem.separatorItem];
+  NSMenuItem* statsItem = [view addItemWithTitle:@"Statistics" action:nil keyEquivalent:@""];
+  NSMenu* stats = [[NSMenu alloc] initWithTitle:@"Statistics"];
+  [stats addItemWithTitle:@"Show Statistics" action:@selector(toggleStatsShown:) keyEquivalent:@""].target = self;
+  [stats addItem:NSMenuItem.separatorItem];
+  for (const auto& f : kStatsFields) {
+    NSMenuItem* it = [stats addItemWithTitle:f.title action:@selector(toggleStatsField:) keyEquivalent:@""];
+    it.target = self;
+    it.representedObject = f.key;
+    it.indentationLevel = 1;
+  }
+  [stats addItem:NSMenuItem.separatorItem];
+  [stats addItemWithTitle:@"Background" action:nil keyEquivalent:@""].enabled = NO;
+  for (int pct : kStatsOpacities) {
+    NSMenuItem* it = [stats addItemWithTitle:[NSString stringWithFormat:@"%d%%", pct]
+                                      action:@selector(setStatsOpacity:)
+                               keyEquivalent:@""];
+    it.target = self;
+    it.tag = pct;
+    it.indentationLevel = 1;
+  }
+  statsItem.submenu = stats;
   viewItem.submenu = view;
   NSApp.mainMenu = bar;
 }
@@ -942,6 +1144,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.viewer.on_stream_info = &OnStreamInfo;
   opts.viewer.on_frame = &OnFrame;
   opts.viewer.on_cursor = &OnCursor;
+  opts.viewer.on_message = &OnMessage;
   // Text copied on either Mac can be pasted on the other (both ways for now;
   // a setting comes with the preferences window).
   opts.clipboard = rdm::SystemClipboard();

@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "mac_app.h"
-#include "rdmachine/session/live_stats.h"
 
 namespace {
 
@@ -21,11 +20,6 @@ NSString* NS(const std::string& s) { return [NSString stringWithUTF8String:s.c_s
 NSString* HMS(std::chrono::seconds s) {
   const long long t = s.count();
   return [NSString stringWithFormat:@"%02lld:%02lld:%02lld", t / 3600, t / 60 % 60, t % 60];
-}
-
-NSString* Kbps(double kbps) {
-  if (kbps >= 1000) return [NSString stringWithFormat:@"%.1f Mbps", kbps / 1000];
-  return [NSString stringWithFormat:@"%.0f kbps", kbps];
 }
 
 NSString* PeerText(const rdm::MediaHostStatus& st) {
@@ -75,134 +69,6 @@ void StopApp() {
 
 }  // namespace
 
-// ---- floating statistics panel ---------------------------------------------
-
-@interface RDMStatsPanel : NSObject
-@property(nonatomic, readonly) NSPanel* panel;
-- (void)update:(const rdm::MediaHostStatus&)st stats:(const rdm::LiveStats&)ls port:(uint16_t)port;
-@end
-
-@implementation RDMStatsPanel {
-  NSGridView* _grid;
-  std::vector<NSTextField*> _values;
-}
-
-static NSArray<NSString*>* StatsKeys() {
-  return @[ @"状态", @"时长", @"通道", @"分辨率", @"帧率", @"码率", @"带宽", @"延迟", @"丢包/重传", @"丢帧", @"编码器", @"输入法" ];
-}
-
-- (instancetype)initWithMenu:(NSMenu*)menu {
-  if (!(self = [super init])) return nil;
-  _panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 260, 100)
-                                      styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-                                        backing:NSBackingStoreBuffered
-                                          defer:YES];
-  _panel.level = NSStatusWindowLevel;
-  _panel.opaque = NO;
-  _panel.backgroundColor = NSColor.clearColor;
-  _panel.hasShadow = YES;
-  _panel.alphaValue = 0.85;
-  _panel.movableByWindowBackground = YES;
-  _panel.hidesOnDeactivate = NO;
-  _panel.releasedWhenClosed = NO;
-  _panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameVibrantDark];
-  _panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary |
-                              NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
-  // Deliberately captured with the screen: the person debugging usually sits
-  // at the client and sees the panel in the remote picture.
-
-  NSVisualEffectView* bg = [[NSVisualEffectView alloc] initWithFrame:_panel.contentView.bounds];
-  bg.material = NSVisualEffectMaterialHUDWindow;
-  bg.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-  bg.state = NSVisualEffectStateActive;
-  bg.wantsLayer = YES;
-  bg.layer.cornerRadius = 10;
-  bg.layer.masksToBounds = YES;
-  bg.menu = menu;  // right click: hide
-  _panel.contentView = bg;
-
-  NSMutableArray* rows = [NSMutableArray array];
-  NSFont* keyFont = [NSFont systemFontOfSize:11];
-  NSFont* valueFont = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium];
-  for (NSString* k in StatsKeys()) {
-    NSTextField* key = [NSTextField labelWithString:k];
-    key.font = keyFont;
-    key.textColor = NSColor.secondaryLabelColor;
-    NSTextField* value = [NSTextField labelWithString:@"–"];
-    value.font = valueFont;
-    value.textColor = NSColor.labelColor;
-    _values.push_back(value);
-    [rows addObject:@[ key, value ]];
-  }
-  _grid = [NSGridView gridViewWithViews:rows];
-  _grid.rowSpacing = 3;
-  _grid.columnSpacing = 10;
-  [_grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
-  _grid.translatesAutoresizingMaskIntoConstraints = NO;
-  [bg addSubview:_grid];
-  [NSLayoutConstraint activateConstraints:@[
-    [_grid.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:12],
-    [_grid.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-12],
-    [_grid.topAnchor constraintEqualToAnchor:bg.topAnchor constant:10],
-    [_grid.bottomAnchor constraintEqualToAnchor:bg.bottomAnchor constant:-10],
-  ]];
-
-  [_panel setFrameAutosaveName:@"RDMStatsPanel"];
-  if (![_panel setFrameUsingName:@"RDMStatsPanel"]) {
-    const NSRect vis = NSScreen.mainScreen.visibleFrame;
-    [_panel setFrameTopLeftPoint:NSMakePoint(NSMaxX(vis) - 280, NSMaxY(vis) - 12)];
-  }
-  return self;
-}
-
-- (void)setValue:(NSString*)text row:(size_t)row {
-  _values[row].stringValue = text ?: @"–";
-}
-
-- (void)update:(const rdm::MediaHostStatus&)st stats:(const rdm::LiveStats&)ls port:(uint16_t)port {
-  const bool live = st.running;
-  for (NSInteger i = 1; i < _grid.numberOfRows; ++i) [_grid rowAtIndex:i].hidden = !live;
-  if (!live) {
-    [self setValue:(port ? [NSString stringWithFormat:@"等待连接 · 端口 %u", port] : @"服务未运行") row:0];
-  } else {
-    [self setValue:[NSString stringWithFormat:@"%@%@%@", PeerText(st), st.media_connected ? @"" : @" · 等待画面",
-                                              st.input_unavailable ? @" · 只看（缺辅助功能权限）"
-                                              : st.view_only       ? @" · 只看"
-                                                                   : @""]
-               row:0];
-    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - st.started);
-    [self setValue:HMS(secs) row:1];
-    [self setValue:(st.transport == rdm::MediaTransport::kUdp ? @"UDP" : @"TCP（UDP 不通时的备用）") row:2];
-    [self setValue:[NSString stringWithFormat:@"%d × %d", st.width, st.height] row:3];
-    if (ls.valid) {
-      [self setValue:[NSString stringWithFormat:@"%.1f fps（采集 %.1f）", ls.encoded_fps, ls.captured_fps] row:4];
-      [self setValue:(ls.target_kbps > 0 ? [NSString stringWithFormat:@"%@（目标 %@）", Kbps(ls.bitrate_kbps),
-                                                                      Kbps(ls.target_kbps)]
-                                         : Kbps(ls.bitrate_kbps))
-                 row:5];
-    }
-    [self setValue:(ls.bandwidth_kbps > 0 ? Kbps(ls.bandwidth_kbps) : @"未测量（TCP）") row:6];
-    [self setValue:(ls.rtt_ms > 0 ? [NSString stringWithFormat:@"%.1f ms", ls.rtt_ms] : @"未测量（TCP）") row:7];
-    [self setValue:(ls.recent_loss_pct >= 0 ? [NSString stringWithFormat:@"%.2f%%（累计 %.2f%%）", ls.recent_loss_pct,
-                                                                         ls.total_loss_pct]
-                                            : @"未测量（TCP）")
-               row:8];
-    [self setValue:[NSString stringWithFormat:@"拥塞 %llu · 关键帧 %llu",
-                                              static_cast<unsigned long long>(ls.frames_dropped_congestion),
-                                              static_cast<unsigned long long>(ls.keyframes)]
-               row:9];
-    [self setValue:(st.encoder.empty() ? @"–" : NS(st.encoder)) row:10];
-    [self setValue:InputSourceText(st) row:11];
-  }
-  // Grow or shrink with the text, keeping the top left corner in place.
-  const NSPoint topLeft = NSMakePoint(NSMinX(_panel.frame), NSMaxY(_panel.frame));
-  [_panel setContentSize:_panel.contentView.fittingSize];
-  [_panel setFrameTopLeftPoint:topLeft];
-  [_panel invalidateShadow];  // else the old outline lingers
-}
-
-@end
-
 // ---- settings window ---------------------------------------------------------
 
 @interface RDMSettingsWindow : NSObject <NSWindowDelegate>
@@ -218,7 +84,6 @@ static NSArray<NSString*>* StatsKeys() {
   NSPopUpButton* _clipboard;
   NSTextField* _fps;
   NSTextField* _bitrate;
-  NSButton* _overlay;
   NSTextField* _note;
 }
 
@@ -259,7 +124,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   for (NSString* t : kClipboardTitles) [_clipboard addItemWithTitle:t];
   _fps = NumberField(0, 240);
   _bitrate = NumberField(0, 1000000);
-  _overlay = [NSButton checkboxWithTitle:@"显示调试浮窗（连接时间、通道、帧率、延迟、丢包）" target:nil action:nil];
   _note = [NSTextField wrappingLabelWithString:@""];
   _note.textColor = NSColor.systemOrangeColor;
   _note.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
@@ -271,7 +135,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     @[ [NSTextField labelWithString:@"剪贴板："], _clipboard ],
     @[ [NSTextField labelWithString:@"帧率上限："], WithHint(_fps, @"fps，0 = 默认（60）") ],
     @[ [NSTextField labelWithString:@"码率上限："], WithHint(_bitrate, @"kbps，0 = 默认（8000）") ],
-    @[ [NSTextField labelWithString:@"调试："], _overlay ],
   ]];
   grid.rowSpacing = 10;
   grid.columnSpacing = 8;
@@ -302,7 +165,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   }
   _fps.integerValue = s.fps;
   _bitrate.integerValue = s.bitrate_kbps;
-  _overlay.state = s.show_stats_overlay ? NSControlStateValueOn : NSControlStateValueOff;
   _note.stringValue = overrides.length
                           ? [NSString stringWithFormat:@"这次启动用了命令行参数 %@，对应的设置在退出前以命令行为准。", overrides]
                           : @"保存后服务会用新设置重新开始监听，正在进行的连接会断开。";
@@ -324,7 +186,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   s.clipboard_mode = kClipboardModes[std::clamp<NSInteger>(_clipboard.indexOfSelectedItem, 0, 3)];
   s.fps = static_cast<int32_t>(std::clamp<NSInteger>(_fps.integerValue, 0, 240));
   s.bitrate_kbps = static_cast<int32_t>(std::clamp<NSInteger>(_bitrate.integerValue, 0, 1000000));
-  s.show_stats_overlay = _overlay.state == NSControlStateValueOn;
   if (self.onSave) self.onSave(s);
   [_window close];
 }
@@ -342,12 +203,8 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   rdm::MenuBarAppInfo _info;
   NSStatusItem* _item;
   NSMenu* _menu;
-  RDMStatsPanel* _stats;
   RDMSettingsWindow* _settings;
   NSTimer* _timer;
-  rdm::LiveStatsSampler _sampler;
-  std::chrono::steady_clock::time_point _sessionStarted;
-  bool _wasRunning;
   bool _menuOpen;
   NSString* _symbol;  // the icon now shown
 }
@@ -356,7 +213,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   if (!(self = [super init])) return nil;
   _runtime = runtime;
   _info = info;
-  _wasRunning = false;
   _menuOpen = false;
   _item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
   _item.button.toolTip = @"RDMachine Server";
@@ -364,10 +220,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _menu.delegate = self;
   _menu.autoenablesItems = NO;
   _item.menu = _menu;
-
-  NSMenu* panelMenu = [[NSMenu alloc] init];
-  [panelMenu addItemWithTitle:@"隐藏调试浮窗" action:@selector(toggleStats:) keyEquivalent:@""].target = self;
-  _stats = [[RDMStatsPanel alloc] initWithMenu:panelMenu];
 
   __weak RDMMenuBarController* weakSelf = self;
   _settings = [[RDMSettingsWindow alloc] init];
@@ -384,12 +236,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 
 - (void)tick {
   const rdm::MediaHostStatus st = _runtime->Status();
-  if (st.running && (!_wasRunning || st.started != _sessionStarted)) {
-    _sampler.Reset();
-    _sessionStarted = st.started;
-  }
-  _wasRunning = st.running;
-  const rdm::LiveStats ls = st.running ? _sampler.Update(st.stats, std::chrono::steady_clock::now()) : rdm::LiveStats{};
 
   // Only when it changes: setting the image relays out the status item,
   // which can swallow a click that is in progress.
@@ -405,14 +251,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   // out of process and do not open one whose menu is empty, so filling it
   // only in menuNeedsUpdate: left a menu that never opened.
   if (!_menuOpen) [self rebuildMenu];
-
-  const bool show = _runtime->saved_settings().show_stats_overlay;
-  if (show) {
-    [_stats update:st stats:ls port:_runtime->port()];
-    if (!_stats.panel.visible) [_stats.panel orderFrontRegardless];
-  } else if (_stats.panel.visible) {
-    [_stats.panel orderOut:nil];
-  }
 }
 
 - (NSMenuItem*)add:(NSString*)title action:(SEL)action {
@@ -488,8 +326,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   }
 
   [menu addItem:NSMenuItem.separatorItem];
-  NSMenuItem* overlay = [self add:@"显示调试浮窗" action:@selector(toggleStats:)];
-  overlay.state = _runtime->saved_settings().show_stats_overlay ? NSControlStateValueOn : NSControlStateValueOff;
   NSMenuItem* settings = [self add:@"设置…" action:@selector(showSettings:)];
   settings.keyEquivalent = @",";
   [menu addItem:NSMenuItem.separatorItem];
@@ -527,28 +363,12 @@ static NSView* WithHint(NSView* field, NSString* hint) {
       openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
 }
 
-- (void)setStatsShown:(bool)show {
-  std::string error;
-  if (!_runtime->SetShowStatsOverlay(show, &error)) NSLog(@"rdmachine: %s", error.c_str());
-  [self tick];
-}
-
-- (void)toggleStats:(id)sender {
-  [self setStatsShown:!_runtime->saved_settings().show_stats_overlay];
-}
-
 - (void)showSettings:(id)sender {
   [_settings showWithSettings:_runtime->saved_settings() overrides:NS(_runtime->overrides().Describe())];
 }
 
 - (void)applySettings:(const rdm::ServerSettings&)s {
-  rdm::ServerSettings without_overlay = s;
-  without_overlay.show_stats_overlay = _runtime->saved_settings().show_stats_overlay;
-  if (without_overlay == _runtime->saved_settings()) {
-    // At most the panel changed: no need to restart (and drop the connection).
-    [self setStatsShown:s.show_stats_overlay];
-    return;
-  }
+  if (s == _runtime->saved_settings()) return;  // nothing changed: keep the connection
   if (_runtime->Status().running) {
     NSAlert* a = [[NSAlert alloc] init];
     a.messageText = @"保存设置会断开当前连接";

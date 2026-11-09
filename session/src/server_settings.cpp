@@ -36,7 +36,6 @@ bool LoadServerSettings(const std::string& config_dir, ServerSettings* out, std:
   }
   num("fps", 0, 240, &out->fps);
   num("bitrate_kbps", 0, 1'000'000, &out->bitrate_kbps);
-  flag("show_stats_overlay", &out->show_stats_overlay);
   return true;
 }
 
@@ -49,7 +48,6 @@ bool SaveServerSettings(const std::string& config_dir, const ServerSettings& s, 
       {"clipboard", ClipboardModeName(s.clipboard_mode)},
       {"fps", s.fps},
       {"bitrate_kbps", s.bitrate_kbps},
-      {"show_stats_overlay", s.show_stats_overlay},
   };
   return WritePrivateFile(ServerSettingsPath(config_dir), j.dump(2) + "\n", error);
 }

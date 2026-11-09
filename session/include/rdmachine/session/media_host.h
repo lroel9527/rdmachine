@@ -4,10 +4,12 @@
 // the viewer that presents the session's one-time token.
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <rdaccel/rdaccel.h>
 
@@ -82,6 +84,10 @@ class MediaHost : public ServerDelegate {
   static void OnError(void* user, rda_status status, const char* message);
   static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n);
   void SyncInputSource(const InputSourceState& wanted);
+  // About once a second while a session runs: a SessionStatsReport to the
+  // client for its overlay (docs/protocol.md, "会话统计").
+  void StatsLoop();
+  void StopStats();
   void Log(const std::string& line);
 
   const MediaHostOptions options_;
@@ -94,6 +100,10 @@ class MediaHost : public ServerDelegate {
   std::atomic<rda_host*> clipboard_host_{nullptr};  // where clipboard_ sends
   MediaHostStatus status_;  // guarded by mu_; stats filled in by Status()
   std::atomic<bool> media_connected_{false};
+  std::thread stats_thread_;
+  std::mutex stats_mu_;
+  std::condition_variable stats_cv_;
+  bool stats_stop_ = false;
 };
 
 }  // namespace rdm

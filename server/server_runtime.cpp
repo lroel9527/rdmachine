@@ -90,15 +90,6 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   return true;
 }
 
-bool ServerRuntime::SetShowStatsOverlay(bool show, std::string* error) {
-  std::lock_guard lock(mu_);
-  ServerSettings s = saved_;
-  s.show_stats_overlay = show;
-  if (!SaveServerSettings(options_.config_dir, s, error)) return false;
-  saved_ = s;
-  return true;
-}
-
 void ServerRuntime::Stop() {
   std::lock_guard lock(mu_);
   StopLocked();

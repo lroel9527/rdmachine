@@ -18,7 +18,6 @@ struct ServerSettings {
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
   int32_t fps = 0;           // 0 = rdaccel's default
   int32_t bitrate_kbps = 0;  // 0 = rdaccel's default
-  bool show_stats_overlay = false;
 
   bool operator==(const ServerSettings&) const = default;
 };

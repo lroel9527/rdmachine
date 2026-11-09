@@ -163,7 +163,20 @@ rdmachine 的客户端和服务端之间有两条连接：
 - 消息：rdaccel 应用消息，类型 `0x10001`（`RDA_MSG_USER_FIRST + 1`，`kInputSourceMessageType`），客户端到服务端，内容是 JSON：`{"id":"com.apple.inputmethod.SCIM.ITABC","name":"简体拼音","language":"zh-Hans","input_method":true,"ascii_capable":false}`。`id` 必填，其余可缺。
 - 客户端在会话开始、系统发出“输入源已改变”通知（`kTISNotifySelectedKeyboardInputSourceChanged`）、远程窗口回到前台时发送；和上次发的一样就不重复发。菜单 View → Sync Keyboard Language 可以关掉（默认打开）。
 - 服务端按 `ChooseInputSource`（`core/include/rdmachine/input_source_sync.h`）在本机已启用的输入源里挑：同一个 `id` 优先；输入法找同一语言的输入法（先精确匹配 `zh-Hans`，再看主语言 `zh`）；普通键盘布局找能直接打 ASCII 的布局（同语言优先）；都没有就不动。只看会话不跟随。当前已经是它就不重复切换。
-- 读取和切换输入源用 rdaccel 1.2 的 `rda_current_input_source`、`rda_list_input_sources`、`rda_injector_select_input_source`（macOS Text Input Sources）。服务端菜单和浮窗显示同步结果。
+- 读取和切换输入源用 rdaccel 1.2 的 `rda_current_input_source`、`rda_list_input_sources`、`rda_injector_select_input_source`（macOS Text Input Sources）。服务端菜单和客户端浮窗（勾选“Input Source”时）显示同步结果。
+
+## 会话统计
+
+客户端远程窗口右上角的调试浮窗用服务端的数据：服务端会话期间大约每秒发一次 rdaccel 应用消息，类型 `0x10002`（`RDA_MSG_USER_FIRST + 2`，`kSessionStatsMessageType`），服务端到客户端，内容是 JSON（`core/include/rdmachine/session_stats.h`）：
+
+```json
+{"transport":"udp","width":2880,"height":1800,"encoded_fps":57.5,"captured_fps":60,
+ "bitrate_kbps":3200,"target_kbps":8000,"bandwidth_kbps":120000,"rtt_ms":18.2,
+ "recent_loss_pct":0.4,"total_loss_pct":1.5,"frames_dropped_congestion":3,
+ "encoder":"VideoToolbox HEVC (low-latency)","input_source":"简体拼音","view_only":false}
+```
+
+速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是 rdaccel 判定丢失并重传的包，往返很短时也包括晚到的确认。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。
 
 ## 实现
 

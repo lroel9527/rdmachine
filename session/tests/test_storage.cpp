@@ -126,7 +126,6 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   s.clipboard_mode = ClipboardMode::kSend;
   s.fps = 30;
   s.bitrate_kbps = 6000;
-  s.show_stats_overlay = true;
   ASSERT_TRUE(SaveServerSettings(t.path() + "/new", s, &error)) << error;
   EXPECT_EQ(Mode(ServerSettingsPath(t.path() + "/new")), 0600);
   ServerSettings back;

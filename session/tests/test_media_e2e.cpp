@@ -12,6 +12,7 @@
 #include "fake_clipboard.h"
 #include "rdmachine/control_server.h"
 #include "rdmachine/session/media_host.h"
+#include "rdmachine/session_stats.h"
 #include "rdmachine/session/remote_session.h"
 #include "rdmachine/session/viewer.h"
 
@@ -30,6 +31,8 @@ bool HaveDisplay() {
 
 struct Frames {
   std::atomic<int> count{0};
+  std::atomic<int> stats_reports{0};
+  std::atomic<int> stats_width{0};
   std::atomic<int> width{0};
   std::atomic<rda_status> disconnect_reason{RDA_OK};
   std::atomic<bool> disconnected{false};
@@ -38,6 +41,13 @@ struct Frames {
 void OnStreamInfo(void* u, int32_t w, int32_t) { static_cast<Frames*>(u)->width = w; }
 void OnFrame(void* u, const rda_image*, const rda_rect*, size_t, const rda_frame_info*) {
   ++static_cast<Frames*>(u)->count;
+}
+void OnMessage(void* u, uint32_t type, const uint8_t* payload, size_t n) {
+  if (type != rdm::kSessionStatsMessageType) return;
+  auto r = rdm::DecodeSessionStats(std::string(reinterpret_cast<const char*>(payload), n));
+  if (!r) return;
+  static_cast<Frames*>(u)->stats_width = r->width;
+  ++static_cast<Frames*>(u)->stats_reports;
 }
 void OnState(void* u, rda_state s, rda_status reason) {
   if (s == RDA_STATE_DISCONNECTED) {
@@ -98,6 +108,7 @@ class MediaE2E : public ::testing::Test {
     o.viewer.on_stream_info = &OnStreamInfo;
     o.viewer.on_frame = &OnFrame;
     o.viewer.on_state = &OnState;
+    o.viewer.on_message = &OnMessage;
     return o;
   }
 
@@ -136,6 +147,10 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   EXPECT_GT(st.stats.frames_encoded, 0u);
   EXPECT_GT(st.stats.packets_sent, 0u);  // UDP measures the path (rdaccel 1.1)
   EXPECT_FALSE(st.encoder.empty());
+
+  // The overlay's figures arrive about once a second.
+  EXPECT_TRUE(WaitFor([&] { return frames.stats_reports > 0; }));
+  EXPECT_EQ(frames.stats_width, s->session().displays[0].width);
 
   s->Close();
   EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));

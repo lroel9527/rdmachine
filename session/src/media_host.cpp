@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <vector>
 
+#include "rdmachine/session/live_stats.h"
 #include "rdmachine/session/system_auth.h"
+#include "rdmachine/session_stats.h"
 
 namespace rdm {
 
 static_assert(kInputSourceMessageType == RDA_MSG_USER_FIRST + 1, "an application message type");
+static_assert(kSessionStatsMessageType == RDA_MSG_USER_FIRST + 2, "an application message type");
 
 namespace {
 
@@ -281,6 +284,11 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   status_.width = infos[static_cast<size_t>(request.display_index)].width;
   status_.height = infos[static_cast<size_t>(request.display_index)].height;
   media_connected_ = false;
+  {
+    std::lock_guard s(stats_mu_);
+    stats_stop_ = false;
+  }
+  stats_thread_ = std::thread(&MediaHost::StatsLoop, this);
   if (clipboard_) {
     clipboard_host_ = host;
     clipboard_->Start();
@@ -291,7 +299,60 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   return grant;
 }
 
+void MediaHost::StopStats() {
+  {
+    std::lock_guard s(stats_mu_);
+    stats_stop_ = true;
+  }
+  stats_cv_.notify_all();
+  if (stats_thread_.joinable()) stats_thread_.join();
+}
+
+void MediaHost::StatsLoop() {
+  LiveStatsSampler sampler;
+  std::unique_lock s(stats_mu_);
+  while (!stats_cv_.wait_for(s, std::chrono::seconds(1), [this] { return stats_stop_; })) {
+    s.unlock();
+    {
+      std::lock_guard lock(mu_);  // host_ stays alive while it is held
+      if (!host_) break;
+      rda_host_stats hs{};
+      hs.struct_size = sizeof(hs);
+      if (rda_host_get_stats(host_, &hs) == RDA_OK) {
+        const LiveStats ls = sampler.Update(hs, LiveStatsSampler::Clock::now());
+        if (ls.valid && media_connected_) {
+          SessionStatsReport r;
+          r.transport = status_.transport == MediaTransport::kTcp ? "tcp" : "udp";
+          r.width = status_.width;
+          r.height = status_.height;
+          r.encoded_fps = ls.encoded_fps;
+          r.captured_fps = ls.captured_fps;
+          r.bitrate_kbps = ls.bitrate_kbps;
+          r.target_kbps = ls.target_kbps;
+          r.bandwidth_kbps = ls.bandwidth_kbps;
+          r.rtt_ms = ls.rtt_ms;
+          r.recent_loss_pct = ls.recent_loss_pct;
+          r.total_loss_pct = ls.total_loss_pct;
+          r.frames_dropped_congestion = ls.frames_dropped_congestion;
+          char enc[64] = {};
+          rda_host_encoder_name(host_, enc, sizeof enc);
+          r.encoder = enc;
+          r.input_source = status_.input_source;
+          r.view_only = status_.view_only;
+          const std::string payload = EncodeSessionStats(r);
+          // Before the viewer is connected this is RDA_ERR_BUSY: try next time.
+          rda_host_send_message(host_, kSessionStatsMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
+                                payload.size());
+        }
+      }
+    }
+    s.lock();
+  }
+}
+
 void MediaHost::EndSession() {
+  // Not under mu_: the stats thread takes mu_ for each report.
+  StopStats();
   rda_host* host;
   rda_injector* injector;
   {

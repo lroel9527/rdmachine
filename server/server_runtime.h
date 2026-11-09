@@ -52,8 +52,6 @@ class ServerRuntime {
   // restarts with it; a running session ends.
   bool ApplySettings(const ServerSettings& saved, std::string* error);
   void Stop();
-  // Shows or hides the statistics panel: saved, no restart.
-  bool SetShowStatsOverlay(bool show, std::string* error);
 
   // The settings as saved in the file, and as in effect (with overrides).
   ServerSettings saved_settings() const;
