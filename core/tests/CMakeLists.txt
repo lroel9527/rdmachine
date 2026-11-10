@@ -18,6 +18,7 @@ add_executable(rdm_core_tests
   test_control.cpp
   test_clipboard_sync.cpp
   test_input_source_sync.cpp
+  test_desktop.cpp
   test_session_stats.cpp)
 target_link_libraries(rdm_core_tests PRIVATE rdmachine::core GTest::gtest_main)
 

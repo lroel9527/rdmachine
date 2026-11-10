@@ -65,10 +65,41 @@ TEST(Messages, SessionRequestDefaults) {
   EXPECT_EQ(s.display_index, 0);
   EXPECT_EQ(s.transport, rdm::MediaTransport::kUdp);
   EXPECT_FALSE(s.view_only);
-  auto out = RoundTrip(rdm::SessionRequest{1, rdm::MediaTransport::kTcp, true});
+  auto out = RoundTrip(rdm::SessionRequest{1, rdm::MediaTransport::kTcp, true, std::nullopt});
   EXPECT_EQ(out.display_index, 1);
   EXPECT_EQ(out.transport, rdm::MediaTransport::kTcp);
   EXPECT_TRUE(out.view_only);
+}
+
+TEST(Messages, SessionRequestAndReadyCarryTheDesktop) {
+  rdm::SessionRequest q;
+  q.desktop = rdm::DesktopSpec{2880, 1800, 2.0};
+  auto out = RoundTrip(q);
+  ASSERT_TRUE(out.desktop);
+  EXPECT_EQ(*out.desktop, *q.desktop);
+  EXPECT_FALSE(RoundTrip(rdm::SessionRequest{}).desktop);
+
+  // The scale may be left out (1); a desktop without a size is malformed.
+  auto r = rdm::ParseMessage(R"({"type":"session_request","desktop":{"width":1280,"height":720}})");
+  ASSERT_TRUE(r.message) << r.error;
+  EXPECT_EQ(*std::get<rdm::SessionRequest>(*r.message).desktop, (rdm::DesktopSpec{1280, 720, 1.0}));
+  for (const char* bad : {R"({"type":"session_request","desktop":7})",
+                          R"({"type":"session_request","desktop":{"width":0,"height":720}})",
+                          R"({"type":"session_request","desktop":{"width":1280}})",
+                          R"({"type":"session_request","desktop":{"width":1280,"height":720,"scale":0}})",
+                          R"({"type":"session_request","desktop":{"width":1280,"height":720,"scale":"2"}})"}) {
+    auto b = rdm::ParseMessage(bad);
+    EXPECT_FALSE(b.message) << bad;
+    EXPECT_NE(b.error.find("desktop"), std::string::npos) << b.error;
+  }
+
+  rdm::SessionReady s;
+  s.port = 4100;
+  EXPECT_FALSE(RoundTrip(s).desktop);
+  s.desktop = rdm::DesktopSpec{2560, 1440, 2.0};
+  auto ready = RoundTrip(s);
+  ASSERT_TRUE(ready.desktop);
+  EXPECT_EQ(*ready.desktop, *s.desktop);
 }
 
 TEST(Messages, SessionReadyCarriesKeyAndToken) {

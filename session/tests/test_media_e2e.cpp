@@ -8,9 +8,13 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <vector>
+#include <mutex>
+#include <memory>
 
 #include "fake_clipboard.h"
 #include "rdmachine/control_server.h"
+#include "rdmachine/desktop.h"
 #include "rdmachine/session/media_host.h"
 #include "rdmachine/session_stats.h"
 #include "rdmachine/session/remote_session.h"
@@ -120,7 +124,144 @@ class MediaE2E : public ::testing::Test {
   std::unique_ptr<ControlServer> server_;
 };
 
+// A desktop that only records what was asked of it: the real display stays
+// as it is, so the picture keeps its size (the real one: test_virtual_desktop_mac.mm).
+struct FakeDesktops {
+  std::mutex mu;
+  bool fail = false;
+  int built = 0, removed = 0;
+  std::vector<DesktopSpec> sizes;  // built at, then each Resize()
+
+  int Built() { std::lock_guard l(mu); return built; }
+  int Removed() { std::lock_guard l(mu); return removed; }
+  std::vector<DesktopSpec> Sizes() { std::lock_guard l(mu); return sizes; }
+};
+
+class FakeDesktop : public VirtualDesktop {
+ public:
+  FakeDesktop(std::shared_ptr<FakeDesktops> all, const DesktopSpec& d) : all_(std::move(all)), spec_(d) {}
+  ~FakeDesktop() override {
+    std::lock_guard l(all_->mu);
+    ++all_->removed;
+  }
+  DesktopSpec spec() const override { return spec_; }
+  bool Resize(const DesktopSpec& d, std::string*) override {
+    std::lock_guard l(all_->mu);
+    all_->sizes.push_back(d);
+    spec_ = d;
+    return true;
+  }
+
+ private:
+  std::shared_ptr<FakeDesktops> all_;
+  DesktopSpec spec_;
+};
+
+class MediaE2EDesktop : public MediaE2E {
+ protected:
+  void Configure(MediaHostOptions& mo) override {
+    mo.virtual_desktop = [all = desktops_](const DesktopSpec& d, std::string* error) -> std::unique_ptr<VirtualDesktop> {
+      std::lock_guard l(all->mu);
+      if (all->fail) {
+        *error = "no virtual display today";
+        return nullptr;
+      }
+      ++all->built;
+      all->sizes.push_back(d);
+      return std::make_unique<FakeDesktop>(all, d);
+    };
+  }
+
+  static void Ask(RemoteSession& s, const DesktopSpec& d) {
+    const std::string payload = EncodeDesktopSpec(d);
+    ASSERT_EQ(rda_viewer_send_message(s.viewer(), kDesktopRequestMessageType,
+                                      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()),
+              RDA_OK);
+  }
+
+  std::shared_ptr<FakeDesktops> desktops_ = std::make_shared<FakeDesktops>();
+};
+
 }  // namespace
+
+TEST_F(MediaE2EDesktop, BuildsTheDesktopTheClientAsksFor) {
+  Frames frames;
+  auto o = Options(&frames);
+  o.control.request.desktop = DesktopSpec{2879, 1801, 2.0};
+  o.control.request.display_index = 7;  // not used with a desktop: it is display 0
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  // Built as planned (whole points), and the client is told what it got.
+  ASSERT_TRUE(s->session().desktop);
+  EXPECT_EQ(*s->session().desktop, (DesktopSpec{2878, 1800, 2.0}));
+  EXPECT_EQ(desktops_->Built(), 1);
+  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
+  MediaHostStatus st = media_->Status();
+  ASSERT_TRUE(st.desktop);
+  EXPECT_EQ(*st.desktop, (DesktopSpec{2878, 1800, 2.0}));
+  EXPECT_EQ(st.width, 2878);
+
+  // The client's window changed: the desktop is rebuilt and the picture goes on.
+  Ask(*s, DesktopSpec{2048, 1536, 2.0});
+  EXPECT_TRUE(WaitFor([&] { return desktops_->Sizes().size() == 2; }));
+  EXPECT_EQ(desktops_->Sizes().back(), (DesktopSpec{2048, 1536, 2.0}));
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().desktop == DesktopSpec{2048, 1536, 2.0}; }));
+  const int before = frames.count;
+  EXPECT_TRUE(WaitFor([&] { return frames.count > before; }));
+  // The overlay's figures follow.
+  EXPECT_TRUE(WaitFor([&] { return frames.stats_width == 2048; }));
+
+  // The same size again, and nonsense: nothing to do.
+  Ask(*s, DesktopSpec{2049, 1537, 2.0});
+  Ask(*s, DesktopSpec{0, 0, 2.0});
+  // Another one goes through after them.
+  Ask(*s, DesktopSpec{1600, 1000, 1.0});
+  EXPECT_TRUE(WaitFor([&] { return desktops_->Sizes().size() == 3; }));
+  EXPECT_EQ(desktops_->Sizes().back(), (DesktopSpec{1600, 1000, 1.0}));
+  EXPECT_EQ(desktops_->Removed(), 0);
+
+  // The desktop goes with the session.
+  s->Close();
+  EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
+  EXPECT_EQ(desktops_->Removed(), 1);
+  EXPECT_FALSE(media_->Status().desktop);
+}
+
+TEST_F(MediaE2EDesktop, SharesTheDisplayAsItIsWhenTheDesktopCannotBeBuilt) {
+  {
+    std::lock_guard l(desktops_->mu);
+    desktops_->fail = true;
+  }
+  Frames frames;
+  auto o = Options(&frames);
+  o.control.request.desktop = DesktopSpec{2880, 1800, 2.0};
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_FALSE(s->session().desktop);
+  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
+  EXPECT_EQ(frames.width, s->session().displays[0].width);
+  // Asking again later changes nothing: there is no desktop to resize.
+  const std::string payload = EncodeDesktopSpec(DesktopSpec{2048, 1536, 2.0});
+  rda_viewer_send_message(s->viewer(), kDesktopRequestMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
+                          payload.size());
+  const int before = frames.stats_reports;
+  EXPECT_TRUE(WaitFor([&] { return frames.stats_reports > before; }));
+  EXPECT_FALSE(media_->Status().desktop);
+  EXPECT_EQ(desktops_->Built(), 0);
+}
+
+TEST_F(MediaE2E, ADesktopRequestIsIgnoredByAServerThatBuildsNone) {
+  Frames frames;
+  auto o = Options(&frames);
+  o.control.request.desktop = DesktopSpec{2880, 1800, 2.0};
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_FALSE(s->session().desktop);
+  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
+}
 
 TEST_F(MediaE2E, PictureArrivesOverUdp) {
   Frames frames;

@@ -5,6 +5,7 @@
 //                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
+//                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -16,10 +17,16 @@
 // --click=X,Y moves the server's pointer to pixel (X, Y) of the shared
 // display and clicks the left button once the pictures arrived, then waits
 // two seconds: for checking input end to end without the window.
+// --move=X,Y only moves the pointer there (no click) and waits two seconds.
 // --save-frame=PATH.bmp writes the last picture received (after the
 // click, if any): what a client would show.
 // --send-input-source=JSON sends a keyboard input source sync message (as
 // the window client does when the input source changes) once connected.
+// --desktop=2880x1800@2 asks the server for a desktop of that many pixels at
+// that scale (pixels per point) instead of its display as it is: what the
+// window client does with its window's size. --resize-desktop asks for
+// another one once the pictures arrived (the window was resized) and waits
+// for the picture to take that size; it fails if it does not.
 #include <unistd.h>
 
 #include <algorithm>
@@ -30,12 +37,14 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <rdaccel/rdaccel.h>
 
+#include "rdmachine/desktop.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
@@ -105,7 +114,8 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
-               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n");
+               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n"
+               "                         [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]\n");
   return 2;
 }
 
@@ -143,7 +153,9 @@ int main(int argc, char** argv) {
   bool accept_new = false;
   int want_frames = 1, seconds = 20;
   int click_x = -1, click_y = -1;
+  bool move_only = false;
   std::string save_frame, input_source_json;
+  std::optional<rdm::DesktopSpec> resize_desktop;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -156,9 +168,19 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--seconds", &v)) seconds = std::atoi(v.c_str());
     else if (Flag(a, "--known-hosts", &v)) known_hosts_path = v;
     else if (Flag(a, "--save-frame", &v)) save_frame = v;
+    else if (Flag(a, "--desktop", &v)) {
+      if (!(c.request.desktop = rdm::ParseDesktopSpec(v))) return Usage();
+    }
+    else if (Flag(a, "--resize-desktop", &v)) {
+      if (!(resize_desktop = rdm::ParseDesktopSpec(v))) return Usage();
+    }
     else if (Flag(a, "--send-input-source", &v)) {
       if (!rdm::DecodeInputSource(v)) return Usage();
       input_source_json = v;
+    }
+    else if (Flag(a, "--move", &v)) {
+      if (std::sscanf(v.c_str(), "%d,%d", &click_x, &click_y) != 2 || click_x < 0 || click_y < 0) return Usage();
+      move_only = true;
     }
     else if (Flag(a, "--click", &v)) {
       if (std::sscanf(v.c_str(), "%d,%d", &click_x, &click_y) != 2 || click_x < 0 || click_y < 0) return Usage();
@@ -229,6 +251,7 @@ int main(int argc, char** argv) {
   };
 
   const std::string host = c.host;  // opts is moved into the session below
+  const bool wanted_desktop = c.request.desktop.has_value();
   rdm::ConnectResult result;
   auto session = rdm::RemoteSession::Start(std::move(opts), &result);
   if (!session) {
@@ -248,12 +271,36 @@ int main(int argc, char** argv) {
               session->session().transport == rdm::MediaTransport::kTcp ? "tcp" : "udp", session->session().port);
   for (const auto& d : session->session().displays)
     std::printf("  display %d: %s %dx%d\n", d.index, d.name.c_str(), d.width, d.height);
+  if (session->session().desktop) {
+    std::printf("  desktop built: %s\n", rdm::FormatDesktopSpec(*session->session().desktop).c_str());
+  } else if (wanted_desktop) {
+    std::printf("  no desktop built: the server shares its display as it is\n");
+  }
   std::fflush(stdout);
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
   while (stats.frames < want_frames && !stats.ended && std::chrono::steady_clock::now() < deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   std::printf("received %d frame(s) of %dx%d\n", stats.frames.load(), stats.width.load(), stats.height.load());
+  bool resize_failed = false;
+  if (resize_desktop && stats.frames > 0) {
+    const std::optional<rdm::DesktopSpec> planned = rdm::PlanDesktop(*resize_desktop);
+    const std::string payload = rdm::EncodeDesktopSpec(*resize_desktop);
+    const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kDesktopRequestMessageType,
+                                                  reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    std::printf("asked for desktop %s: %s\n", rdm::FormatDesktopSpec(*resize_desktop).c_str(),
+                st == RDA_OK ? "sent" : rda_last_error());
+    std::fflush(stdout);
+    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    auto resized = [&] { return planned && stats.width == planned->width && stats.height == planned->height; };
+    const int frames_before = stats.frames;
+    while (!(resized() && stats.frames > frames_before) && !stats.ended && std::chrono::steady_clock::now() < limit)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    resize_failed = !resized();
+    std::printf("the picture is now %dx%d%s\n", stats.width.load(), stats.height.load(),
+                resize_failed ? " (not what was asked for)" : "");
+    std::fflush(stdout);
+  }
   if (!input_source_json.empty()) {
     const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kInputSourceMessageType,
                                                   reinterpret_cast<const uint8_t*>(input_source_json.data()),
@@ -273,11 +320,13 @@ int main(int argc, char** argv) {
       rda_viewer_send_input(session->viewer(), &ev);
     };
     send(RDA_INPUT_MOUSE_MOVE);
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    send(RDA_INPUT_MOUSE_DOWN);
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
-    send(RDA_INPUT_MOUSE_UP);
-    std::printf("clicked at %d,%d\n", click_x, click_y);
+    if (!move_only) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      send(RDA_INPUT_MOUSE_DOWN);
+      std::this_thread::sleep_for(std::chrono::milliseconds(80));
+      send(RDA_INPUT_MOUSE_UP);
+    }
+    std::printf("%s %d,%d\n", move_only ? "moved the pointer to" : "clicked at", click_x, click_y);
     std::fflush(stdout);
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
@@ -290,5 +339,5 @@ int main(int argc, char** argv) {
     }
   }
   session->Close();
-  return stats.frames >= want_frames ? 0 : 1;
+  return stats.frames >= want_frames && !resize_failed ? 0 : 1;
 }

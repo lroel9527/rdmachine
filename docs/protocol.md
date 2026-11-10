@@ -19,8 +19,8 @@ rdmachine 的客户端和服务端之间有两条连接：
   │ ◀── server_hello {protocol, server_name, auth_methods} ─ │
   │ ── auth {method:"password", username, password} ──────▶ │  服务端用系统账号校验（PAM）
   │ ◀── auth_result {ok:true} ───────────────────────────── │
-  │ ── session_request {display_index, transport} ────────▶ │  服务端生成 key + auth_token，
-  │ ◀── session_ready {port, key, auth_token, displays} ─── │  用 key 开 rdaccel Host 等待连接
+  │ ── session_request {desktop, transport} ──────────────▶ │  服务端按 desktop 建虚拟显示器，生成 key + auth_token，
+  │ ◀── session_ready {port, key, auth_token, desktop} ──── │  用 key 开 rdaccel Host 等待连接
   │                                                          │
   │ ══ rdaccel UDP：rda_udp_connect(host, port)，key 加密，auth_token 进 on_auth ══▶ │
   │ ◀══════════════════ 画面 / 光标 / 键鼠 / 剪贴板 ══════════════════════════════▶ │
@@ -114,6 +114,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `display_index` | 整数 ≥ 0 | 0 | 采集哪块显示器，0 是主显示器（同 rdaccel 的 `display_index`） |
 | `transport` | 字符串 | `udp` | `udp` 或 `tcp`。客户端 UDP 建连超时后，可以在同一条控制连接上用 `tcp` 再请求一次：服务端先结束正在进行的会话，再按新请求开始（新的密钥和令牌） |
 | `view_only` | 布尔 | false | 只看不控：服务端丢弃这个会话的键鼠事件 |
+| `desktop` | 对象 | 无 | 客户端要的桌面：`width`、`height`（像素，≥ 1）、`scale`（每点像素数，可省略，默认 1）。服务端按它建虚拟显示器并共享那块屏，这时 `display_index` 不起作用。见下文“请求桌面” |
 
 ### session_ready（服务端 → 客户端）
 
@@ -124,6 +125,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `key` | base64，32 字节 | 本次会话的 rdaccel 密钥，每次会话重新随机生成 |
 | `auth_token` | base64，32 字节 | 一次性令牌，客户端放进 rdaccel viewer 的 `auth_token`；服务端在 `on_auth` 里用常数时间比较核对，用一次就作废，30 秒内没用也作废 |
 | `displays` | 数组 | 可选的显示器：`index`、`name`、`width`、`height`（像素）、`scale`（每点像素数） |
+| `desktop` | 对象，可选 | 为这次请求建好的桌面（`width`、`height`、`scale`，尺寸可能被调整过）。没有这个字段：客户端没请求，或者服务端建不了，画面是服务端自己的显示器，客户端按比例缩放显示 |
 
 客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
@@ -138,6 +140,26 @@ rdmachine 的客户端和服务端之间有两条连接：
 ### error（双向）
 
 `{"type":"error","code":"<错误码>","message":"<给人看的说明，可选>"}`，发完关闭连接。
+
+## 请求桌面
+
+要解决的问题：HiDPI 是被控端显示模式的属性。被控端是 1 倍的屏（没接显示器、普通外接屏、虚拟机）时，画面拉到 Retina 客户端上要么字很小、要么放大后发虚；像素数或宽高比和客户端窗口不一致时还要经过非整数倍缩放、留黑边。客户端怎么缩放都补不回来。
+
+做法：客户端只说自己要什么样的桌面，服务端去建。
+
+- **规格**（`DesktopSpec`）：`width`、`height` 是像素，`scale` 是每点像素数。Retina 屏上 1440 × 900 点的窗口请求 `{"width":2880,"height":1800,"scale":2}`。
+- **服务端怎么取整**（`PlanDesktop`）：`scale` 归到 1 或 2（macOS 只有这两种；≥ 1.5 算 2），像素尽量原样保留（一个像素对一个像素比“一个点多大”重要）；宽高取偶数（点数是整数，视频编码也要偶数）；每边至少 320 点，最大 7680 × 4320 像素。尺寸或 `scale` 不是正数的请求当作没有请求。
+- **建屏**（macOS，`CGVirtualDisplay`）：一块名为“RDMachine Desktop”的虚拟显示器，只有一个模式，就是请求的点数和像素数；它成为主显示器（rdaccel 的 0 号屏），真实显示器全部镜像它，所以所有窗口都在这块屏上，被控端屏幕上看到的是同一个桌面。没有显示器的 Mac 上它就是唯一的屏。
+- **会话开始时**：`session_request.desktop`。建好后 `session_ready.desktop` 回实际规格，画面流的尺寸就是它的像素数。
+- **窗口变化时**：客户端发 rdaccel 应用消息，类型 `0x10003`（`RDA_MSG_USER_FIRST + 3`，`kDesktopRequestMessageType`），客户端到服务端，内容是 JSON `{"width":2048,"height":1536,"scale":2}`。服务端停采集、原地改虚拟屏的模式（显示器不变）、重新开始采集，客户端收到新尺寸的画面流（rdaccel 的 `on_stream_info`）；没有单独的应答。连续几条只处理最新的一条；取整后和现在一样的不处理；会话开始时没建桌面的，这条消息忽略。Mac 客户端在拖动结束、进出全屏、窗口换到缩放不同的屏幕之后 0.25 秒发送，拖动过程中不发。
+- **结束时**：会话结束（包括服务端进程退出或崩溃：虚拟屏随进程消失）后，真实显示器取消镜像，回到原来的位置和分辨率。
+- **建不了时**：系统没有 `CGVirtualDisplay`、创建失败、Linux 服务端（暂时没有实现）：服务端照常开始会话，共享 `display_index` 指的那块真实显示器，`session_ready` 里没有 `desktop`，客户端按比例缩放显示（窗口保持服务端屏幕的宽高比）。不回错误。
+- **键鼠**：坐标仍然是画面流里的像素。rdaccel 的注入器每次换算时读显示器当前的模式，桌面改过大小之后不用重建。
+- 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `desktop`，旧客户端不发。
+
+注意：进程只有通过 AppKit 的事件循环才能得知新显示器的模式，所以 macOS 上服务端的主线程总是跑 `NSApplication`（`--headless` 也是，只是不显示任何界面）。
+
+实现：`core/include/rdmachine/desktop.h`（规格、取整、消息）；`session/include/rdmachine/session/virtual_desktop.h`（`VirtualDesktop`，macOS 实现在 `session/src/virtual_desktop_mac.mm`）；服务端在 `MediaHost`（`StartSession` 里建，`DesktopLoop` 处理中途的请求）；Mac 客户端在 `client/main.mm`（`initialDesktop`、`requestDesktop`）；命令行客户端 `rdmachine-connect --desktop=2880x1800@2 --resize-desktop=2048x1536@2`。测试：`core/tests/test_desktop.cpp`、`session/tests/test_media_e2e.cpp`（用记录调用的假桌面）、`session/tests/test_virtual_desktop_mac.mm` 和 `tools/smoke_test.sh`（真的虚拟屏，会让本机屏幕重排几秒，要 `RDM_TEST_VIRTUAL_DESKTOP=1`）。
 
 ## 剪贴板
 
@@ -207,3 +229,4 @@ rdmachine 的客户端和服务端之间有两条连接：
 - 公钥登录（类似 SSH 的 authorized_keys）和被控端审批弹窗（NoMachine 的 0/1/2 三档）：M1。
 - 登录窗口和锁屏时的连接：M1（服务端拆成 LaunchDaemon + 用户 / 登录窗口会话里的 agent，协议本身不变）。
 - 切换显示器、文件传输协商、断线后恢复同一会话：M1 起逐步加消息类型。
+- 请求桌面：Linux 服务端的虚拟屏；多块屏的桌面；会话期间不让被控端的真实屏幕显示画面（隐私屏）。

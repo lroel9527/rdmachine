@@ -4,8 +4,10 @@ add_executable(rdm_session_tests
   test_media_e2e.cpp)
 if(APPLE)
   # The real NSPasteboard; needs a logged-in session (a pasteboard server).
-  target_sources(rdm_session_tests PRIVATE test_system_clipboard_mac.mm)
-  set_source_files_properties(test_system_clipboard_mac.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+  # The real virtual display (RDM_TEST_VIRTUAL_DESKTOP=1: it rearranges the displays).
+  target_sources(rdm_session_tests PRIVATE test_system_clipboard_mac.mm test_virtual_desktop_mac.mm)
+  set_source_files_properties(test_system_clipboard_mac.mm test_virtual_desktop_mac.mm
+    PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 endif()
 target_link_libraries(rdm_session_tests PRIVATE rdmachine::session GTest::gtest_main)
 target_include_directories(rdm_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/core/tests)

@@ -170,6 +170,7 @@ ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
   ready.key = secrets.key;
   ready.auth_token = secrets.auth_token;
   ready.displays = std::move(grant->displays);
+  ready.desktop = grant->desktop;
   std::fill(secrets.key.begin(), secrets.key.end(), 0);
   return {{ready}, false};
 }

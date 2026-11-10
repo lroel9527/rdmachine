@@ -21,6 +21,7 @@ struct SessionGrant {
   MediaTransport transport = MediaTransport::kUdp;
   uint16_t port = 0;
   std::vector<DisplayInfo> displays;
+  std::optional<DesktopSpec> desktop;  // built for request.desktop
 };
 
 // Who a session is for, as the control connection saw it (for status

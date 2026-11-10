@@ -129,8 +129,39 @@ json ToJson(const AuthResult& m) {
   if (m.retry_after_ms) j["retry_after_ms"] = *m.retry_after_ms;
   return j;
 }
+json ToJson(const DesktopSpec& d) { return {{"width", d.width}, {"height", d.height}, {"scale", d.scale}}; }
+
+// An optional "desktop" object. False (with *error) only when it is there
+// and malformed.
+bool ReadDesktop(const json& j, std::optional<DesktopSpec>* out, std::string* error) {
+  auto it = j.find("desktop");
+  if (it == j.end() || it->is_null()) return true;
+  if (!it->is_object()) {
+    *error = "desktop: not an object";
+    return false;
+  }
+  Reader r(*it);
+  DesktopSpec d;
+  int64_t width = 0, height = 0;
+  if (!r.Int("width", &width, true, 1, 1 << 20) || !r.Int("height", &height, true, 1, 1 << 20) ||
+      !r.Num("scale", &d.scale, false)) {
+    *error = "desktop: " + r.error;
+    return false;
+  }
+  if (!(d.scale > 0) || d.scale > 16) {
+    *error = "desktop: scale: out of range";
+    return false;
+  }
+  d.width = static_cast<int32_t>(width);
+  d.height = static_cast<int32_t>(height);
+  *out = d;
+  return true;
+}
+
 json ToJson(const SessionRequest& m) {
-  return {{"display_index", m.display_index}, {"transport", TransportName(m.transport)}, {"view_only", m.view_only}};
+  json j = {{"display_index", m.display_index}, {"transport", TransportName(m.transport)}, {"view_only", m.view_only}};
+  if (m.desktop) j["desktop"] = ToJson(*m.desktop);
+  return j;
 }
 json ToJson(const SessionReady& m) {
   json displays = json::array();
@@ -138,11 +169,13 @@ json ToJson(const SessionReady& m) {
     displays.push_back(
         {{"index", d.index}, {"name", d.name}, {"width", d.width}, {"height", d.height}, {"scale", d.scale}});
   }
-  return {{"transport", TransportName(m.transport)},
-          {"port", m.port},
-          {"key", Base64Encode(m.key)},
-          {"auth_token", Base64Encode(m.auth_token)},
-          {"displays", displays}};
+  json j = {{"transport", TransportName(m.transport)},
+            {"port", m.port},
+            {"key", Base64Encode(m.key)},
+            {"auth_token", Base64Encode(m.auth_token)},
+            {"displays", displays}};
+  if (m.desktop) j["desktop"] = ToJson(*m.desktop);
+  return j;
 }
 json ToJson(const Ping& m) { return {{"id", m.id}}; }
 json ToJson(const Pong& m) { return {{"id", m.id}}; }
@@ -207,7 +240,7 @@ ParseResult ParseAuthResult(Reader& r) {
   return Ok(std::move(m));
 }
 
-ParseResult ParseSessionRequest(Reader& r) {
+ParseResult ParseSessionRequest(const json& j, Reader& r) {
   SessionRequest m;
   int64_t display = 0;
   std::string transport = "udp";
@@ -218,6 +251,8 @@ ParseResult ParseSessionRequest(Reader& r) {
   if (!t) return Bad("transport: unknown");
   m.display_index = static_cast<int32_t>(display);
   m.transport = *t;
+  std::string error;
+  if (!ReadDesktop(j, &m.desktop, &error)) return Bad(error);
   return Ok(std::move(m));
 }
 
@@ -249,6 +284,8 @@ ParseResult ParseSessionReady(const json& j, Reader& r) {
     info.height = static_cast<int32_t>(height);
     m.displays.push_back(std::move(info));
   }
+  std::string error;
+  if (!ReadDesktop(j, &m.desktop, &error)) return Bad(error);
   return Ok(std::move(m));
 }
 
@@ -288,7 +325,7 @@ ParseResult ParseMessage(std::string_view text) {
   if (type == "server_hello") return ParseServerHello(j, r);
   if (type == "auth") return ParseAuth(r);
   if (type == "auth_result") return ParseAuthResult(r);
-  if (type == "session_request") return ParseSessionRequest(r);
+  if (type == "session_request") return ParseSessionRequest(j, r);
   if (type == "session_ready") return ParseSessionReady(j, r);
   if (type == "ping" || type == "pong") {
     int64_t id = 0;

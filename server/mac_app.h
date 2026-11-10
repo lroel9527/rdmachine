@@ -19,6 +19,12 @@ struct MenuBarAppInfo {
 // (the caller stops the runtime).
 void RunMenuBarApp(ServerRuntime& runtime, const MenuBarAppInfo& info);
 
+// --headless: no menu bar icon or window, but still AppKit's main loop until
+// SIGINT or SIGTERM. A process only follows display changes (a virtual
+// desktop built for a client, a new resolution) through that loop; with a
+// bare run loop the new display's size and scale stay unknown to it.
+void RunHeadlessApp();
+
 // A modal alert for a server that could not start (no menu bar icon yet).
 void ShowStartupError(const std::string& message);
 

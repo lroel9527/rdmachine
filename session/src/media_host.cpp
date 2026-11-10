@@ -11,6 +11,7 @@ namespace rdm {
 
 static_assert(kInputSourceMessageType == RDA_MSG_USER_FIRST + 1, "an application message type");
 static_assert(kSessionStatsMessageType == RDA_MSG_USER_FIRST + 2, "an application message type");
+static_assert(kDesktopRequestMessageType == RDA_MSG_USER_FIRST + 3, "an application message type");
 
 namespace {
 
@@ -83,6 +84,16 @@ void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, siz
   if (type == kInputSourceMessageType) {
     if (auto wanted = DecodeInputSource(std::string(reinterpret_cast<const char*>(payload), n))) {
       self->SyncInputSource(*wanted);
+    }
+  }
+  if (type == kDesktopRequestMessageType) {
+    // Only the latest counts: a window being dragged larger sends several.
+    if (auto wanted = DecodeDesktopSpec(std::string(reinterpret_cast<const char*>(payload), n))) {
+      {
+        std::lock_guard lock(self->desktop_mu_);
+        self->desktop_wanted_ = *wanted;
+      }
+      self->desktop_cv_.notify_all();
     }
   }
 }
@@ -160,6 +171,31 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     return std::nullopt;
   }
 
+  // The desktop the client asked for. It becomes the main display, which is
+  // rdaccel's display 0, so everything below finds it there.
+  int32_t display_index = request.display_index;
+  std::unique_ptr<VirtualDesktop> desktop;
+  if (request.desktop) {
+    const std::optional<DesktopSpec> planned = PlanDesktop(*request.desktop);
+    if (!options_.virtual_desktop) {
+      Log("desktop " + FormatDesktopSpec(*request.desktop) + " asked for, but this server cannot build one; " +
+          "sharing the display as it is");
+    } else if (!planned) {
+      Log("desktop request ignored: not a usable size");
+    } else {
+      std::string why;
+      desktop = options_.virtual_desktop(*planned, &why);
+      if (desktop) {
+        display_index = 0;
+        Log("desktop built: " + FormatDesktopSpec(desktop->spec()) + " (asked for " +
+            FormatDesktopSpec(*request.desktop) + ")");
+      } else {
+        Log("desktop " + FormatDesktopSpec(*planned) + " could not be built: " + why +
+            "; sharing the display as it is");
+      }
+    }
+  }
+
   // Displays.
   size_t count = 0;
   if (rda_list_displays(nullptr, 0, &count) != RDA_OK || count == 0) {
@@ -174,11 +210,12 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     return std::nullopt;
   }
   infos.resize(std::min(count, infos.size()));
-  if (request.display_index < 0 || static_cast<size_t>(request.display_index) >= infos.size()) {
+  if (display_index < 0 || static_cast<size_t>(display_index) >= infos.size()) {
     *error = "no_display";
     return std::nullopt;
   }
   SessionGrant grant;
+  if (desktop) grant.desktop = desktop->spec();
   for (const rda_display_info& d : infos) {
     // rdaccel reports pixels; the scale is not exposed yet (M0 reports 1).
     grant.displays.push_back(DisplayInfo{d.index, d.name, d.width, d.height, 1.0});
@@ -190,7 +227,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   if (!view_only) {
     rda_injector_config ic;
     rda_injector_config_default(&ic);
-    ic.display_index = request.display_index;
+    ic.display_index = display_index;
     const rda_status s = rda_injector_create(&ic, &injector);
     if (s != RDA_OK) {
       // Usually the macOS Accessibility permission. The picture still works.
@@ -238,7 +275,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   rda_host_config_default(&cfg);
   if (options_.fps > 0) cfg.fps = options_.fps;
   if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
-  cfg.display_index = request.display_index;
+  cfg.display_index = display_index;
   cfg.encryption_key = secrets.key.data();  // copied by rdaccel
   cfg.keep_serving = 0;                      // one viewer per session
   // The server's own menu bar menu, statistics panel and dialogs are part
@@ -281,8 +318,20 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   status_.view_only = injector == nullptr;
   status_.input_unavailable = !view_only && injector == nullptr;
   status_.started = std::chrono::steady_clock::now();
-  status_.width = infos[static_cast<size_t>(request.display_index)].width;
-  status_.height = infos[static_cast<size_t>(request.display_index)].height;
+  status_.width = infos[static_cast<size_t>(display_index)].width;
+  status_.height = infos[static_cast<size_t>(display_index)].height;
+  if (desktop) {
+    status_.desktop = desktop->spec();
+    status_.width = desktop->spec().width;
+    status_.height = desktop->spec().height;
+    desktop_ = std::move(desktop);
+    {
+      std::lock_guard d(desktop_mu_);
+      desktop_stop_ = false;
+      desktop_wanted_.reset();
+    }
+    desktop_thread_ = std::thread(&MediaHost::DesktopLoop, this);
+  }
   media_connected_ = false;
   {
     std::lock_guard s(stats_mu_);
@@ -293,7 +342,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     clipboard_host_ = host;
     clipboard_->Start();
   }
-  Log("session started on display " + std::to_string(request.display_index) + (view_only ? " (view only)" : "") +
+  Log("session started on display " + std::to_string(display_index) + (view_only ? " (view only)" : "") +
       ", media " + (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
   return grant;
@@ -350,11 +399,56 @@ void MediaHost::StatsLoop() {
   }
 }
 
+void MediaHost::StopDesktopLoop() {
+  {
+    std::lock_guard d(desktop_mu_);
+    desktop_stop_ = true;
+  }
+  desktop_cv_.notify_all();
+  if (desktop_thread_.joinable()) desktop_thread_.join();
+}
+
+void MediaHost::DesktopLoop() {
+  std::unique_lock d(desktop_mu_);
+  for (;;) {
+    desktop_cv_.wait(d, [this] { return desktop_stop_ || desktop_wanted_; });
+    if (desktop_stop_) break;
+    const DesktopSpec wanted = *desktop_wanted_;
+    desktop_wanted_.reset();
+    d.unlock();
+    {
+      std::lock_guard lock(mu_);  // host_ and desktop_ stay alive while it is held
+      const std::optional<DesktopSpec> planned = PlanDesktop(wanted);
+      if (host_ && desktop_ && planned && *planned != desktop_->spec()) {
+        // Capture reads the display's size when it starts, and a new size is
+        // a new stream to the viewer (on_stream_info); the injector and the
+        // cursor follow the display by themselves.
+        rda_host_stop_capture(host_);
+        std::string why;
+        const bool ok = desktop_->Resize(*planned, &why);
+        const DesktopSpec now = desktop_->spec();
+        status_.desktop = now;
+        status_.width = now.width;
+        status_.height = now.height;
+        Log(ok ? "desktop resized: " + FormatDesktopSpec(now)
+               : "desktop could not be resized to " + FormatDesktopSpec(*planned) + ": " + why + "; it stays " +
+                     FormatDesktopSpec(now));
+        if (rda_host_start_capture(host_) != RDA_OK) {
+          Log(std::string("capture failed after the desktop changed: ") + rda_last_error());
+        }
+      }
+    }
+    d.lock();
+  }
+}
+
 void MediaHost::EndSession() {
-  // Not under mu_: the stats thread takes mu_ for each report.
+  // Not under mu_: the stats and desktop threads take mu_ for their work.
   StopStats();
+  StopDesktopLoop();
   rda_host* host;
   rda_injector* injector;
+  std::unique_ptr<VirtualDesktop> desktop;
   {
     std::lock_guard lock(mu_);
     host = host_;
@@ -370,8 +464,15 @@ void MediaHost::EndSession() {
     injector = injector_;
     injector_ = nullptr;
     clipboard_.reset();  // no on_message after rda_host_destroy
+    desktop = std::move(desktop_);
   }
   if (injector) rda_injector_destroy(injector);
+  // Last, with nothing capturing or pointing at it any more: the real
+  // displays are as they were before the session.
+  if (desktop) {
+    desktop.reset();
+    Log("desktop removed");
+  }
   Log("session ended");
 }
 

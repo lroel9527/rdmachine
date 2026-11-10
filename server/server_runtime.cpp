@@ -70,6 +70,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.inject_input = !s.view_only;
   mo.clipboard = SystemClipboard();
   mo.clipboard_mode = s.clipboard_mode;
+  mo.virtual_desktop = SystemVirtualDesktop();
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;
   mo.log = options_.log;

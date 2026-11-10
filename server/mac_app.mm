@@ -429,6 +429,28 @@ void RunMenuBarApp(ServerRuntime& runtime, const MenuBarAppInfo& info) {
   }
 }
 
+void RunHeadlessApp() {
+  @autoreleasepool {
+    [NSApplication sharedApplication];
+    // Nothing of it shows: no Dock icon, no menu bar, never in front.
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+    std::vector<dispatch_source_t> sources;
+    for (int sig : {SIGINT, SIGTERM}) {
+      dispatch_source_t src = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, static_cast<uintptr_t>(sig), 0,
+                                                     dispatch_get_main_queue());
+      dispatch_source_set_event_handler(src, ^{
+        StopApp();
+      });
+      dispatch_resume(src);
+      sources.push_back(src);
+    }
+    [NSApp run];
+    for (dispatch_source_t s : sources) dispatch_source_cancel(s);
+  }
+}
+
 void ShowStartupError(const std::string& message) {
   @autoreleasepool {
     [NSApplication sharedApplication];

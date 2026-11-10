@@ -100,16 +100,12 @@ int Usage() {
   return 2;
 }
 
-#if defined(__APPLE__)
-void StopMainLoop(void*) { CFRunLoopStop(CFRunLoopGetMain()); }
-#endif
-
-// Blocks until SIGINT or SIGTERM. On macOS the main thread runs a run loop
-// meanwhile: rdaccel's input injector needs one to switch input sources
-// while typing text.
 #if !defined(__APPLE__)
-// On Linux the signals are blocked first, in main() before any thread
-// starts, so that every thread inherits the mask and sigwait() gets them.
+// Blocks until SIGINT or SIGTERM. The signals are blocked first, in main()
+// before any thread starts, so that every thread inherits the mask and
+// sigwait() gets them. (macOS: RunMenuBarApp / RunHeadlessApp; the main
+// thread runs AppKit's loop there, which rdaccel's input injector needs to
+// switch input sources and the process needs to follow display changes.)
 sigset_t StopSignals() {
   sigset_t set;
   sigemptyset(&set);
@@ -117,25 +113,13 @@ sigset_t StopSignals() {
   sigaddset(&set, SIGTERM);
   return set;
 }
-#endif
 
 void WaitForSignal() {
-#if defined(__APPLE__)
-  signal(SIGINT, SIG_IGN);
-  signal(SIGTERM, SIG_IGN);
-  for (int sig : {SIGINT, SIGTERM}) {
-    dispatch_source_t src =
-        dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, static_cast<uintptr_t>(sig), 0, dispatch_get_main_queue());
-    dispatch_source_set_event_handler_f(src, &StopMainLoop);
-    dispatch_resume(src);
-  }
-  CFRunLoopRun();
-#else
   const sigset_t set = StopSignals();
   int sig = 0;
   sigwait(&set, &sig);
-#endif
 }
+#endif
 
 }  // namespace
 
@@ -233,7 +217,7 @@ int main(int argc, char** argv) {
     info.version = rdm::VersionString();
     rdm::RunMenuBarApp(runtime, info);  // until Quit, SIGINT or SIGTERM
   } else {
-    WaitForSignal();
+    rdm::RunHeadlessApp();  // until SIGINT or SIGTERM
   }
 #else
   (void)headless;

@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include "rdmachine/desktop.h"
 #include "rdmachine/protocol.h"
 
 namespace rdm {
@@ -54,6 +55,10 @@ struct SessionRequest {
   int32_t display_index = 0;  // 0 = main display
   MediaTransport transport = MediaTransport::kUdp;
   bool view_only = false;
+  // The desktop the client wants (docs/protocol.md, "请求桌面"): the server
+  // builds a virtual display of this shape and shares that; display_index is
+  // then not used. Empty: share the display as it is.
+  std::optional<DesktopSpec> desktop;
 };
 
 struct DisplayInfo {
@@ -71,6 +76,10 @@ struct SessionReady {
   std::array<uint8_t, kSessionKeyBytes> key{};         // fresh per session
   std::array<uint8_t, kAuthTokenBytes> auth_token{};   // one use, short-lived
   std::vector<DisplayInfo> displays;
+  // The desktop built for the request (the size may have been adjusted).
+  // Empty: none was asked for or the server cannot build one; the picture
+  // is the server's own display and the client scales it.
+  std::optional<DesktopSpec> desktop;
 };
 
 struct Ping {

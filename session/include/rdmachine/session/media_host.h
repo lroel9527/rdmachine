@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -17,6 +18,7 @@
 #include "rdmachine/clipboard_sync.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
+#include "rdmachine/session/virtual_desktop.h"
 
 namespace rdm {
 
@@ -36,6 +38,9 @@ struct MediaHostOptions {
   // sessions never take the client's clipboard.
   std::shared_ptr<Clipboard> clipboard;
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
+  // Builds the desktop a client asks for (docs/protocol.md, "请求桌面").
+  // Empty = requests are not honoured: the display is shared as it is.
+  VirtualDesktopFactory virtual_desktop;
   int32_t fps = 0;           // 0 = rdaccel's default
   int64_t bitrate_bps = 0;   // 0 = rdaccel's default
   std::function<void(const std::string&)> log;  // may be empty
@@ -52,6 +57,7 @@ struct MediaHostStatus {
                                    // (on macOS: no Accessibility permission)
   std::chrono::steady_clock::time_point started{};
   int32_t width = 0, height = 0;  // the shared display, pixels
+  std::optional<DesktopSpec> desktop;  // the virtual desktop built for the client, if any
   std::string encoder;            // empty before the first frame
   // Keyboard input source sync (docs/protocol.md, "键盘语言同步"): what the
   // client last reported, and what this computer selected for it (empty:
@@ -88,6 +94,11 @@ class MediaHost : public ServerDelegate {
   // client for its overlay (docs/protocol.md, "会话统计").
   void StatsLoop();
   void StopStats();
+  // The client's window changed (kDesktopRequestMessageType): the desktop is
+  // rebuilt at the new size on a thread of its own, as capture has to stop
+  // and start around it, which no rdaccel callback may do.
+  void DesktopLoop();
+  void StopDesktopLoop();
   void Log(const std::string& line);
 
   const MediaHostOptions options_;
@@ -100,6 +111,12 @@ class MediaHost : public ServerDelegate {
   std::atomic<rda_host*> clipboard_host_{nullptr};  // where clipboard_ sends
   MediaHostStatus status_;  // guarded by mu_; stats filled in by Status()
   std::atomic<bool> media_connected_{false};
+  std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_
+  std::thread desktop_thread_;                // runs while desktop_ exists
+  std::mutex desktop_mu_;
+  std::condition_variable desktop_cv_;
+  std::optional<DesktopSpec> desktop_wanted_;  // the latest request not yet acted on
+  bool desktop_stop_ = false;
   std::thread stats_thread_;
   std::mutex stats_mu_;
   std::condition_variable stats_cv_;

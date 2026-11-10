@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 
+#include "rdmachine/desktop.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session_stats.h"
@@ -208,6 +209,9 @@ NSString* DescribeError(const rdm::ConnectResult& r) {
 @property(nonatomic, readonly) NSWindow* window;
 @property(nonatomic, copy) void (^onClose)(void);
 - (instancetype)initWithTitle:(NSString*)title;
+// The desktop to ask the server for: this window's picture area at its
+// largest comfortable size on its screen, in that screen's pixels.
+- (rdm::DesktopSpec)initialDesktop;
 - (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session;
 - (void)endSession;
 - (void)send:(const rda_input_event&)ev;
@@ -326,6 +330,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   int32_t _streamW, _streamH;  // main thread
   id _keyMonitor;
   std::string _sentInputSource;  // id last sent to the server; main thread
+  // The server built a desktop for this window (docs/protocol.md, "请求桌面"):
+  // the picture is the window's own pixels, and when the window changes the
+  // server is asked for a desktop of the new size. Main thread.
+  BOOL _desktopBuilt;
+  std::optional<rdm::DesktopSpec> _desktopWanted;  // last asked for
   CALayer* _statsLayer;          // the statistics overlay's background; main thread
   CATextLayer* _statsText;       // its text
   std::optional<rdm::SessionStatsReport> _stats;
@@ -391,9 +400,61 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   return self;
 }
 
+// 85% of the screen, as the window is sized to the stream (streamSizeChanged).
+- (rdm::DesktopSpec)initialDesktop {
+  NSScreen* screen = _window.screen ?: NSScreen.mainScreen;
+  const NSSize room = screen.visibleFrame.size;
+  const double scale = screen.backingScaleFactor > 0 ? screen.backingScaleFactor : 1;
+  rdm::DesktopSpec d;
+  d.width = static_cast<int32_t>(std::floor(room.width * 0.85) * scale);
+  d.height = static_cast<int32_t>(std::floor(room.height * 0.85) * scale);
+  d.scale = scale;
+  return d;
+}
+
+// The picture area in pixels, as a desktop request.
+- (rdm::DesktopSpec)viewDesktop {
+  const double scale = _window.backingScaleFactor > 0 ? _window.backingScaleFactor : 1;
+  const NSSize b = _view.bounds.size;
+  rdm::DesktopSpec d;
+  d.width = static_cast<int32_t>(std::lround(b.width * scale));
+  d.height = static_cast<int32_t>(std::lround(b.height * scale));
+  d.scale = scale;
+  return d;
+}
+
+// Main thread. The window's size or screen changed: once it has settled,
+// ask the server for a desktop of the new size. Nothing is sent while the
+// window is being dragged (every step would rebuild the server's display).
+- (void)desktopNeedsUpdate {
+  if (!_desktopBuilt) return;
+  [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(requestDesktop) object:nil];
+  [self performSelector:@selector(requestDesktop) withObject:nil afterDelay:0.25];
+}
+
+- (void)requestDesktop {
+  if (!_desktopBuilt || !_viewer || _window.inLiveResize) return;
+  const std::optional<rdm::DesktopSpec> wanted = rdm::PlanDesktop([self viewDesktop]);
+  if (!wanted || wanted == _desktopWanted) return;
+  const std::string payload = rdm::EncodeDesktopSpec(*wanted);
+  if (rda_viewer_send_message(_viewer, rdm::kDesktopRequestMessageType,
+                              reinterpret_cast<const uint8_t*>(payload.data()), payload.size()) == RDA_OK) {
+    _desktopWanted = wanted;
+  }
+}
+
 - (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session {
   _session = std::move(session);
   _viewer = _session->viewer();
+  _desktopWanted = _session->session().desktop;
+  _desktopBuilt = _desktopWanted.has_value();
+  if (_desktopBuilt) {
+    // Any shape goes: the desktop follows the window. (Without a desktop the
+    // window keeps the server display's proportions, see streamSizeChanged.)
+    _window.contentResizeIncrements = NSMakeSize(1, 1);
+    _window.contentMinSize = NSMakeSize(rdm::kMinDesktopPoints, rdm::kMinDesktopPoints);
+    [self desktopNeedsUpdate];  // the window may not be the size that was asked for
+  }
   [_window makeKeyAndOrderFront:nil];
   [_window makeFirstResponder:_view];
   // Input source sync: whatever switches it here (Caps Lock, ⌃Space, the
@@ -426,6 +487,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // Main thread. Lets go of held keys, says bye, frees everything. No viewer
 // callback runs after it returns.
 - (void)endSession {
+  [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(requestDesktop) object:nil];
+  _desktopBuilt = NO;
   [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
@@ -485,6 +548,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 - (void)windowDidEnterFullScreen:(NSNotification*)note {
   [self releaseHeld];
+  [self desktopNeedsUpdate];
   CATextLayer* hint = [CATextLayer layer];
   hint.string = @"Press ⌃⌥⌘F to leave full screen";
   hint.font = (__bridge CFTypeRef)[NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
@@ -511,6 +575,17 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 - (void)windowDidExitFullScreen:(NSNotification*)note {
   [self releaseHeld];
+  [self desktopNeedsUpdate];
+}
+
+- (void)windowDidEndLiveResize:(NSNotification*)note {
+  [self desktopNeedsUpdate];
+}
+
+// Moved to a screen of another scale (Retina to an external 1x display):
+// the same window is now another number of pixels.
+- (void)windowDidChangeBackingProperties:(NSNotification*)note {
+  [self desktopNeedsUpdate];
 }
 
 // Main thread. Tells the server which input source this Mac uses, unless it
@@ -614,6 +689,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 }
 
 - (void)windowDidResize:(NSNotification*)note {
+  [self desktopNeedsUpdate];  // zoom, tiling, a script: resizes without a drag
   [self renderStats];
   [self rebuildCursor];
   [self placeCursor];
@@ -640,7 +716,9 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   double cw = w / scale, ch = h / scale;  // one stream pixel per backing pixel
   const double fit = std::min({1.0, screen.size.width * 0.85 / cw, screen.size.height * 0.85 / ch});
   [_window setContentSize:NSMakeSize(cw * fit, ch * fit)];
-  _window.contentAspectRatio = NSMakeSize(w, h);
+  // The server's own display keeps its proportions; a desktop built for
+  // this window takes whatever shape the window is given.
+  if (!_desktopBuilt) _window.contentAspectRatio = NSMakeSize(w, h);
   [_window center];
 }
 
@@ -1162,6 +1240,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // The window exists before the session starts: pictures may arrive while
   // Start() is still waiting for the connection to settle.
   RemoteWindowController* remote = [[RemoteWindowController alloc] initWithTitle:hostName];
+  // Ask for a desktop made for this window: its pixels, its HiDPI scale. A
+  // server that cannot build one shares its display as it is.
+  opts.control.request.desktop = [remote initialDesktop];
   rda_viewer_config_default(&opts.viewer);
   opts.viewer.user = (__bridge void*)remote;
   opts.viewer.on_stream_info = &OnStreamInfo;
