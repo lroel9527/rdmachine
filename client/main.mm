@@ -91,6 +91,34 @@ double DesktopScale(double backing) {
   return TextMode() && TextModeStandardResolution() ? 1.0 : backing;
 }
 
+// Secure Event Input (what a focused password field turns on) blocks input
+// methods for the whole login session: the input menu is greyed out and Caps
+// Lock goes back to being Caps Lock, so there is no switch for the server to
+// follow. Which process holds it, 0 = none.
+pid_t SecureInputHolder() {
+  if (!IsSecureEventInputEnabled()) return 0;
+  pid_t pid = -1;  // on, by someone unknown
+  if (NSDictionary* session = CFBridgingRelease(CGSessionCopyCurrentDictionary())) {
+    if (NSNumber* n = session[@"kCGSSessionSecureInputPID"]) pid = n.intValue;
+  }
+  return pid;
+}
+
+// Lets go of it if this application holds it: the connect window's password
+// field is the only thing here that takes it, and AppKit is supposed to
+// give it back when the field loses focus. Returns who still holds it.
+pid_t ReleaseSecureInput() {
+  for (int i = 0; i < 8 && SecureInputHolder() == getpid(); ++i) DisableSecureEventInput();
+  return SecureInputHolder();
+}
+
+// "Bitwarden (pid 512)", for telling the user who blocks the input methods.
+NSString* DescribeProcess(pid_t pid) {
+  NSRunningApplication* app = pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;
+  return app.localizedName ? [NSString stringWithFormat:@"%@ (pid %d)", app.localizedName, pid]
+                           : pid > 0 ? [NSString stringWithFormat:@"process %d", pid] : @"another process";
+}
+
 bool SyncKeyboardLanguage() {
   NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
   return [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
@@ -361,6 +389,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   // the picture is the window's own pixels, and when the window changes the
   // server is asked for a desktop of the new size. Main thread.
   BOOL _desktopBuilt;
+  pid_t _secureInputHolder;  // who blocks input methods (0 = nobody), as last seen
   std::optional<rdm::DesktopSpec> _desktopWanted;  // last asked for
   CALayer* _statsLayer;          // the statistics overlay's background; main thread
   CATextLayer* _statsText;       // its text
@@ -674,6 +703,17 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 }
 
 - (void)windowDidBecomeKey:(NSNotification*)note {
+  // Input methods must work here: nothing of ours may keep secure input on.
+  const pid_t holder = ReleaseSecureInput();
+  if (holder != _secureInputHolder) {
+    _secureInputHolder = holder;
+    if (holder != 0) {
+      NSLog(@"secure input is on, held by %@: input methods are blocked, so Caps Lock and the input menu cannot "
+            @"switch between Chinese and English until it lets go",
+            DescribeProcess(holder));
+    }
+    [self renderStats];
+  }
   // It may have been switched while another window was in front.
   [self sendInputSource:NO];
 }
@@ -721,6 +761,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   // Not a field to pick: whoever sees soft photos should see why.
   if (r.text_mode) [lines addObject:@"Data saver"];
+  // Nor this: the input menu is greyed out and nothing here says why.
+  _secureInputHolder = SecureInputHolder() == getpid() ? ReleaseSecureInput() : SecureInputHolder();
+  if (_secureInputHolder != 0) {
+    [lines addObject:[NSString stringWithFormat:@"Input methods blocked by %@", DescribeProcess(_secureInputHolder)]];
+  }
   add(@"input", r.input_source.empty() ? @"Input –" : NS(r.input_source));
   const double response = _responseMs.load();
   add(@"response", response < 0 ? @"Input→screen –" : [NSString stringWithFormat:@"Input→screen %.0f ms", response]);
@@ -1436,7 +1481,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       [me->_connectWindow makeKeyAndOrderFront:nil];
     });
   };
+  // The password field must not stay the hidden window's first responder:
+  // it is what turns secure input on.
+  [_connectWindow makeFirstResponder:nil];
   [_connectWindow orderOut:nil];
+  ReleaseSecureInput();
 }
 
 - (void)sessionEnded:(RemoteWindowController*)remote reason:(NSString*)reason {

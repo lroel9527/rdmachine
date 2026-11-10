@@ -138,6 +138,7 @@ void MediaHost::SyncInputSource(const InputSourceState& wanted) {
       }
       if (have_cur && *id == cur.id) {
         // Already there (the user at this computer, or an earlier message).
+        Log("input source: " + *id + " already selected (client uses " + wanted.id + ")");
       } else if (rda_injector_select_input_source(injector_, id->c_str()) == RDA_OK) {
         Log("input source: " + *id + " (client uses " + wanted.id + ")");
       } else {
