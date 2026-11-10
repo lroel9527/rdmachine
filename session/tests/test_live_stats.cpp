@@ -45,6 +45,18 @@ TEST(LiveStats, RatesBetweenSamples) {
   EXPECT_DOUBLE_EQ(s.total_loss_pct, 1);
 }
 
+TEST(LiveStats, LateIsNotLost) {
+  // 50 packets resent, 40 of them only late (jitter): 10 really lost.
+  LiveStatsSampler sampler;
+  const auto t0 = LiveStatsSampler::Clock::time_point() + 100s;
+  sampler.Update(Sample(0, 0, 0, 0), t0);
+  rda_host_stats s = Sample(30, 1000, 1000, 50);
+  s.packets_spurious = 40;
+  LiveStats out = sampler.Update(s, t0 + 1s);
+  EXPECT_DOUBLE_EQ(out.recent_loss_pct, 1);
+  EXPECT_DOUBLE_EQ(out.total_loss_pct, 1);
+}
+
 TEST(LiveStats, StaticScreenKeepsLastLossFigure) {
   LiveStatsSampler sampler;
   const auto t0 = LiveStatsSampler::Clock::time_point() + 100s;

@@ -176,7 +176,7 @@ rdmachine 的客户端和服务端之间有两条连接：
  "encoder":"VideoToolbox HEVC (low-latency)","input_source":"简体拼音","view_only":false}
 ```
 
-速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是 rdaccel 判定丢失并重传的包，往返很短时也包括晚到的确认。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。
+速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是真正丢失的包：rdaccel 判定丢失并重传、之后又没有收到原包确认的（`packets_lost - packets_spurious`，rdaccel 1.3），只是晚到的不算。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。
 
 ## 实现
 

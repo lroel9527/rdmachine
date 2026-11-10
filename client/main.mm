@@ -86,6 +86,7 @@ const StatsField kStatsFields[] = {
     {@"loss", @"Packet Loss", true},      {@"bitrate", @"Bitrate", false},
     {@"bandwidth", @"Bandwidth", false},  {@"resolution", @"Resolution", false},
     {@"encoder", @"Encoder", false},      {@"input", @"Input Source", false},
+    {@"response", @"Input to Screen", true},
 };
 const int kStatsOpacities[] = {15, 35, 60};  // background, percent
 
@@ -329,6 +330,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   CATextLayer* _statsText;       // its text
   std::optional<rdm::SessionStatsReport> _stats;
   std::chrono::steady_clock::time_point _connectedAt;
+  // Input to screen: from a key, click or scroll sent on a still screen to
+  // the next picture (what a user feels; rdaccel's remote_mac measures it so).
+  std::atomic<uint64_t> _lastFrameUs;      // decode thread writes
+  std::atomic<uint64_t> _inputPendingUs;   // 0 = none waiting
+  std::atomic<double> _responseMs;         // last measurement; < 0 = none yet
 
   std::unique_ptr<rdm::RemoteSession> _session;  // main thread
   rda_viewer* _viewer;                           // _session's, while attached
@@ -367,6 +373,9 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _layer.contentsGravity = kCAGravityResizeAspect;
   // A layer, not a window or view: it takes no mouse events, so clicks reach
   // the remote screen under it.
+  _lastFrameUs = 0;
+  _inputPendingUs = 0;
+  _responseMs = -1;
   _statsLayer = [CALayer layer];
   _statsLayer.hidden = YES;
   _statsLayer.zPosition = 20;
@@ -576,6 +585,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   add(@"resolution", [NSString stringWithFormat:@"%d×%d", r.width, r.height]);
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   add(@"input", r.input_source.empty() ? @"Input –" : NS(r.input_source));
+  const double response = _responseMs.load();
+  add(@"response", response < 0 ? @"Input→screen –" : [NSString stringWithFormat:@"Input→screen %.0f ms", response]);
   if (lines.count == 0) {
     _statsLayer.hidden = YES;
     return;
@@ -653,6 +664,12 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 }
 
 - (void)send:(const rda_input_event&)ev {
+  if (ev.kind == RDA_INPUT_KEY_DOWN || ev.kind == RDA_INPUT_MOUSE_DOWN || ev.kind == RDA_INPUT_SCROLL) {
+    // Only on a still screen (no picture for 150 ms): otherwise the next
+    // picture may be one that was on its way anyway.
+    const uint64_t now = rda_now_us();
+    if (_inputPendingUs.load() == 0 && now - _lastFrameUs.load() > 150'000) _inputPendingUs = now;
+  }
   if (!_viewer) return;
   switch (ev.kind) {
     case RDA_INPUT_MOUSE_DOWN: _heldButtons.insert(ev.code); break;
@@ -714,6 +731,12 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // and hands it to the main thread; while the main thread is still busy with
 // the previous one, only remembers what changed.
 - (void)frame:(const rda_image*)img changed:(const rda_rect*)changed count:(size_t)count {
+  {
+    const uint64_t now = rda_now_us();
+    const uint64_t pending = _inputPendingUs.exchange(0);
+    if (pending != 0 && now > pending) _responseMs = static_cast<double>(now - pending) / 1000.0;
+    _lastFrameUs = now;
+  }
   std::unique_lock<std::mutex> lock(_surfMu);
   if (img->width != _surfW || img->height != _surfH || !_surf[0]) {
     for (auto& s : _surf) {

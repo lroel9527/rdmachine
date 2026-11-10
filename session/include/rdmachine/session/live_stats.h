@@ -18,7 +18,8 @@ struct LiveStats {
   double bandwidth_kbps = 0;  // transport's estimate; 0 = not measured (TCP)
   double rtt_ms = 0;          // 0 = not measured (TCP)
   // Lost / sent packets since the previous sample with traffic, and over the
-  // whole session; negative = not measured (TCP).
+  // whole session; negative = not measured (TCP). Real loss: resends of
+  // packets that were only late (rda_host_stats.packets_spurious) are left out.
   double recent_loss_pct = -1;
   double total_loss_pct = -1;
   uint64_t frames_dropped_congestion = 0;  // whole session

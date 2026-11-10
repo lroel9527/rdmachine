@@ -1,5 +1,7 @@
 #include "rdmachine/session/live_stats.h"
 
+#include <algorithm>
+
 namespace rdm {
 
 namespace {
@@ -20,7 +22,9 @@ LiveStats LiveStatsSampler::Update(const rda_host_stats& s, Clock::time_point no
   out.frames_dropped_congestion = s.frames_dropped_congestion;
   out.keyframes = s.keyframes;
   const bool measured = s.packets_sent > 0;
-  if (measured) out.total_loss_pct = Pct(s.packets_lost, s.packets_sent);
+  // Resends of packets that were only late (jitter) are not loss.
+  auto real_lost = [](const rda_host_stats& h) { return h.packets_lost - std::min(h.packets_lost, h.packets_spurious); };
+  if (measured) out.total_loss_pct = Pct(real_lost(s), s.packets_sent);
 
   if (have_prev_) {
     const double dt = std::chrono::duration<double>(now - prev_time_).count();
@@ -33,7 +37,7 @@ LiveStats LiveStatsSampler::Update(const rda_host_stats& s, Clock::time_point no
     // rdaccel samples the transport only when a frame goes out, so on a
     // static screen the packet counters stand still: keep the last figure.
     const uint64_t sent = Delta(s.packets_sent, prev_.packets_sent);
-    if (sent > 0) last_recent_loss_pct_ = Pct(Delta(s.packets_lost, prev_.packets_lost), sent);
+    if (sent > 0) last_recent_loss_pct_ = Pct(Delta(real_lost(s), real_lost(prev_)), sent);
   }
   if (!measured) last_recent_loss_pct_ = -1;
   out.recent_loss_pct = last_recent_loss_pct_;
