@@ -107,6 +107,43 @@ bool SetDisplayMode(CGDirectDisplayID display, CGDisplayModeRef mode) {
   return CGCompleteDisplayConfiguration(config, kCGConfigureForAppOnly) == kCGErrorSuccess;
 }
 
+// --display-modes: what each display of this Mac offers and which mode
+// Native Resolution in Full Screen would choose. Changes nothing.
+void PrintDisplayModes() {
+  uint32_t n = 0;
+  CGDirectDisplayID ids[16];
+  if (CGGetOnlineDisplayList(16, ids, &n) != kCGErrorSuccess) n = 0;
+  for (uint32_t i = 0; i < n; ++i) {
+    const CGDirectDisplayID id = ids[i];
+    const CGSize mm = CGDisplayScreenSize(id);
+    std::printf("display %u%s%s: %.0f x %.0f mm\n", id, CGDisplayIsMain(id) ? " (main)" : "",
+                CGDisplayIsBuiltin(id) ? " (built in)" : "", mm.width, mm.height);
+    double refresh = 0;
+    if (CGDisplayModeRef now = CGDisplayCopyDisplayMode(id)) {
+      refresh = CGDisplayModeGetRefreshRate(now);
+      std::printf("  now: %zu x %zu points, %zu x %zu pixels, %.0f Hz, flags 0x%08x\n", CGDisplayModeGetWidth(now),
+                  CGDisplayModeGetHeight(now), CGDisplayModeGetPixelWidth(now), CGDisplayModeGetPixelHeight(now),
+                  refresh, CGDisplayModeGetIOFlags(now));
+      CGDisplayModeRelease(now);
+    }
+    std::vector<rdm::DisplayModeInfo> infos;
+    NSArray* modes = CopyDisplayModes(id, &infos);
+    const int chosen = rdm::ChooseNativeHiDpiMode(infos, refresh);
+    for (size_t k = 0; k < infos.size(); ++k) {
+      const rdm::DisplayModeInfo& m = infos[k];
+      std::printf("  %c %4d x %4d points, %4d x %4d pixels, %3.0f Hz, flags 0x%08x%s\n",
+                  static_cast<int>(k) == chosen ? '*' : ' ', m.points_wide, m.points_high, m.pixels_wide,
+                  m.pixels_high, m.refresh_hz, CGDisplayModeGetIOFlags((__bridge CGDisplayModeRef)modes[k]),
+                  m.native ? " native" : "");
+    }
+    std::printf("  native resolution in full screen would use: %s\n", chosen < 0 ? "nothing (no such mode)" : "the mode marked *");
+  }
+  for (NSScreen* screen in NSScreen.screens) {
+    std::printf("screen %s: %.0f x %.0f points, backing scale %.2f\n", screen.localizedName.UTF8String,
+                screen.frame.size.width, screen.frame.size.height, screen.backingScaleFactor);
+  }
+}
+
 // View > Statistics: the overlay in the remote window's top right corner
 // (figures from the server, docs/protocol.md "会话统计"). Clicks go through it.
 NSString* const kStatsShownKey = @"StatsOverlay";
@@ -1462,6 +1499,10 @@ int main(int argc, char** argv) {
       if (std::strcmp(argv[i], "--version") == 0) {
         std::printf("rdmachine-client %s (protocol %d, rdaccel %s, AppKit %.0f)\n", rdm::VersionString(),
                     rdm::kProtocolVersion, rda_version_string(), NSAppKitVersionNumber);
+        return 0;
+      }
+      if (std::strcmp(argv[i], "--display-modes") == 0) {
+        PrintDisplayModes();
         return 0;
       }
     }
