@@ -10,7 +10,7 @@
 | D3 | 控制连接：TLS 1.3 + 首次确认证书指纹 | M0 支持系统账号密码和配对码；每次会话生成新的 rdaccel 密钥（[协议](protocol.md)） |
 | D4 | TCP 4100 控制 + rdaccel UDP 画面，UDP 不通退回 rdaccel TCP | 换网络不断线以后靠 rdaccel 加连接 ID |
 | D5 | M0 只控制已登录用户的物理桌面，M1 补登录窗口和锁屏 | 无显示器的虚拟屏放到 M2 实验 |
-| 系统版本 | 最低 macOS 12.3 | 为了 2016 款 Intel MacBook Pro；rdaccel 从 1.0.1 起支持（[rdaccel#39](https://github.com/lroel9527/rdaccel/issues/39)），rdmachine 的子模块现在用 1.4.3 |
+| 系统版本 | 最低 macOS 12.3 | 为了 2016 款 Intel MacBook Pro；rdaccel 从 1.0.1 起支持（[rdaccel#39](https://github.com/lroel9527/rdaccel/issues/39)），rdmachine 的子模块现在用 1.4.4 |
 | 签名 | 暂无 Apple Developer 账号，M0 用本机证书签名自测 | 不做公证分发；用 `packaging/macos/create-signing-identity.sh` 建一张固定的自签证书，应用标识固定为 `org.rdmachine.server` / `org.rdmachine.client`，重新编译后权限不丢 |
 | 桌面 | 客户端请求桌面，服务端建虚拟屏（2026-11-10） | D5 里“虚拟屏放到 M2”提前：HiDPI 只能在被控端解决，客户端缩放补不回来。客户端只说要什么（像素宽高 + 每点像素数），服务端用 `CGVirtualDisplay` 建一块同样规格的显示器，设为主屏，真实显示器镜像它，会话结束后恢复；没有显示器的 Mac 也因此能用。`CGVirtualDisplay` 没有公开头文件（BetterDisplay、DeskPad 等同样在用），按类名查找，系统没有或创建失败时退回共享真实显示器、客户端缩放。边界：规格和消息在 `core/`（`desktop.h`），建屏在 `session/`（`VirtualDesktop`）；rdaccel 只补了通用的两处（1.4.3：缩放系数从显示模式读、注入坐标跟随模式变化）。细节见[协议](protocol.md)的“请求桌面” |
 | 音频 | 第一阶段不做声音 | 不采集、不传输声音，不碰两端的音量（rdaccel 的屏幕采集不收声音：macOS 13 起显式设 `capturesAudio = NO`，12.x 没有这个属性）；测试也不涉及声音 |
