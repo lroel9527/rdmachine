@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include "rdmachine/desktop.h"
 
@@ -48,6 +49,48 @@ TEST(Desktop, PlanRefusesNonsense) {
   EXPECT_FALSE(rdm::PlanDesktop({1920, 1080, -2.0}));
   EXPECT_FALSE(rdm::PlanDesktop({1920, 1080, std::nan("")}));
   EXPECT_FALSE(rdm::PlanDesktop({1920, 1080, std::numeric_limits<double>::infinity()}));
+}
+
+// A 13-inch MacBook Air: a 2560 x 1664 panel that by default shows
+// 1470 x 956 points rendered at 2940 x 1912 and scaled down.
+std::vector<rdm::DisplayModeInfo> AirModes() {
+  return {
+      {1470, 956, 2940, 1912, 60, false},  // 0: the default, scaled
+      {1710, 1112, 3420, 2224, 60, false},  // 1: "more space", scaled
+      {1280, 832, 2560, 1664, 60, false},   // 2: native 2x
+      {1024, 665, 2048, 1330, 60, false},   // 3: larger text
+      {2560, 1664, 2560, 1664, 60, true},   // 4: the panel at 1x
+      {1280, 832, 1280, 832, 60, false},    // 5: low resolution
+  };
+}
+
+TEST(Desktop, NativeHiDpiModeIsThePanelAtTwoPixelsPerPoint) {
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode(AirModes(), 60), 2);
+  // Nothing is marked native: the largest 1x mode is the panel.
+  auto modes = AirModes();
+  modes[4].native = false;
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode(modes, 60), 2);
+  // A scaled mode with more pixels than the panel is not the panel.
+  modes[1].native = false;
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode(modes, 0), 2);
+}
+
+TEST(Desktop, NativeHiDpiModeKeepsTheRefreshRate) {
+  // A ProMotion panel offers the mode at several rates.
+  std::vector<rdm::DisplayModeInfo> modes = {
+      {1728, 1117, 3456, 2234, 120, true}, {1728, 1117, 3456, 2234, 60, true}, {1728, 1117, 3456, 2234, 48, true},
+      {1512, 982, 3024, 1964, 120, false}};
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode(modes, 60), 1);
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode(modes, 120), 0);
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode(modes, 0), 0);  // not stated: the highest
+}
+
+TEST(Desktop, NativeHiDpiModeMayNotExist) {
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode({}, 60), -1);
+  // An ordinary 1080p monitor: no 2x mode of its panel.
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode({{1920, 1080, 1920, 1080, 60, true}, {1280, 720, 1280, 720, 60, false}}, 60), -1);
+  // An odd panel size has no whole number of points at 2x.
+  EXPECT_EQ(rdm::ChooseNativeHiDpiMode({{1365, 767, 1365, 767, 60, true}, {682, 383, 1364, 766, 60, false}}, 60), -1);
 }
 
 TEST(Desktop, MessageRoundTrip) {

@@ -26,6 +26,39 @@ std::optional<DesktopSpec> PlanDesktop(const DesktopSpec& wanted) {
   return d;
 }
 
+int ChooseNativeHiDpiMode(const std::vector<DisplayModeInfo>& modes, double current_refresh_hz) {
+  // The panel.
+  int64_t panel_w = 0, panel_h = 0;
+  auto larger = [&](const DisplayModeInfo& m) {
+    return static_cast<int64_t>(m.pixels_wide) * m.pixels_high > panel_w * panel_h;
+  };
+  for (const DisplayModeInfo& m : modes) {
+    if (m.native && larger(m)) panel_w = m.pixels_wide, panel_h = m.pixels_high;
+  }
+  if (panel_w == 0) {
+    for (const DisplayModeInfo& m : modes) {
+      if (m.pixels_wide == m.points_wide && m.pixels_high == m.points_high && larger(m)) {
+        panel_w = m.pixels_wide, panel_h = m.pixels_high;
+      }
+    }
+  }
+  if (panel_w <= 0 || panel_h <= 0) return -1;
+  int best = -1;
+  double best_distance = 0;
+  for (size_t i = 0; i < modes.size(); ++i) {
+    const DisplayModeInfo& m = modes[i];
+    if (m.pixels_wide != panel_w || m.pixels_high != panel_h) continue;
+    if (static_cast<int64_t>(m.points_wide) * 2 != panel_w || static_cast<int64_t>(m.points_high) * 2 != panel_h) continue;
+    // Nearest the current rate; with none stated, the highest.
+    const double distance = current_refresh_hz > 0 ? std::abs(m.refresh_hz - current_refresh_hz) : -m.refresh_hz;
+    if (best < 0 || distance < best_distance) {
+      best = static_cast<int>(i);
+      best_distance = distance;
+    }
+  }
+  return best;
+}
+
 std::string EncodeDesktopSpec(const DesktopSpec& d) {
   return nlohmann::json{{"width", d.width}, {"height", d.height}, {"scale", d.scale}}.dump();
 }

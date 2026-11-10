@@ -69,6 +69,44 @@ bool SyncKeyboardLanguage() {
   return [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
 }
 
+// View > Native Resolution in Full Screen: while the remote window is full
+// screen, this Mac's display is switched to the mode that shows its panel
+// pixel for pixel at 2 pixels per point (rdm::ChooseNativeHiDpiMode), so the
+// remote desktop is too; back to the usual mode when full screen ends. Off
+// unless turned on: everything on this Mac's screen gets larger meanwhile.
+NSString* const kNativeFullScreenKey = @"NativeFullScreen";
+NSString* const kNativeFullScreenChanged = @"RDMNativeFullScreenChanged";
+
+bool NativeFullScreen() { return [NSUserDefaults.standardUserDefaults boolForKey:kNativeFullScreenKey]; }
+
+// What a display offers, for rdm::ChooseNativeHiDpiMode; `refs` gets the
+// modes themselves (retained by the returned array).
+NSArray* CopyDisplayModes(CGDirectDisplayID display, std::vector<rdm::DisplayModeInfo>* out) {
+  NSDictionary* options = @{(__bridge NSString*)kCGDisplayShowDuplicateLowResolutionModes : @YES};
+  NSArray* modes = CFBridgingRelease(CGDisplayCopyAllDisplayModes(display, (__bridge CFDictionaryRef)options));
+  for (id item in modes) {
+    CGDisplayModeRef m = (__bridge CGDisplayModeRef)item;
+    rdm::DisplayModeInfo info;
+    info.points_wide = static_cast<int32_t>(CGDisplayModeGetWidth(m));
+    info.points_high = static_cast<int32_t>(CGDisplayModeGetHeight(m));
+    info.pixels_wide = static_cast<int32_t>(CGDisplayModeGetPixelWidth(m));
+    info.pixels_high = static_cast<int32_t>(CGDisplayModeGetPixelHeight(m));
+    info.refresh_hz = CGDisplayModeGetRefreshRate(m);
+    info.native = (CGDisplayModeGetIOFlags(m) & 0x02000000 /* kDisplayModeNativeFlag */) != 0;
+    out->push_back(info);
+  }
+  return modes;
+}
+
+// For this app's lifetime only: if it quits or crashes, macOS puts the
+// user's own mode back by itself.
+bool SetDisplayMode(CGDirectDisplayID display, CGDisplayModeRef mode) {
+  CGDisplayConfigRef config = nullptr;
+  if (CGBeginDisplayConfiguration(&config) != kCGErrorSuccess) return false;
+  CGConfigureDisplayWithDisplayMode(config, display, mode, nullptr);
+  return CGCompleteDisplayConfiguration(config, kCGConfigureForAppOnly) == kCGErrorSuccess;
+}
+
 // View > Statistics: the overlay in the remote window's top right corner
 // (figures from the server, docs/protocol.md "会话统计"). Clicks go through it.
 NSString* const kStatsShownKey = @"StatsOverlay";
@@ -333,6 +371,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   // The server built a desktop for this window (docs/protocol.md, "请求桌面"):
   // the picture is the window's own pixels, and when the window changes the
   // server is asked for a desktop of the new size. Main thread.
+  // Native Resolution in Full Screen: the display whose mode was changed
+  // and the mode to put back (owned); null when nothing was changed.
+  CGDirectDisplayID _modeDisplay;
+  CGDisplayModeRef _modeBefore;
   BOOL _desktopBuilt;
   std::optional<rdm::DesktopSpec> _desktopWanted;  // last asked for
   CALayer* _statsLayer;          // the statistics overlay's background; main thread
@@ -412,6 +454,62 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   return d;
 }
 
+// Main thread. Full screen with View > Native Resolution in Full Screen:
+// switches the window's display to its native 2x mode, once.
+- (void)useNativeMode {
+  if (_modeBefore || !NativeFullScreen() || !(_window.styleMask & NSWindowStyleMaskFullScreen)) return;
+  NSNumber* number = _window.screen.deviceDescription[@"NSScreenNumber"];
+  if (!number) return;
+  const CGDirectDisplayID display = number.unsignedIntValue;
+  CGDisplayModeRef now = CGDisplayCopyDisplayMode(display);
+  if (!now) return;
+  std::vector<rdm::DisplayModeInfo> infos;
+  NSArray* modes = CopyDisplayModes(display, &infos);
+  const int chosen = rdm::ChooseNativeHiDpiMode(infos, CGDisplayModeGetRefreshRate(now));
+  if (chosen < 0) {
+    NSLog(@"native resolution: this display has no mode at 2 pixels per point of its panel");
+    CGDisplayModeRelease(now);
+    return;
+  }
+  const rdm::DisplayModeInfo& want = infos[static_cast<size_t>(chosen)];
+  if (static_cast<int32_t>(CGDisplayModeGetWidth(now)) == want.points_wide &&
+      static_cast<int32_t>(CGDisplayModeGetPixelWidth(now)) == want.pixels_wide &&
+      static_cast<int32_t>(CGDisplayModeGetPixelHeight(now)) == want.pixels_high) {
+    CGDisplayModeRelease(now);  // already in it
+    return;
+  }
+  if (!SetDisplayMode(display, (__bridge CGDisplayModeRef)modes[static_cast<NSUInteger>(chosen)])) {
+    NSLog(@"native resolution: the display refused %dx%d points", want.points_wide, want.points_high);
+    CGDisplayModeRelease(now);
+    return;
+  }
+  NSLog(@"native resolution: %zux%zu points (%zux%zu pixels) -> %dx%d points (%dx%d pixels)",
+        CGDisplayModeGetWidth(now), CGDisplayModeGetHeight(now), CGDisplayModeGetPixelWidth(now),
+        CGDisplayModeGetPixelHeight(now), want.points_wide, want.points_high, want.pixels_wide, want.pixels_high);
+  _modeDisplay = display;
+  _modeBefore = now;  // kept, to put back
+  // The window follows the screen's new size, and the desktop the window
+  // (windowDidResize); asked again here in case the size did not change.
+  [self desktopNeedsUpdate];
+}
+
+// Main thread. The display's own mode again, if useNativeMode changed it.
+- (void)restoreDisplayMode {
+  if (!_modeBefore) return;
+  if (CGDisplayIsOnline(_modeDisplay)) SetDisplayMode(_modeDisplay, _modeBefore);
+  CGDisplayModeRelease(_modeBefore);
+  _modeBefore = nullptr;
+  [self desktopNeedsUpdate];
+}
+
+- (void)nativeFullScreenChanged:(NSNotification*)note {
+  if (NativeFullScreen()) {
+    [self useNativeMode];
+  } else {
+    [self restoreDisplayMode];
+  }
+}
+
 // The picture area in pixels, as a desktop request.
 - (rdm::DesktopSpec)viewDesktop {
   const double scale = _window.backingScaleFactor > 0 ? _window.backingScaleFactor : 1;
@@ -471,6 +569,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [self sendInputSource:YES];
   _connectedAt = std::chrono::steady_clock::now();
   [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(renderStats) name:kStatsChanged object:nil];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(nativeFullScreenChanged:)
+                                             name:kNativeFullScreenChanged
+                                           object:nil];
   // Keys go through a local monitor rather than keyDown: it also sees
   // Command shortcuts (and their key-up, which AppKit otherwise swallows).
   __weak RemoteWindowController* weakSelf = self;
@@ -492,6 +594,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kNativeFullScreenChanged object:nil];
+  [self restoreDisplayMode];
   if (_keyMonitor) {
     [NSEvent removeMonitor:_keyMonitor];
     _keyMonitor = nil;
@@ -548,6 +652,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 - (void)windowDidEnterFullScreen:(NSNotification*)note {
   [self releaseHeld];
+  [self useNativeMode];
   [self desktopNeedsUpdate];
   CATextLayer* hint = [CATextLayer layer];
   hint.string = @"Press ⌃⌥⌘F to leave full screen";
@@ -575,6 +680,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 - (void)windowDidExitFullScreen:(NSNotification*)note {
   [self releaseHeld];
+  [self restoreDisplayMode];
   [self desktopNeedsUpdate];
 }
 
@@ -1081,8 +1187,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     return StatsShown();
   } else if (item.action == @selector(toggleSyncKeyboardLanguage:)) {
     item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleNativeFullScreen:)) {
+    item.state = NativeFullScreen() ? NSControlStateValueOn : NSControlStateValueOff;
   }
   return YES;
+}
+
+- (void)toggleNativeFullScreen:(NSMenuItem*)item {
+  const bool on = !NativeFullScreen();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kNativeFullScreenKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kNativeFullScreenChanged object:nil];
 }
 
 - (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
@@ -1114,6 +1229,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // key there goes to the server); the menu item is for finding it.
   NSMenuItem* fs = [view addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
   fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+  NSMenuItem* native = [view addItemWithTitle:@"Native Resolution in Full Screen"
+                                       action:@selector(toggleNativeFullScreen:)
+                                keyEquivalent:@""];
+  native.target = self;
+  native.state = NativeFullScreen() ? NSControlStateValueOn : NSControlStateValueOff;
+  native.toolTip = @"While the remote window is full screen, switch this Mac's display to the mode that maps "
+                   @"one point to exactly 2 x 2 pixels of its panel, so the remote desktop is shown pixel for "
+                   @"pixel. Text and icons get larger meanwhile; the usual mode returns when full screen ends.";
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* sync = [view addItemWithTitle:@"Sync Keyboard Language"
                                      action:@selector(toggleSyncKeyboardLanguage:)
