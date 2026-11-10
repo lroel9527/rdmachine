@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 Mac ↔ Mac（Intel 和 Apple Silicon，macOS 12.3+）。现在处于 M0（可用原型）开发中：服务端（菜单栏应用，也能在命令行跑）和 Mac 客户端窗口已经有了，还没在两台真机之间验证过。
+第一阶段只支持 Mac ↔ Mac（Intel 和 Apple Silicon，macOS 12.3+）。1.0.0 是第一个正式版本：服务端（菜单栏应用，也能在命令行跑）和 Mac 客户端已经在两台 Mac 之间实际使用，远程桌面按客户端窗口的像素和 HiDPI 缩放建出来。还没有的：登录窗口和锁屏下的连接、公钥登录、声音、文件传输（见[第一阶段的决定](docs/decisions.md)）；控制协议仍是 v0，两端要用同一个版本。
 
 ## 文档
 
