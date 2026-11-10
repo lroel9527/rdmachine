@@ -468,7 +468,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   const double ratio = _streamW > 0 ? _view.bounds.size.width * backing / _streamW : 1;
   const bool whole = ratio > 1.5 && std::abs(ratio - std::round(ratio)) < 0.01;
   CALayerContentsFilter filter = whole ? kCAFilterNearest : kCAFilterLinear;
-  if (![_layer.magnificationFilter isEqualToString:filter]) _layer.magnificationFilter = filter;
+  if (![_layer.magnificationFilter isEqualToString:filter]) {
+    _layer.magnificationFilter = filter;
+    NSLog(@"picture %dx%d in a view of %.0fx%.0f points at %.0fx: %@", _streamW, _streamH, _view.bounds.size.width,
+          _view.bounds.size.height, backing, whole ? @"pixels repeated" : @"smoothed");
+  }
 }
 
 - (void)requestDesktop {
@@ -1106,6 +1110,33 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // focused password field, which flashed up with the window at every start.
   [_connectWindow makeFirstResponder:_host];
   [NSApp activateIgnoringOtherApps:YES];
+
+  // rdmachine-client HOST[:PORT] [--code=PAIRING_CODE]: the address filled
+  // in, and with a pairing code, connected right away (scripts, shortcuts).
+  // A password is never taken from the command line.
+  NSString* host = nil;
+  NSString* code = nil;
+  NSArray<NSString*>* args = NSProcessInfo.processInfo.arguments;
+  for (NSUInteger i = 1; i < args.count; ++i) {
+    NSString* a = args[i];
+    if ([a hasPrefix:@"--code="]) {
+      code = [a substringFromIndex:7];
+    } else if ([a hasPrefix:@"-"]) {
+      // "-Key value" pairs are NSUserDefaults' (the argument domain).
+      if (![a hasPrefix:@"--"]) ++i;
+    } else if (!host) {
+      host = a;
+    }
+  }
+  if (host) {
+    _host.stringValue = host;
+    if (code.length > 0) {
+      _usePairing.state = NSControlStateValueOn;
+      [self pairingToggled:nil];
+      _code.stringValue = code;
+      [self connect:nil];
+    }
+  }
 }
 
 - (void)toggleStatsShown:(NSMenuItem*)item {
