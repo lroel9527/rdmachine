@@ -72,6 +72,24 @@ NSString* const kTextModeChanged = @"RDMTextModeChanged";
 
 bool TextMode() { return [NSUserDefaults.standardUserDefaults boolForKey:kTextModeKey]; }
 
+// View > Text Mode at Standard Resolution: in text mode, ask for a desktop
+// of one pixel per point even on a Retina screen. A 2x desktop has four
+// times the pixels to send; at 1x the text is the server's own 1x rendering
+// (not a scaled-down 2x one), shown here with every pixel doubled. On by
+// default; only matters while text mode is on.
+NSString* const kTextModeStandardResolutionKey = @"TextModeStandardResolution";
+
+bool TextModeStandardResolution() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kTextModeStandardResolutionKey] ? [d boolForKey:kTextModeStandardResolutionKey] : true;
+}
+
+// Pixels per point of the desktop to ask for, on a screen of `backing`.
+double DesktopScale(double backing) {
+  if (backing <= 0) backing = 1;
+  return TextMode() && TextModeStandardResolution() ? 1.0 : backing;
+}
+
 bool SyncKeyboardLanguage() {
   NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
   return [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
@@ -412,7 +430,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 - (rdm::DesktopSpec)initialDesktop {
   NSScreen* screen = _window.screen ?: NSScreen.mainScreen;
   const NSSize room = screen.visibleFrame.size;
-  const double scale = screen.backingScaleFactor > 0 ? screen.backingScaleFactor : 1;
+  const double scale = DesktopScale(screen.backingScaleFactor);
   rdm::DesktopSpec d;
   d.width = static_cast<int32_t>(std::floor(room.width * 0.85) * scale);
   d.height = static_cast<int32_t>(std::floor(room.height * 0.85) * scale);
@@ -422,7 +440,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 // The picture area in pixels, as a desktop request.
 - (rdm::DesktopSpec)viewDesktop {
-  const double scale = _window.backingScaleFactor > 0 ? _window.backingScaleFactor : 1;
+  const double scale = DesktopScale(_window.backingScaleFactor);
   const NSSize b = _view.bounds.size;
   rdm::DesktopSpec d;
   d.width = static_cast<int32_t>(std::lround(b.width * scale));
@@ -435,9 +453,22 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // ask the server for a desktop of the new size. Nothing is sent while the
 // window is being dragged (every step would rebuild the server's display).
 - (void)desktopNeedsUpdate {
+  [self updatePictureFilter];
   if (!_desktopBuilt) return;
   [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(requestDesktop) object:nil];
   [self performSelector:@selector(requestDesktop) withObject:nil afterDelay:0.25];
+}
+
+// Main thread. A picture shown at a whole multiple of its size (a 1x
+// desktop on a Retina screen: text mode) gets every pixel repeated, which
+// keeps the text's edges as the server drew them; smoothing a 2x
+// enlargement blurs every glyph. Any other ratio is smoothed as before.
+- (void)updatePictureFilter {
+  const double backing = _window.backingScaleFactor > 0 ? _window.backingScaleFactor : 1;
+  const double ratio = _streamW > 0 ? _view.bounds.size.width * backing / _streamW : 1;
+  const bool whole = ratio > 1.5 && std::abs(ratio - std::round(ratio)) < 0.01;
+  CALayerContentsFilter filter = whole ? kCAFilterNearest : kCAFilterLinear;
+  if (![_layer.magnificationFilter isEqualToString:filter]) _layer.magnificationFilter = filter;
 }
 
 - (void)requestDesktop {
@@ -628,6 +659,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   const std::string payload = rdm::EncodePictureMode({TextMode()});
   rda_viewer_send_message(_viewer, rdm::kPictureModeMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
                           payload.size());
+  // The desktop's resolution may follow the mode (TextModeStandardResolution).
+  [self desktopNeedsUpdate];
 }
 
 - (void)syncSettingChanged:(NSNotification*)note {
@@ -734,10 +767,13 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _streamW = w;
   _streamH = h;
   [self rebuildCursor];
+  [self updatePictureFilter];
   if (!first || w <= 0 || h <= 0) return;
   const NSRect screen = (_window.screen ?: NSScreen.mainScreen).visibleFrame;
-  const double scale = _window.backingScaleFactor > 0 ? _window.backingScaleFactor : 1;
-  double cw = w / scale, ch = h / scale;  // one stream pixel per backing pixel
+  // One stream pixel per backing pixel; per point for a 1x desktop asked
+  // for on a Retina screen (text mode).
+  const double scale = DesktopScale(_window.backingScaleFactor);
+  double cw = w / scale, ch = h / scale;
   const double fit = std::min({1.0, screen.size.width * 0.85 / cw, screen.size.height * 0.85 / ch});
   [_window setContentSize:NSMakeSize(cw * fit, ch * fit)];
   // The server's own display keeps its proportions; a desktop built for
@@ -1107,6 +1143,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextMode:)) {
     item.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleTextModeStandardResolution:)) {
+    item.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
+    return TextMode();
   }
   return YES;
 }
@@ -1114,6 +1153,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 - (void)toggleTextMode:(NSMenuItem*)item {
   const bool on = !TextMode();
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
+}
+
+- (void)toggleTextModeStandardResolution:(NSMenuItem*)item {
+  const bool on = !TextModeStandardResolution();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeStandardResolutionKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
 }
@@ -1162,6 +1208,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   textMode.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
   textMode.toolTip = @"For very slow connections (tens of kbps to a few hundred): text stays sharp and arrives first; "
                      @"photos and video update only a few times a second and colours are slightly reduced.";
+  NSMenuItem* textRes = [view addItemWithTitle:@"Text Mode at Standard Resolution (1x)"
+                                        action:@selector(toggleTextModeStandardResolution:)
+                                 keyEquivalent:@""];
+  textRes.target = self;
+  textRes.indentationLevel = 1;
+  textRes.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
+  textRes.toolTip = @"In text mode, use a desktop of one pixel per point instead of a Retina (2x) one: a quarter of "
+                    @"the pixels to send, so text arrives much sooner; letters look coarser.";
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* statsItem = [view addItemWithTitle:@"Statistics" action:nil keyEquivalent:@""];
   NSMenu* stats = [[NSMenu alloc] initWithTitle:@"Statistics"];
