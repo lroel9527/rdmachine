@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace rdm {
 
@@ -43,27 +42,6 @@ std::optional<DesktopSpec> PlanDesktop(const DesktopSpec& wanted);
 // The size in points of a planned desktop.
 inline int32_t DesktopPointsWide(const DesktopSpec& d) { return d.width / (d.scale >= 1.5 ? 2 : 1); }
 inline int32_t DesktopPointsHigh(const DesktopSpec& d) { return d.height / (d.scale >= 1.5 ? 2 : 1); }
-
-// One mode a display offers.
-struct DisplayModeInfo {
-  int32_t points_wide = 0, points_high = 0;
-  int32_t pixels_wide = 0, pixels_high = 0;
-  double refresh_hz = 0;  // 0 = not stated
-  bool native = false;    // the system marks it as the panel's own resolution
-};
-
-// The mode that shows the panel pixel for pixel at 2 pixels per point
-// ("native 2x": on a 2560 x 1664 panel, 1280 x 832 points), as an index into
-// `modes`, or -1 if the display has none. Most Mac notebooks do not use it by
-// default: they render a larger desktop at 2x (1470 x 956 points as
-// 2940 x 1912 pixels) and scale the whole screen down to the panel, so no
-// window is pixel for pixel, a remote desktop's included. In the native 2x
-// mode it is. Among several, the one whose refresh rate is nearest
-// `current_refresh_hz` (0 = the highest).
-//
-// The panel's size is that of the modes marked native; if none is marked,
-// that of the largest mode at 1 pixel per point.
-int ChooseNativeHiDpiMode(const std::vector<DisplayModeInfo>& modes, double current_refresh_hz);
 
 // JSON: {"width":2880,"height":1800,"scale":2}
 std::string EncodeDesktopSpec(const DesktopSpec& d);
