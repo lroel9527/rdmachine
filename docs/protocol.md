@@ -165,14 +165,14 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ## 文字模式
 
-给极慢的链路用（几十到几百 kbps）：带宽不够传整幅画面时，全部优先给清晰的文字。文字和界面减到每块 16 色（边缘不变，抗锯齿的灰阶合并）、不经视频编码变糊；链路暂时带不动的部分先保持旧内容，再按“最新改动优先”补上；照片和视频一秒最多更新几次；第一幅画面里文字区域先是底色，文字随后从上到下出现。怎么做全在 rdaccel 的 `text_mode`（1.5；1.6 起文字块改用上下文编码，约为原来的一半）（见 rdaccel 的 `docs/architecture.md`），这里只有开关。
+省流量用（按流量计费的链路；链路很慢时也合适）：用尽量少的字节传清晰的文字。文字和界面减到每块 16 色（不够像时 32 或 64 色；边缘不变，抗锯齿的灰阶合并）、不经视频编码变糊，并且立刻发出：链路正常时整屏文字随第一幅画面到齐。有固定额度的是视频类内容：照片、影片每秒最多 160 kbps、一秒几张，持续的动画每秒更新 2 次。快链路上的流量是普通模式的 1/3 到 1/7（rdaccel 的 CHANGELOG 1.7.0）。只有链路真的带不动时，暂时发不了的部分才先保持旧内容，再按“最新改动优先”补上。怎么做全在 rdaccel 的 `text_mode`（1.5；1.6 起文字块改用上下文编码，约为原来的一半）（见 rdaccel 的 `docs/architecture.md`），这里只有开关。
 
-- **谁决定**：客户端（它知道自己的链路）。默认关：链路正常时普通模式画质更好。
+- **谁决定**：客户端（它知道自己的链路要不要省）。默认关：不在乎流量时普通模式画质更好（照片、视频、动画）。
 - **会话开始时**：`session_request.text_mode`（可省略，默认 false）。
 - **会话中途**：rdaccel 应用消息，类型 `0x10004`（`RDA_MSG_USER_FIRST + 4`，`kPictureModeMessageType`），客户端到服务端，内容是 JSON `{"text_mode":true}`。服务端调用 `rda_host_set_text_mode`，下一帧生效；没有单独的应答。关掉时服务端整屏刷新一次（换回原色）。不认识的字段忽略，以后的画面模式加在这个对象里。
-- **客户端知道当前状态**：会话统计（见下）里的 `text_mode`；Mac 客户端的浮窗打开时多显示一行 “Text mode”。
-- **桌面的分辨率**：文字模式下 Mac 客户端默认请求 1 倍的桌面（“请求桌面”的 `scale` 为 1，像素数 = 窗口的点数），即使窗口在 Retina 屏上：要发的像素是 2 倍桌面的四分之一。被控端按 1 倍渲染文字，客户端在窗口正好是画面整数倍大时用最近邻放大（每个像素变成 2 × 2，不做平滑）。切换文字模式时客户端重新请求桌面（开：1 倍；关：回到窗口的缩放系数）。菜单 View → Text Mode at Standard Resolution (1x) 可以关掉，默认开。服务端不需要知道这件事。
-- Mac 客户端：菜单 View → Text Mode (Slow Connection)，选择会记住，下次连接直接用。命令行客户端：`rdmachine-connect --text-mode`（开始时），`--set-text-mode=on|off`（收到画面后切换）。
+- **客户端知道当前状态**：会话统计（见下）里的 `text_mode`；Mac 客户端的浮窗打开时多显示一行 “Data saver”。
+- **桌面的分辨率**：文字模式下 Mac 客户端默认请求 1 倍的桌面（“请求桌面”的 `scale` 为 1，像素数 = 窗口的点数），即使窗口在 Retina 屏上：要发的像素是 2 倍桌面的四分之一。被控端按 1 倍渲染文字，客户端在窗口正好是画面整数倍大时用最近邻放大（每个像素变成 2 × 2，不做平滑）。切换文字模式时客户端重新请求桌面（开：1 倍；关：回到窗口的缩放系数）。菜单 View → Data Saver at Standard Resolution (1x) 可以关掉，默认开。服务端不需要知道这件事。
+- Mac 客户端：菜单 View → Data Saver (Sharp Text)，选择会记住，下次连接直接用。命令行客户端：`rdmachine-connect --text-mode`（开始时），`--set-text-mode=on|off`（收到画面后切换）。
 - 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `text_mode` 和这条消息（画面照常，只是不省），旧客户端不发。
 
 实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/main.mm`（`toggleTextMode:`、`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。

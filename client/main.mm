@@ -65,8 +65,9 @@ uint32_t Modifiers(NSEventModifierFlags f) {
 NSString* const kSyncKeyboardLanguageKey = @"SyncKeyboardLanguage";
 NSString* const kSyncKeyboardLanguageChanged = @"RDMSyncKeyboardLanguageChanged";
 
-// View > Text Mode (Slow Connection): the server spends what the link takes
-// on sharp text (docs/protocol.md, "文字模式"). Off unless chosen; remembered.
+// View > Data Saver (Sharp Text): text mode (docs/protocol.md, "文字模式"): the
+// server sends as little as it can with text that stays sharp. Off unless
+// chosen; remembered.
 NSString* const kTextModeKey = @"TextMode";
 NSString* const kTextModeChanged = @"RDMTextModeChanged";
 
@@ -719,7 +720,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   add(@"resolution", [NSString stringWithFormat:@"%d×%d", r.width, r.height]);
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   // Not a field to pick: whoever sees soft photos should see why.
-  if (r.text_mode) [lines addObject:@"Text mode"];
+  if (r.text_mode) [lines addObject:@"Data saver"];
   add(@"input", r.input_source.empty() ? @"Input –" : NS(r.input_source));
   const double response = _responseMs.load();
   add(@"response", response < 0 ? @"Input→screen –" : [NSString stringWithFormat:@"Input→screen %.0f ms", response]);
@@ -1232,21 +1233,21 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
   sync.toolTip = @"The server switches to the input source used on this Mac (Pinyin, ABC, ...), "
                  @"including when Caps Lock switches it.";
-  NSMenuItem* textMode = [view addItemWithTitle:@"Text Mode (Slow Connection)"
+  NSMenuItem* textMode = [view addItemWithTitle:@"Data Saver (Sharp Text)"
                                          action:@selector(toggleTextMode:)
                                   keyEquivalent:@""];
   textMode.target = self;
   textMode.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
-  textMode.toolTip = @"For very slow connections (tens of kbps to a few hundred): text stays sharp and arrives first; "
-                     @"photos and video update only a few times a second and colours are slightly reduced.";
-  NSMenuItem* textRes = [view addItemWithTitle:@"Text Mode at Standard Resolution (1x)"
+  textMode.toolTip = @"Uses a fraction of the traffic: text stays sharp and appears at once, with slightly fewer "
+                     @"colours; photos, video and animations update only a few times a second.";
+  NSMenuItem* textRes = [view addItemWithTitle:@"Data Saver at Standard Resolution (1x)"
                                         action:@selector(toggleTextModeStandardResolution:)
                                  keyEquivalent:@""];
   textRes.target = self;
   textRes.indentationLevel = 1;
   textRes.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
-  textRes.toolTip = @"In text mode, use a desktop of one pixel per point instead of a Retina (2x) one: a quarter of "
-                    @"the pixels to send, so text arrives much sooner; letters look coarser.";
+  textRes.toolTip = @"With Data Saver on, use a desktop of one pixel per point instead of a Retina (2x) one: a "
+                    @"quarter of the pixels, so much less traffic; letters look coarser.";
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* statsItem = [view addItemWithTitle:@"Statistics" action:nil keyEquivalent:@""];
   NSMenu* stats = [[NSMenu alloc] initWithTitle:@"Statistics"];
