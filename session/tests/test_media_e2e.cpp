@@ -15,6 +15,7 @@
 #include "fake_clipboard.h"
 #include "rdmachine/control_server.h"
 #include "rdmachine/desktop.h"
+#include "rdmachine/picture_mode.h"
 #include "rdmachine/session/media_host.h"
 #include "rdmachine/session_stats.h"
 #include "rdmachine/session/remote_session.h"
@@ -37,6 +38,7 @@ struct Frames {
   std::atomic<int> count{0};
   std::atomic<int> stats_reports{0};
   std::atomic<int> stats_width{0};
+  std::atomic<bool> stats_text_mode{false};
   std::atomic<int> width{0};
   std::atomic<rda_status> disconnect_reason{RDA_OK};
   std::atomic<bool> disconnected{false};
@@ -51,6 +53,7 @@ void OnMessage(void* u, uint32_t type, const uint8_t* payload, size_t n) {
   auto r = rdm::DecodeSessionStats(std::string(reinterpret_cast<const char*>(payload), n));
   if (!r) return;
   static_cast<Frames*>(u)->stats_width = r->width;
+  static_cast<Frames*>(u)->stats_text_mode = r->text_mode;
   ++static_cast<Frames*>(u)->stats_reports;
 }
 void OnState(void* u, rda_state s, rda_status reason) {
@@ -296,6 +299,37 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   s->Close();
   EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
   EXPECT_FALSE(media_->Status().running);
+}
+
+TEST_F(MediaE2E, TextModeIsAskedForAtTheStartAndChangedWhileRunning) {
+  // docs/protocol.md, "文字模式": session_request.text_mode, then the picture
+  // mode message. The picture keeps coming in either mode.
+  Frames frames;
+  auto o = Options(&frames);
+  o.control.request.text_mode = true;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
+  EXPECT_TRUE(media_->Status().text_mode);
+  EXPECT_TRUE(WaitFor([&] { return frames.stats_text_mode.load(); }));  // the overlay is told
+
+  auto send = [&](bool on) {
+    const std::string payload = EncodePictureMode({on});
+    return rda_viewer_send_message(s->viewer(), kPictureModeMessageType,
+                                   reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  };
+  ASSERT_EQ(send(false), RDA_OK);
+  EXPECT_TRUE(WaitFor([&] { return !media_->Status().text_mode; }));
+  // Leaving text mode refreshes the whole picture.
+  const int before = frames.count;
+  EXPECT_TRUE(WaitFor([&] { return frames.count > before; }));
+  EXPECT_TRUE(WaitFor([&] { return !frames.stats_text_mode.load(); }));
+  ASSERT_EQ(send(true), RDA_OK);
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().text_mode; }));
+  s->Close();
+  EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
+  EXPECT_FALSE(media_->Status().text_mode);
 }
 
 TEST_F(MediaE2E, PictureArrivesOverTcp) {

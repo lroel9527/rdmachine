@@ -114,6 +114,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `display_index` | 整数 ≥ 0 | 0 | 采集哪块显示器，0 是主显示器（同 rdaccel 的 `display_index`） |
 | `transport` | 字符串 | `udp` | `udp` 或 `tcp`。客户端 UDP 建连超时后，可以在同一条控制连接上用 `tcp` 再请求一次：服务端先结束正在进行的会话，再按新请求开始（新的密钥和令牌） |
 | `view_only` | 布尔 | false | 只看不控：服务端丢弃这个会话的键鼠事件 |
+| `text_mode` | 布尔 | false | 以文字模式开始会话，见下文“文字模式” |
 | `desktop` | 对象 | 无 | 客户端要的桌面：`width`、`height`（像素，≥ 1）、`scale`（每点像素数，可省略，默认 1）。服务端按它建虚拟显示器并共享那块屏，这时 `display_index` 不起作用。见下文“请求桌面” |
 
 ### session_ready（服务端 → 客户端）
@@ -162,6 +163,19 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 实现：`core/include/rdmachine/desktop.h`（规格、取整、消息）；`session/include/rdmachine/session/virtual_desktop.h`（`VirtualDesktop`，macOS 实现在 `session/src/virtual_desktop_mac.mm`）；服务端在 `MediaHost`（`StartSession` 里建，`DesktopLoop` 处理中途的请求）；Mac 客户端在 `client/main.mm`（`initialDesktop`、`requestDesktop`）；命令行客户端 `rdmachine-connect --desktop=2880x1800@2 --resize-desktop=2048x1536@2`。测试：`core/tests/test_desktop.cpp`、`session/tests/test_media_e2e.cpp`（用记录调用的假桌面）、`session/tests/test_virtual_desktop_mac.mm` 和 `tools/smoke_test.sh`（真的虚拟屏，会让本机屏幕重排几秒，要 `RDM_TEST_VIRTUAL_DESKTOP=1`）。
 
+## 文字模式
+
+给极慢的链路用（几十到几百 kbps）：带宽不够传整幅画面时，全部优先给清晰的文字。文字和界面减到每块 16 色（边缘不变，抗锯齿的灰阶合并）、不经视频编码变糊；链路暂时带不动的部分先保持旧内容，再按“最新改动优先”补上；照片和视频一秒最多更新几次；第一幅画面里文字区域先是底色，文字随后从上到下出现。怎么做全在 rdaccel 1.5 的 `text_mode`（见 rdaccel 的 `docs/architecture.md`），这里只有开关。
+
+- **谁决定**：客户端（它知道自己的链路）。默认关：链路正常时普通模式画质更好。
+- **会话开始时**：`session_request.text_mode`（可省略，默认 false）。
+- **会话中途**：rdaccel 应用消息，类型 `0x10004`（`RDA_MSG_USER_FIRST + 4`，`kPictureModeMessageType`），客户端到服务端，内容是 JSON `{"text_mode":true}`。服务端调用 `rda_host_set_text_mode`，下一帧生效；没有单独的应答。关掉时服务端整屏刷新一次（换回原色）。不认识的字段忽略，以后的画面模式加在这个对象里。
+- **客户端知道当前状态**：会话统计（见下）里的 `text_mode`；Mac 客户端的浮窗打开时多显示一行 “Text mode”。
+- Mac 客户端：菜单 View → Text Mode (Slow Connection)，选择会记住，下次连接直接用。命令行客户端：`rdmachine-connect --text-mode`（开始时），`--set-text-mode=on|off`（收到画面后切换）。
+- 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `text_mode` 和这条消息（画面照常，只是不省），旧客户端不发。
+
+实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/main.mm`（`toggleTextMode:`、`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。
+
 ## 剪贴板
 
 文本剪贴板不走控制连接，而是走画面连接上 rdaccel 的应用消息：类型 `RDA_MSG_CLIPBOARD_TEXT`（1），内容是 UTF-8 文本，不带结尾的 NUL。rdaccel 的应用消息可靠、有序、加密，和画面分开走，不会卡住画面。控制协议因此没有新消息，版本仍是 0。
@@ -196,7 +210,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 {"transport":"udp","width":2880,"height":1800,"encoded_fps":57.5,"captured_fps":60,
  "bitrate_kbps":3200,"target_kbps":8000,"bandwidth_kbps":120000,"rtt_ms":18.2,
  "recent_loss_pct":0.4,"total_loss_pct":1.5,"frames_dropped_congestion":3,
- "encoder":"VideoToolbox HEVC (low-latency)","input_source":"简体拼音","view_only":false}
+ "encoder":"VideoToolbox HEVC (low-latency)","input_source":"简体拼音","view_only":false,"text_mode":false}
 ```
 
 速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是真正丢失的包：rdaccel 判定丢失并重传、之后又没有收到原包确认的（`packets_lost - packets_spurious`，rdaccel 1.3），只是晚到的不算。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。

@@ -161,6 +161,7 @@ bool ReadDesktop(const json& j, std::optional<DesktopSpec>* out, std::string* er
 json ToJson(const SessionRequest& m) {
   json j = {{"display_index", m.display_index}, {"transport", TransportName(m.transport)}, {"view_only", m.view_only}};
   if (m.desktop) j["desktop"] = ToJson(*m.desktop);
+  if (m.text_mode) j["text_mode"] = true;
   return j;
 }
 json ToJson(const SessionReady& m) {
@@ -245,7 +246,8 @@ ParseResult ParseSessionRequest(const json& j, Reader& r) {
   int64_t display = 0;
   std::string transport = "udp";
   if (!r.Int("display_index", &display, false, 0, std::numeric_limits<int32_t>::max()) ||
-      !r.Str("transport", &transport, false) || !r.Bool("view_only", &m.view_only, false))
+      !r.Str("transport", &transport, false) || !r.Bool("view_only", &m.view_only, false) ||
+      !r.Bool("text_mode", &m.text_mode, false))
     return Bad(r.error);
   auto t = TransportFrom(transport);
   if (!t) return Bad("transport: unknown");

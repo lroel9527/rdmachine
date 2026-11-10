@@ -59,6 +59,9 @@ struct SessionRequest {
   // builds a virtual display of this shape and shares that; display_index is
   // then not used. Empty: share the display as it is.
   std::optional<DesktopSpec> desktop;
+  // Start in text mode (docs/protocol.md, "文字模式"): sharp text on a very
+  // slow link. The client can change it later (kPictureModeMessageType).
+  bool text_mode = false;
 };
 
 struct DisplayInfo {

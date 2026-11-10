@@ -38,6 +38,7 @@
 
 #include "rdmachine/desktop.h"
 #include "rdmachine/input_source_sync.h"
+#include "rdmachine/picture_mode.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session_stats.h"
 #include "rdmachine/session/config_store.h"
@@ -63,6 +64,13 @@ uint32_t Modifiers(NSEventModifierFlags f) {
 // (docs/protocol.md, "键盘语言同步"). On unless turned off.
 NSString* const kSyncKeyboardLanguageKey = @"SyncKeyboardLanguage";
 NSString* const kSyncKeyboardLanguageChanged = @"RDMSyncKeyboardLanguageChanged";
+
+// View > Text Mode (Slow Connection): the server spends what the link takes
+// on sharp text (docs/protocol.md, "文字模式"). Off unless chosen; remembered.
+NSString* const kTextModeKey = @"TextMode";
+NSString* const kTextModeChanged = @"RDMTextModeChanged";
+
+bool TextMode() { return [NSUserDefaults.standardUserDefaults boolForKey:kTextModeKey]; }
 
 bool SyncKeyboardLanguage() {
   NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
@@ -468,6 +476,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                          selector:@selector(syncSettingChanged:)
                                              name:kSyncKeyboardLanguageChanged
                                            object:nil];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(sendPictureMode)
+                                             name:kTextModeChanged
+                                           object:nil];
   [self sendInputSource:YES];
   _connectedAt = std::chrono::steady_clock::now();
   [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(renderStats) name:kStatsChanged object:nil];
@@ -491,6 +503,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _desktopBuilt = NO;
   [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kTextModeChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
   if (_keyMonitor) {
     [NSEvent removeMonitor:_keyMonitor];
@@ -608,6 +621,15 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [self sendInputSource:NO];
 }
 
+// Main thread. View > Text Mode changed: the running session follows. (A
+// session that starts later asks for it in its session_request.)
+- (void)sendPictureMode {
+  if (!_viewer) return;
+  const std::string payload = rdm::EncodePictureMode({TextMode()});
+  rda_viewer_send_message(_viewer, rdm::kPictureModeMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
+                          payload.size());
+}
+
 - (void)syncSettingChanged:(NSNotification*)note {
   _sentInputSource.clear();
   [self sendInputSource:YES];
@@ -659,6 +681,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   add(@"bandwidth", r.bandwidth_kbps > 0 ? [@"BW " stringByAppendingString:StatsKbps(r.bandwidth_kbps)] : @"BW –");
   add(@"resolution", [NSString stringWithFormat:@"%d×%d", r.width, r.height]);
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
+  // Not a field to pick: whoever sees soft photos should see why.
+  if (r.text_mode) [lines addObject:@"Text mode"];
   add(@"input", r.input_source.empty() ? @"Input –" : NS(r.input_source));
   const double response = _responseMs.load();
   add(@"response", response < 0 ? @"Input→screen –" : [NSString stringWithFormat:@"Input→screen %.0f ms", response]);
@@ -1081,8 +1105,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     return StatsShown();
   } else if (item.action == @selector(toggleSyncKeyboardLanguage:)) {
     item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleTextMode:)) {
+    item.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
   }
   return YES;
+}
+
+- (void)toggleTextMode:(NSMenuItem*)item {
+  const bool on = !TextMode();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
 }
 
 - (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
@@ -1122,6 +1155,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
   sync.toolTip = @"The server switches to the input source used on this Mac (Pinyin, ABC, ...), "
                  @"including when Caps Lock switches it.";
+  NSMenuItem* textMode = [view addItemWithTitle:@"Text Mode (Slow Connection)"
+                                         action:@selector(toggleTextMode:)
+                                  keyEquivalent:@""];
+  textMode.target = self;
+  textMode.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
+  textMode.toolTip = @"For very slow connections (tens of kbps to a few hundred): text stays sharp and arrives first; "
+                     @"photos and video update only a few times a second and colours are slightly reduced.";
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* statsItem = [view addItemWithTitle:@"Statistics" action:nil keyEquivalent:@""];
   NSMenu* stats = [[NSMenu alloc] initWithTitle:@"Statistics"];
@@ -1243,6 +1283,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // Ask for a desktop made for this window: its pixels, its HiDPI scale. A
   // server that cannot build one shares its display as it is.
   opts.control.request.desktop = [remote initialDesktop];
+  opts.control.request.text_mode = TextMode();
   rda_viewer_config_default(&opts.viewer);
   opts.viewer.user = (__bridge void*)remote;
   opts.viewer.on_stream_info = &OnStreamInfo;

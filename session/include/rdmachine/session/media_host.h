@@ -53,6 +53,7 @@ struct MediaHostStatus {
   SessionOrigin origin;
   MediaTransport transport = MediaTransport::kUdp;
   bool view_only = false;          // in effect (asked for, or no input injection)
+  bool text_mode = false;          // the picture is sent in text mode (docs/protocol.md, "文字模式")
   bool input_unavailable = false;  // control was wanted but input injection failed
                                    // (on macOS: no Accessibility permission)
   std::chrono::steady_clock::time_point started{};
@@ -109,6 +110,10 @@ class MediaHost : public ServerDelegate {
   // Set before the host exists, cleared after it is destroyed (as injector_).
   std::unique_ptr<ClipboardSync> clipboard_;
   std::atomic<rda_host*> clipboard_host_{nullptr};  // where clipboard_ sends
+  // The running host for OnMessage (transport thread, which must not take
+  // mu_): set once the host exists, cleared before it is destroyed.
+  std::atomic<rda_host*> mode_host_{nullptr};
+  std::atomic<bool> text_mode_{false};
   MediaHostStatus status_;  // guarded by mu_; stats filled in by Status()
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_

@@ -69,6 +69,17 @@ TEST(Messages, SessionRequestDefaults) {
   EXPECT_EQ(out.display_index, 1);
   EXPECT_EQ(out.transport, rdm::MediaTransport::kTcp);
   EXPECT_TRUE(out.view_only);
+  EXPECT_FALSE(out.text_mode);
+}
+
+TEST(Messages, SessionRequestCarriesTextMode) {
+  rdm::SessionRequest q;
+  EXPECT_FALSE(q.text_mode);
+  EXPECT_EQ(rdm::SerializeMessage(q).find("text_mode"), std::string::npos);  // nothing new for old servers
+  q.text_mode = true;
+  EXPECT_TRUE(RoundTrip(q).text_mode);
+  auto r = rdm::ParseMessage(R"({"type":"session_request","text_mode":"yes"})");
+  EXPECT_FALSE(r.message);
 }
 
 TEST(Messages, SessionRequestAndReadyCarryTheDesktop) {

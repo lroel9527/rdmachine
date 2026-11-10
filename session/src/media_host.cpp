@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rdmachine/session/live_stats.h"
+#include "rdmachine/picture_mode.h"
 #include "rdmachine/session/system_auth.h"
 #include "rdmachine/session_stats.h"
 
@@ -12,6 +13,7 @@ namespace rdm {
 static_assert(kInputSourceMessageType == RDA_MSG_USER_FIRST + 1, "an application message type");
 static_assert(kSessionStatsMessageType == RDA_MSG_USER_FIRST + 2, "an application message type");
 static_assert(kDesktopRequestMessageType == RDA_MSG_USER_FIRST + 3, "an application message type");
+static_assert(kPictureModeMessageType == RDA_MSG_USER_FIRST + 4, "an application message type");
 
 namespace {
 
@@ -56,6 +58,7 @@ MediaHostStatus MediaHost::Status() {
   MediaHostStatus s = status_;
   if (!host_) return s;
   s.media_connected = media_connected_;
+  s.text_mode = text_mode_;
   s.stats.struct_size = sizeof(s.stats);
   if (rda_host_get_stats(host_, &s.stats) != RDA_OK) s.stats = rda_host_stats{};
   char enc[64] = {};
@@ -84,6 +87,16 @@ void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, siz
   if (type == kInputSourceMessageType) {
     if (auto wanted = DecodeInputSource(std::string(reinterpret_cast<const char*>(payload), n))) {
       self->SyncInputSource(*wanted);
+    }
+  }
+  if (type == kPictureModeMessageType) {
+    if (auto mode = DecodePictureMode(std::string(reinterpret_cast<const char*>(payload), n))) {
+      if (rda_host* h = self->mode_host_.load()) {
+        rda_host_set_text_mode(h, mode->text_mode ? 1 : 0);
+        if (self->text_mode_.exchange(mode->text_mode) != mode->text_mode) {
+          self->Log(mode->text_mode ? "text mode on (asked by the client)" : "text mode off (asked by the client)");
+        }
+      }
     }
   }
   if (type == kDesktopRequestMessageType) {
@@ -282,6 +295,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   // of the desktop being shared: without this macOS capture leaves them
   // out, and a remote user clicks into a menu they cannot see.
   cfg.capture_own_windows = 1;
+  cfg.text_mode = request.text_mode ? 1 : 0;
   cfg.user = this;
   cfg.on_auth = &MediaHost::OnAuth;
   cfg.on_input = &MediaHost::OnInput;
@@ -311,6 +325,8 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     return std::nullopt;
   }
   host_ = host;
+  text_mode_ = request.text_mode;
+  mode_host_ = host;
   status_ = MediaHostStatus{};
   status_.running = true;
   status_.origin = origin;
@@ -343,7 +359,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     clipboard_->Start();
   }
   Log("session started on display " + std::to_string(display_index) + (view_only ? " (view only)" : "") +
-      ", media " + (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
+      (request.text_mode ? " (text mode)" : "") + ", media " + (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
   return grant;
 }
@@ -388,6 +404,7 @@ void MediaHost::StatsLoop() {
           r.encoder = enc;
           r.input_source = status_.input_source;
           r.view_only = status_.view_only;
+          r.text_mode = text_mode_;
           const std::string payload = EncodeSessionStats(r);
           // Before the viewer is connected this is RDA_ERR_BUSY: try next time.
           rda_host_send_message(host_, kSessionStatsMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
@@ -458,6 +475,8 @@ void MediaHost::EndSession() {
     media_connected_ = false;
     if (clipboard_) clipboard_->Stop();  // its thread may be sending through the host
     clipboard_host_ = nullptr;
+    mode_host_ = nullptr;
+    text_mode_ = false;
     // Destroy the host under the lock so StartSession cannot bind the port
     // before it is free again.
     rda_host_destroy(host);

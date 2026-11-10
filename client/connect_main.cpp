@@ -6,6 +6,7 @@
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
+//                     [--text-mode] [--set-text-mode=on|off]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -46,6 +47,7 @@
 
 #include "rdmachine/desktop.h"
 #include "rdmachine/input_source_sync.h"
+#include "rdmachine/picture_mode.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
@@ -115,7 +117,8 @@ int Usage() {
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
                "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n"
-               "                         [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]\n");
+               "                         [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]\n"
+               "                         [--text-mode] [--set-text-mode=on|off]\n");
   return 2;
 }
 
@@ -156,6 +159,7 @@ int main(int argc, char** argv) {
   bool move_only = false;
   std::string save_frame, input_source_json;
   std::optional<rdm::DesktopSpec> resize_desktop;
+  std::optional<bool> set_text_mode;  // --set-text-mode: change it once frames arrive
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -163,6 +167,11 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--accept-new-host", nullptr)) accept_new = true;
     else if (Flag(a, "--tcp", nullptr)) c.request.transport = rdm::MediaTransport::kTcp;
     else if (Flag(a, "--view-only", nullptr)) c.request.view_only = true;
+    else if (Flag(a, "--text-mode", nullptr)) c.request.text_mode = true;
+    else if (Flag(a, "--set-text-mode", &v)) {
+      if (v != "on" && v != "off") return Usage();
+      set_text_mode = v == "on";
+    }
     else if (Flag(a, "--display", &v)) c.request.display_index = std::atoi(v.c_str());
     else if (Flag(a, "--frames", &v)) want_frames = std::atoi(v.c_str());
     else if (Flag(a, "--seconds", &v)) seconds = std::atoi(v.c_str());
@@ -282,6 +291,13 @@ int main(int argc, char** argv) {
   while (stats.frames < want_frames && !stats.ended && std::chrono::steady_clock::now() < deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   std::printf("received %d frame(s) of %dx%d\n", stats.frames.load(), stats.width.load(), stats.height.load());
+  if (set_text_mode && stats.frames > 0) {
+    const std::string payload = rdm::EncodePictureMode({*set_text_mode});
+    const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kPictureModeMessageType,
+                                                  reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    std::printf("asked for text mode %s: %s\n", *set_text_mode ? "on" : "off", st == RDA_OK ? "sent" : rda_last_error());
+    std::fflush(stdout);
+  }
   bool resize_failed = false;
   if (resize_desktop && stats.frames > 0) {
     const std::optional<rdm::DesktopSpec> planned = rdm::PlanDesktop(*resize_desktop);

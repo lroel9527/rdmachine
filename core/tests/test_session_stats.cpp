@@ -21,6 +21,7 @@ TEST(SessionStats, RoundTrip) {
   r.encoder = "VideoToolbox HEVC";
   r.input_source = "简体拼音";
   r.view_only = true;
+  r.text_mode = true;
   auto back = DecodeSessionStats(EncodeSessionStats(r));
   ASSERT_TRUE(back);
   EXPECT_EQ(*back, r);

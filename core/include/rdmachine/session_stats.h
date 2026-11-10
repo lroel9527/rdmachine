@@ -23,6 +23,7 @@ struct SessionStatsReport {
   std::string encoder;
   std::string input_source;  // what the server selected for the client's; may be empty
   bool view_only = false;
+  bool text_mode = false;  // the picture is sent in text mode (picture_mode.h)
 
   bool operator==(const SessionStatsReport&) const = default;
 };

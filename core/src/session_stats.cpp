@@ -19,7 +19,8 @@ std::string EncodeSessionStats(const SessionStatsReport& r) {
                         {"frames_dropped_congestion", r.frames_dropped_congestion},
                         {"encoder", r.encoder},
                         {"input_source", r.input_source},
-                        {"view_only", r.view_only}}
+                        {"view_only", r.view_only},
+                        {"text_mode", r.text_mode}}
       .dump();
 }
 
@@ -54,6 +55,7 @@ std::optional<SessionStatsReport> DecodeSessionStats(const std::string& payload)
   text("encoder", &r.encoder);
   text("input_source", &r.input_source);
   if (auto it = j.find("view_only"); it != j.end() && it->is_boolean()) r.view_only = it->get<bool>();
+  if (auto it = j.find("text_mode"); it != j.end() && it->is_boolean()) r.text_mode = it->get<bool>();
   return r;
 }
 

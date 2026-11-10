@@ -15,6 +15,7 @@ add_library(rdm_core STATIC
   src/clipboard_sync.cpp
   src/input_source_sync.cpp
   src/desktop.cpp
+  src/picture_mode.cpp
   src/session_stats.cpp)
 add_library(rdmachine::core ALIAS rdm_core)
 target_include_directories(rdm_core PUBLIC include)
