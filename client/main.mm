@@ -1283,8 +1283,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
                                   keyEquivalent:@""];
   textMode.target = self;
   textMode.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
-  textMode.toolTip = @"Uses a fraction of the traffic: text stays sharp and appears at once, with slightly fewer "
-                     @"colours; photos, video and animations update only a few times a second.";
+  textMode.toolTip = @"The same picture with less traffic: text that stands still or is being typed is sent far more "
+                     @"compactly (with slightly fewer colours). Scrolling and video look as usual and save less.";
   NSMenuItem* textRes = [view addItemWithTitle:@"Data Saver at Standard Resolution (1x)"
                                         action:@selector(toggleTextModeStandardResolution:)
                                  keyEquivalent:@""];
