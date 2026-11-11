@@ -265,6 +265,9 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   if (clip_mode != ClipboardMode::kOff) {
     ClipboardSync::Options so;
     so.mode = clip_mode;
+    // Older clients cannot ask at paste time; they get this computer's text
+    // as before.
+    so.push_text_to_older_peers = true;
     so.max_file_bytes = options_.clipboard_file_limit;
     so.staging_dir = options_.clipboard_staging_dir;
     so.on_status = options_.on_clipboard_status;

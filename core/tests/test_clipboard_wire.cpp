@@ -119,3 +119,22 @@ TEST(ClipboardWire, DataAckCancel) {
   EXPECT_EQ(DecodeClipboardCancel(EncodeClipboardCancel(c)), c);
   EXPECT_FALSE(DecodeClipboardCancel(R"({"id":1})"));
 }
+
+TEST(ClipboardWire, AnnounceAndRequest) {
+  ClipboardAnnounce a{3, {"text/plain", "image/png"}, 2};
+  EXPECT_EQ(DecodeClipboardAnnounce(EncodeClipboardAnnounce(a)), a);
+  EXPECT_FALSE(DecodeClipboardAnnounce(R"({"formats":[]})"));  // no id
+  EXPECT_FALSE(DecodeClipboardAnnounce(R"({"id":1,"formats":[7]})"));
+
+  ClipboardRequest f{3, 1, "text/plain"};
+  EXPECT_EQ(DecodeClipboardRequest(EncodeClipboardRequest(f)), f);
+  ClipboardRequest files{3, 2, ""};
+  EXPECT_EQ(DecodeClipboardRequest(EncodeClipboardRequest(files)), files);
+  EXPECT_NE(EncodeClipboardRequest(files).find("\"files\":true"), std::string::npos);
+  EXPECT_FALSE(DecodeClipboardRequest(R"({"announce":3,"id":1})"));  // neither
+
+  ClipboardOffer o;
+  o.id = 4;
+  o.request = 2;
+  EXPECT_EQ(DecodeClipboardOffer(EncodeClipboardOffer(o))->request, 2u);
+}

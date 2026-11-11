@@ -122,7 +122,7 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
   if (s->options_.clipboard && s->options_.clipboard_mode != ClipboardMode::kOff) {
     ClipboardSync::Options so;
     so.mode = s->options_.clipboard_mode;
-    so.send_on_start = true;  // copy here, connect, paste there
+    so.fetch_on_announce = s->options_.clipboard_fetch_on_announce;
     so.max_file_bytes = s->options_.clipboard_file_limit;
     so.staging_dir = s->options_.clipboard_staging_dir;
     so.on_status = s->options_.on_clipboard_status;

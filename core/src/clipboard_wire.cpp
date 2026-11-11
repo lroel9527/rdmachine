@@ -123,6 +123,7 @@ std::string EncodeClipboardOffer(const ClipboardOffer& o) {
     entries.push_back(std::move(je));
   }
   json j{{"id", o.id}, {"formats", std::move(formats)}, {"entries", std::move(entries)}};
+  if (o.request != 0) j["request"] = o.request;
   if (o.skipped_files > 0 || !o.skipped_reason.empty()) {
     j["skipped"] = {{"files", o.skipped_files},
                     {"bytes", o.skipped_bytes},
@@ -137,6 +138,7 @@ std::optional<ClipboardOffer> DecodeClipboardOffer(std::string_view payload) {
   if (!j.is_object()) return std::nullopt;
   ClipboardOffer o;
   if (!Get(j, "id", &o.id)) return std::nullopt;
+  Get(j, "request", &o.request);
   if (auto it = j.find("formats"); it != j.end()) {
     if (!it->is_array() || it->size() > kMaxFormats) return std::nullopt;
     for (const auto& jf : *it) {
@@ -220,6 +222,49 @@ bool ValidateOffer(const ClipboardOffer& o, std::string* why) {
     }
   }
   return true;
+}
+
+std::string EncodeClipboardAnnounce(const ClipboardAnnounce& a) {
+  return json{{"id", a.id}, {"formats", a.formats}, {"files", a.files}}.dump();
+}
+
+std::optional<ClipboardAnnounce> DecodeClipboardAnnounce(std::string_view payload) {
+  const json j = Parse(payload);
+  if (!j.is_object()) return std::nullopt;
+  ClipboardAnnounce a;
+  if (!Get(j, "id", &a.id)) return std::nullopt;
+  if (auto it = j.find("formats"); it != j.end()) {
+    if (!it->is_array() || it->size() > kMaxFormats) return std::nullopt;
+    for (const auto& f : *it) {
+      if (!f.is_string() || f.get<std::string>().empty() || f.get<std::string>().size() > 100) return std::nullopt;
+      a.formats.push_back(f.get<std::string>());
+    }
+  }
+  Get(j, "files", &a.files);
+  if (a.files > kMaxEntries) return std::nullopt;
+  return a;
+}
+
+std::string EncodeClipboardRequest(const ClipboardRequest& r) {
+  json j{{"announce", r.announce}, {"id", r.id}};
+  if (r.format.empty()) {
+    j["files"] = true;
+  } else {
+    j["format"] = r.format;
+  }
+  return j.dump();
+}
+
+std::optional<ClipboardRequest> DecodeClipboardRequest(std::string_view payload) {
+  const json j = Parse(payload);
+  if (!j.is_object()) return std::nullopt;
+  ClipboardRequest r;
+  if (!Get(j, "announce", &r.announce) || !Get(j, "id", &r.id)) return std::nullopt;
+  bool files = false;
+  Get(j, "files", &files);
+  if (!files && (!Get(j, "format", &r.format) || r.format.empty())) return std::nullopt;
+  if (files) r.format.clear();
+  return r;
 }
 
 std::string EncodeClipboardData(const ClipboardDataHeader& h, std::string_view bytes) {

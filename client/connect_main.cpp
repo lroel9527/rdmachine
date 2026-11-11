@@ -261,6 +261,7 @@ int main(int argc, char** argv) {
   opts.viewer.on_frame = &OnFrame;
   opts.clipboard = rdm::SystemClipboard();
   opts.clipboard_staging_dir = rdm::ClipboardStagingDir();
+  opts.clipboard_fetch_on_announce = true;  // no run loop here to answer at paste time
   opts.log = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
   opts.on_ended = [&](const std::string& reason) {
     std::fprintf(stderr, "session ended: %s\n", reason.c_str());

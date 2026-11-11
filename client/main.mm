@@ -100,22 +100,22 @@ NSString* DescribeClipboardStatus(const rdm::ClipboardTransferStatus& s) {
   switch (s.state) {
     case State::kRunning: {
       const int pct = s.bytes_total ? static_cast<int>(s.bytes_done * 100 / s.bytes_total) : 0;
-      return [NSString stringWithFormat:@"%@ %@ — %d%% (%@ of %@)", out ? @"Copying to the remote Mac:" : @"Copying from the remote Mac:",
+      return [NSString stringWithFormat:@"%@ %@ — %d%% (%@ of %@)", out ? @"Pasting on the remote Mac:" : @"Pasting from the remote Mac:",
                                         what, pct, Megabytes(s.bytes_done), Megabytes(s.bytes_total)];
     }
     case State::kDone:
-      return [NSString stringWithFormat:@"%@ can be pasted %@", what, out ? @"on the remote Mac" : @"here"];
+      return [NSString stringWithFormat:@"%@ pasted %@", what, out ? @"on the remote Mac" : @"here"];
     case State::kSkipped: {
       NSString* why = s.detail == "too_many"       ? @"too many files"
                       : s.detail == "not_accepted" ? @"copying files is turned off"
                                                    : [NSString stringWithFormat:@"%@ is over the %@ limit",
                                                                                 Megabytes(s.skipped_bytes), Megabytes(s.limit_bytes)];
-      return [NSString stringWithFormat:@"%@: %@", out ? @"Files not copied to the remote Mac" : @"Files copied on the remote Mac did not come over", why];
+      return [NSString stringWithFormat:@"%@: %@", out ? @"Files not pasted on the remote Mac" : @"Files from the remote Mac not pasted", why];
     }
     case State::kFailed:
-      return [NSString stringWithFormat:@"Copying %@ failed: %@", what, NS(s.detail)];
+      return [NSString stringWithFormat:@"Pasting %@ failed: %@", what, NS(s.detail)];
     case State::kCancelled:
-      return [NSString stringWithFormat:@"Copying %@ stopped (%@)", what, NS(s.detail)];
+      return [NSString stringWithFormat:@"Pasting %@ stopped (%@)", what, NS(s.detail)];
   }
   return @"";
 }
@@ -1390,8 +1390,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     it.tag = mb;
   }
   limitItem.submenu = limits;
-  limitItem.toolTip = @"Files copied on one Mac are sent before they can be pasted on the other. Larger copies are "
-                      @"not sent (a note says so). Applies from the next connection.";
+  limitItem.toolTip = @"Files copied on one Mac are sent when they are pasted on the other. Larger copies are not "
+                      @"sent (a note says so). Applies from the next connection.";
   editItem.submenu = edit;
   NSMenuItem* viewItem = [[NSMenuItem alloc] init];
   [bar addItem:viewItem];
@@ -1552,8 +1552,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.viewer.on_cursor = &OnCursor;
   opts.viewer.on_message = &OnMessage;
   // What is copied on either Mac (text, rich text, images, files) can be
-  // pasted on the other (both ways for now; a setting comes with the
-  // preferences window). Files up to Edit → Copied Files Limit.
+  // pasted on the other; it only crosses when it is pasted (both ways for
+  // now; a setting comes with the preferences window). Files up to
+  // Edit → Copied Files Limit.
   opts.clipboard = rdm::SystemClipboard();
   opts.clipboard_file_limit = static_cast<uint64_t>(ClipboardFileLimitMB()) << 20;
   opts.clipboard_staging_dir = rdm::ClipboardStagingDir();

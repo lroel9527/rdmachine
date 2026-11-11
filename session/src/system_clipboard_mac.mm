@@ -7,6 +7,7 @@
 
 #include <sys/xattr.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -50,6 +51,73 @@ void MarkDownloaded(const std::string& path) {
   }
 }
 
+NSPasteboardType TypeOf(const std::string& mime) {
+  if (mime == kMimeText) return NSPasteboardTypeString;
+  if (mime == kMimeRtf) return NSPasteboardTypeRTF;
+  if (mime == kMimeHtml) return NSPasteboardTypeHTML;
+  if (mime == kMimePng) return NSPasteboardTypePNG;
+  return nil;
+}
+
+}  // namespace
+}  // namespace rdm
+
+// Answers the system when an application pastes the peer's copy: fetches
+// what is asked for from the peer, keeping the run loop going meanwhile so
+// the application (the client's remote window, the server's menu) stays
+// responsive.
+@interface RDMPromiseProvider : NSObject <NSPasteboardItemDataProvider>
+- (instancetype)initWithPromise:(std::shared_ptr<rdm::ClipboardPromise>)promise file:(size_t)index;
+@end
+
+@implementation RDMPromiseProvider {
+  std::shared_ptr<rdm::ClipboardPromise> _promise;
+  size_t _index;  // which file this item stands for
+}
+
+- (instancetype)initWithPromise:(std::shared_ptr<rdm::ClipboardPromise>)promise file:(size_t)index {
+  if (!(self = [super init])) return nil;
+  _promise = std::move(promise);
+  _index = index;
+  return self;
+}
+
+- (void)pasteboard:(NSPasteboard*)pb item:(NSPasteboardItem*)item provideDataForType:(NSPasteboardType)type {
+  // The system asks on the main thread; anywhere else (an in-process read
+  // from another thread) there is no run loop of ours to keep going.
+  std::function<void()> pump;
+  if (NSThread.isMainThread) pump = [] { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false); };
+  if ([type isEqualToString:NSPasteboardTypeFileURL]) {
+    auto files = _promise->FetchFiles(pump);
+    if (!files || _index >= files->size()) return;
+    const std::string& path = (*files)[_index];
+    rdm::MarkDownloaded(path);
+    NSURL* url = [NSURL fileURLWithPath:rdm::NS(path)];
+    [item setString:url.absoluteString forType:type];
+    return;
+  }
+  if ([type isEqualToString:NSPasteboardTypeTIFF]) {
+    // For applications that only read TIFF.
+    auto png = _promise->FetchFormat(std::string(rdm::kMimePng), pump);
+    if (!png) return;
+    NSBitmapImageRep* rep = [NSBitmapImageRep imageRepWithData:[NSData dataWithBytes:png->data() length:png->size()]];
+    if (NSData* tiff = rep.TIFFRepresentation) [item setData:tiff forType:type];
+    return;
+  }
+  for (const auto& mime : _promise->formats()) {
+    if (![rdm::TypeOf(mime) isEqualToString:type]) continue;
+    auto data = _promise->FetchFormat(mime, pump);
+    if (!data) return;
+    [item setData:[NSData dataWithBytes:data->data() length:data->size()] forType:type];
+    return;
+  }
+}
+
+@end
+
+namespace rdm {
+namespace {
+
 class MacClipboard : public Clipboard {
  public:
   explicit MacClipboard(const std::string& name) : name_(name) {}
@@ -63,6 +131,8 @@ class MacClipboard : public Clipboard {
   std::optional<ClipboardContent> Read() override {
     @autoreleasepool {
       NSPasteboard* pb = Board();
+      // Our own promise of the peer's copy: reading it would fetch it.
+      if (pb.changeCount == promise_count_.load()) return std::nullopt;
       NSArray<NSPasteboardType>* types = pb.types;
       if ([types containsObject:kConcealedType] || [types containsObject:kTransientType]) return std::nullopt;
       ClipboardContent c;
@@ -130,6 +200,38 @@ class MacClipboard : public Clipboard {
     }
   }
 
+  std::optional<int64_t> WritePromise(std::shared_ptr<ClipboardPromise> promise) override {
+    @autoreleasepool {
+      NSPasteboard* pb = Board();
+      NSMutableArray<NSPasteboardType>* formats = [NSMutableArray array];
+      for (const auto& mime : promise->formats()) {
+        if (NSPasteboardType t = TypeOf(mime)) [formats addObject:t];
+        if (mime == kMimePng) [formats addObject:NSPasteboardTypeTIFF];
+      }
+      NSMutableArray<NSPasteboardItem*>* items = [NSMutableArray array];
+      NSMutableArray* providers = [NSMutableArray array];
+      // As Finder copies: one item per file; the formats (the names) on the first.
+      const size_t n = std::max<size_t>(1, promise->files());
+      for (size_t i = 0; i < n; ++i) {
+        NSMutableArray<NSPasteboardType>* types = [NSMutableArray array];
+        if (promise->files() > 0) [types addObject:NSPasteboardTypeFileURL];
+        if (i == 0) [types addObjectsFromArray:formats];
+        if (types.count == 0) continue;
+        RDMPromiseProvider* p = [[RDMPromiseProvider alloc] initWithPromise:promise file:i];
+        NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
+        if (![item setDataProvider:p forTypes:types]) return std::nullopt;
+        [items addObject:item];
+        [providers addObject:p];
+      }
+      if (items.count == 0) return std::nullopt;
+      const NSInteger count = [pb clearContents];
+      if (![pb writeObjects:items]) return std::nullopt;
+      providers_ = providers;  // kept until the next promise
+      promise_count_ = static_cast<int64_t>(count);
+      return static_cast<int64_t>(count);
+    }
+  }
+
  private:
   NSPasteboard* Board() {
     if (name_.empty()) return [NSPasteboard generalPasteboard];
@@ -137,6 +239,8 @@ class MacClipboard : public Clipboard {
   }
 
   const std::string name_;
+  std::atomic<int64_t> promise_count_{-1};  // the change count of our promise on the pasteboard
+  NSArray* providers_ = nil;
 };
 
 }  // namespace

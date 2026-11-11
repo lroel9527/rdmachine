@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "fake_clipboard.h"
 #include "rdmachine/session/system_clipboard.h"
 
 using namespace rdm;
@@ -150,4 +151,120 @@ TEST_F(MacClipboardTest, ReceivedFilesArePastableAndMarkedDownloaded) {
 TEST_F(MacClipboardTest, StagingIsInTheUsersCaches) {
   const std::string d = ClipboardStagingDir();
   EXPECT_NE(d.find("/Library/Caches/RDMachine/Clipboard"), std::string::npos) << d;
+}
+
+// ---- the peer's copy, promised on the pasteboard and fetched when read ----
+
+namespace {
+
+// The copying side is an in-memory clipboard; the pasting side this Mac's
+// (private) pasteboard. Both sync on their own threads, wired directly.
+class MacPromiseTest : public MacClipboardTest {
+ protected:
+  void SetUp() override {
+    MacClipboardTest::SetUp();
+    ClipboardSync::Options o;
+    o.poll_ms = 10;
+    ClipboardSync::Options ob = o;
+    ob.staging_dir = (dir_ / "staging").string();
+    copier_ = std::make_unique<ClipboardSync>(fake_, [this](uint32_t t, std::string_view p) {
+      paster_->OnMessage(t, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+      return true;
+    }, o);
+    paster_ = std::make_unique<ClipboardSync>(clipboard_, [this](uint32_t t, std::string_view p) {
+      copier_->OnMessage(t, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+      return true;
+    }, ob);
+    copier_->Start();
+    paster_->Start();
+  }
+  void TearDown() override {
+    paster_->Stop();
+    copier_->Stop();
+    MacClipboardTest::TearDown();
+  }
+  // Until the pasteboard changes (the promise arrives).
+  bool WaitForChange(NSInteger before) {
+    for (int i = 0; i < 300; ++i) {
+      if (pb_.changeCount != before) return true;
+      usleep(10000);
+    }
+    return false;
+  }
+
+  std::shared_ptr<FakeClipboard> fake_ = std::make_shared<FakeClipboard>();
+  std::unique_ptr<ClipboardSync> copier_, paster_;
+};
+
+}  // namespace
+
+TEST_F(MacPromiseTest, TextIsFetchedOnlyWhenPasted) {
+  const NSInteger before = pb_.changeCount;
+  fake_->Copy("pasted on demand ✓");
+  ASSERT_TRUE(WaitForChange(before));
+  const NSInteger promised = pb_.changeCount;
+  EXPECT_TRUE([pb_.types containsObject:NSPasteboardTypeString]);
+  EXPECT_EQ(clipboard_->Read(), std::nullopt);  // never reads its own promise
+  // An application pastes.
+  NSString* s = [pb_ stringForType:NSPasteboardTypeString];
+  ASSERT_TRUE(s);
+  EXPECT_EQ(std::string(s.UTF8String), "pasted on demand ✓");
+  // Filling it in is not a new copy: nothing is announced back.
+  EXPECT_EQ(pb_.changeCount, promised);
+  usleep(300000);
+  EXPECT_FALSE(fake_->promise());
+}
+
+TEST_F(MacPromiseTest, ImagesPasteAsPngAndTiff) {
+  NSImage* img = [[NSImage alloc] initWithSize:NSMakeSize(5, 2)];
+  [img lockFocus];
+  [NSColor.blueColor setFill];
+  NSRectFill(NSMakeRect(0, 0, 5, 2));
+  [img unlockFocus];
+  NSData* png = [[NSBitmapImageRep imageRepWithData:img.TIFFRepresentation] representationUsingType:NSBitmapImageFileTypePNG
+                                                                                      properties:@{}];
+  ClipboardContent c;
+  c.formats = {{std::string(kMimePng), std::string(static_cast<const char*>(png.bytes), png.length)}};
+  const NSInteger before = pb_.changeCount;
+  fake_->CopyContent(c);
+  ASSERT_TRUE(WaitForChange(before));
+  NSData* tiff = [pb_ dataForType:NSPasteboardTypeTIFF];
+  ASSERT_TRUE(tiff);
+  NSImage* back = [[NSImage alloc] initWithData:tiff];
+  EXPECT_EQ(back.size.width, 5);
+  EXPECT_EQ([pb_ dataForType:NSPasteboardTypePNG].length, png.length);
+}
+
+TEST_F(MacPromiseTest, FilesArriveWhenPasted) {
+  fs::create_directories(dir_ / "src" / "folder");
+  std::ofstream(dir_ / "src" / "folder" / "inner.txt") << "inside";
+  std::ofstream(dir_ / "src" / "top.txt") << "top";
+  ClipboardContent c;
+  c.formats = {{std::string(kMimeText), "folder\ntop.txt"}};
+  c.files = {(dir_ / "src" / "folder").string(), (dir_ / "src" / "top.txt").string()};
+  const NSInteger before = pb_.changeCount;
+  fake_->CopyContent(c);
+  ASSERT_TRUE(WaitForChange(before));
+  EXPECT_FALSE(fs::exists(dir_ / "staging") && !fs::is_empty(dir_ / "staging"));  // nothing yet
+  // What Finder reads to paste.
+  NSArray<NSURL*>* urls = [pb_ readObjectsForClasses:@[ NSURL.class ]
+                                             options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+  ASSERT_EQ(urls.count, 2u);
+  const fs::path folder = urls[0].path.UTF8String, top = urls[1].path.UTF8String;
+  EXPECT_EQ(folder.filename(), "folder");
+  EXPECT_EQ(top.filename(), "top.txt");
+  EXPECT_EQ(fs::canonical(folder.parent_path().parent_path()), fs::canonical(dir_ / "staging"));
+  std::ifstream in(folder / "inner.txt");
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), "inside");
+  char buf[128];
+  EXPECT_GT(getxattr(top.c_str(), "com.apple.quarantine", buf, sizeof buf, 0, XATTR_NOFOLLOW), 0);
+  EXPECT_EQ(std::string([pb_ stringForType:NSPasteboardTypeString].UTF8String), "folder\ntop.txt");
+}
+
+TEST_F(MacPromiseTest, APromiseFromAStoppedSessionGivesNothing) {
+  const NSInteger before = pb_.changeCount;
+  fake_->Copy("too late");
+  ASSERT_TRUE(WaitForChange(before));
+  paster_->Stop();
+  EXPECT_EQ([pb_ stringForType:NSPasteboardTypeString], nil);
 }

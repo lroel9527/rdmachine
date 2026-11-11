@@ -179,41 +179,46 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ## 剪贴板
 
-在一边复制的内容可以在另一边粘贴：纯文本、富文本（RTF、HTML）、图片（PNG），以及在访达里复制的文件和文件夹。剪贴板不走控制连接，而是走画面连接上 rdaccel 的应用消息：可靠、有序、加密，和画面分开走。控制协议因此没有新消息，版本仍是 0。
+在一边复制的内容可以在另一边粘贴：纯文本、富文本（RTF、HTML）、图片（PNG），以及在访达里复制的文件和文件夹。**内容只有在对方真正粘贴时才离开本机**：复制时只告诉对方“有什么格式、几个文件”，对方的应用粘贴时才来取，而且只取它要的那一种格式。剪贴板不走控制连接，而是走画面连接上 rdaccel 的应用消息：可靠、有序、加密，和画面分开走。控制协议因此没有新消息，版本仍是 0。
 
-### 消息（剪贴板版本 1）
+### 消息（剪贴板版本 2）
 
 | 类型 | 方向 | 内容 |
 | --- | --- | --- |
-| `0x10005` hello（`RDA_MSG_USER_FIRST + 5`） | 双向，最先发 | JSON `{"version":1,"max_file_bytes":268435456}`：本端说的剪贴板版本，以及一次最多收多少文件数据（0 = 不收文件） |
-| `0x10006` offer | 发送方 | JSON：这次复制了什么。`id`（发送方自己编号）、`formats`（`[{"mime":"text/plain","size":12}]`）、`entries`（文件，见下）、可选的 `skipped`（`{"files":3,"bytes":2147483648,"reason":"too_large","limit":268435456}`：复制了但没发的文件，以及起作用的上限） |
-| `0x10007` data | 发送方 | 二进制：`id`（8 字节）、`item`（4）、`offset`（8），小端，后面是数据。每条最多 128 KiB |
-| `0x10008` ack | 接收方 | 二进制：`id`（8）、已写好的字节数（8，整个 offer 累计） |
+| `0x10005` hello（`RDA_MSG_USER_FIRST + 5`） | 双向，最先发 | JSON `{"version":2,"max_file_bytes":268435456}`：本端说的剪贴板版本，以及一次最多收多少文件数据（0 = 不收文件） |
+| `0x1000A` announce | 复制的一方 | JSON `{"id":3,"formats":["text/plain","image/png"],"files":2}`：复制了什么格式、几个文件或文件夹。没有内容，没有文件名，没有大小 |
+| `0x1000B` request | 粘贴的一方 | JSON `{"announce":3,"id":1,"format":"text/plain"}` 或 `{"announce":3,"id":2,"files":true}`：有应用在粘贴，要这一种格式，或者要文件 |
+| `0x10006` offer | 复制的一方 | JSON，回答一个 request：`id`（发送方自己编号）、`request`（回答的是哪个）、`formats`（`[{"mime":"text/plain","size":12}]`）或 `entries`（文件，见下）。给不了时没有数据，`skipped` 说明原因：`{"files":3,"bytes":2147483648,"reason":"too_large","limit":268435456}`；`reason` 还可以是 `too_many`、`not_accepted`，或 `gone`（对方已经又复制了别的） |
+| `0x10007` data | 复制的一方 | 二进制：`id`（8 字节）、`item`（4）、`offset`（8），小端，后面是数据。每条最多 128 KiB |
+| `0x10008` ack | 粘贴的一方 | 二进制：`id`（8）、已写好的字节数（8，整个 offer 累计） |
 | `0x10009` cancel | 双向 | JSON `{"id":7,"from_sender":true,"reason":"superseded"}`；`from_sender` 说明 `id` 是哪一方的编号 |
-| `1` 纯文本（`RDA_MSG_CLIPBOARD_TEXT`） | 双向 | UTF-8 文本，不带结尾的 NUL。只和没说过 hello 的旧版本对端用 |
+| `1` 纯文本（`RDA_MSG_CLIPBOARD_TEXT`） | 双向 | UTF-8 文本，不带结尾的 NUL。只和没说过 hello 2 的旧版本对端用 |
 
-格式用 MIME 名：`text/plain`（UTF-8）、`text/rtf`、`text/html`（UTF-8）、`image/png`。不认识的格式不发；收到不认识的忽略。
+格式用 MIME 名：`text/plain`（UTF-8）、`text/rtf`、`text/html`（UTF-8）、`image/png`。不认识的格式不宣布；收到不认识的忽略。
 
 `entries` 的每一项：`path`（相对路径，`/` 分隔）、`kind`（`file`、`dir`、`link`）、文件的 `size`、链接的 `target`、可选的 `mode`（权限位，最多 0777）和 `mtime`（秒）。目录总在它里面的内容之前，没有 `/` 的是复制的那几项。
 
-数据按“项”的顺序发：先是每个格式，再是每个文件（`entries` 里 `kind` 为 `file` 的，按出现顺序）。每项从头到尾依次发，空的项没有 data 消息。接收方收到最后一个字节后，把整份内容写进本机剪贴板。
+数据按“项”的顺序发：先是每个格式，再是每个文件（`entries` 里 `kind` 为 `file` 的，按出现顺序）。每项从头到尾依次发，空的项没有 data 消息。
 
 ### 规则（两端相同）
 
-- **版本**：各自连通后先发 hello。对端 1.5 秒内没说 hello 就当它是旧版本，只给它发纯文本（类型 1），和以前一样；收到对端的纯文本也照收。所以新服务端和旧客户端（或反过来）之间文本照常同步，只是没有其他格式和文件。
-- **什么时候发**：各自轮询本机剪贴板（macOS 的 `NSPasteboard.changeCount`，每 250 毫秒一次），内容变了就发 offer。客户端连上时还会把当时剪贴板里的内容发一次（先复制、再连接、再粘贴）；服务端只发连上之后的变化。画面连接还没连通时发不出去，连通后补发最新的一次。
-- **不回传**：从对方收到的内容不会再发回去（记住最后一次收发的内容，并且用写入剪贴板时得到的 changeCount 区分“自己写的”和“用户复制的”），所以两端不会来回弹。
-- **新的覆盖旧的**：发送中途本机又复制了别的，发送方 cancel（`superseded`）旧的再发新的；接收中途接收方本机复制了别的，接收方 cancel 掉收到一半的（它的复制更新）；收到对方的新 offer 时，本机正在发的也 cancel 掉。收到一半的文件删掉。
-- **不发**：空内容、密码管理器标记为 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的内容。复制的是文件时只带文件名作为文本（访达还会放图标之类，有文件时没用）。
-- **方向**：每端可以设 `both`（默认）、`send`（只从本机发给对方）、`receive`（只收对方的）或 `off`，和 NoMachine 的四档对应。不收的一方对 offer 回 cancel（`refused`）。服务端：`rdmachine-server --clipboard=…`；命令行客户端：`rdmachine-connect --clipboard=…`；Mac 客户端暂时固定 `both`，设置项等偏好设置窗口一起做。
+- **复制时只宣布**：各自轮询本机剪贴板（macOS 的 `NSPasteboard.changeCount`，每 250 毫秒一次），变了就发 announce。连接之前就在剪贴板里的内容不宣布，只宣布连接之后复制的。
+- **粘贴时才取**：收到 announce 的一方在本机剪贴板上放一个“承诺”（macOS：`NSPasteboardItem` 的延迟提供数据，有这些格式和这么多个文件，但没有数据）。有应用粘贴时，系统向我们要数据，我们发 request，等对方的 offer 和数据到齐后交给系统。等待期间主线程的事件循环照常转（远程窗口照常刷新），没有进展 30 秒就放弃。同一份取过的内容再粘贴时不再取。只读取 PNG 的应用要 TIFF 时，从 PNG 转。
+- **只收要的**：只接受回答自己 request 的 offer，不请自来的一律 cancel（`refused`）。粘贴纯文本不会把同时复制的图片也传过来。
+- **不回传**：承诺被填上数据不算新的复制（changeCount 不变）；自己的承诺从不读、不宣布，所以两端不会来回弹。
+- **新的覆盖旧的**：对方又复制了别的，旧承诺作废（正在等的粘贴得到空），正在传的 cancel 掉，收到一半的文件删掉。粘贴的一方本机复制了别的，对方的承诺同样作废。会话结束时承诺都作废：断开后粘贴得到空。
+- **不宣布**：空内容、密码管理器标记为 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的内容。复制的是文件时只带文件名作为文本（访达还会放图标之类，有文件时没用）。
+- **方向**：每端可以设 `both`（默认）、`send`（只从本机发给对方）、`receive`（只收对方的）或 `off`，和 NoMachine 的四档对应。不收的一方不放承诺、不取；不发的一方不宣布，request 一律回 `gone`。服务端：`rdmachine-server --clipboard=…`；命令行客户端：`rdmachine-connect --clipboard=…`；Mac 客户端暂时固定 `both`，设置项等偏好设置窗口一起做。
 - **只看不控**：`view_only` 的会话（客户端请求或服务端 `--view-only`）里，服务端不接收客户端的剪贴板，只把自己的发出去。不想让对方拿到被控端剪贴板时用 `--clipboard=receive` 或 `off`。
+- **旧版本**：各自连通后先发 hello。对端 1.5 秒内没说 hello 2（不说，或者说版本 1）就当它是旧版本：它没法在粘贴时来取，所以**服务端**一复制就把纯文本发给它（类型 1，和以前一样），**客户端**什么都不发给旧服务端。收到对端的纯文本照收。
+- **命令行客户端**没有事件循环来回答系统的请求，所以收到 announce 就把所有内容取过来直接写进剪贴板（`fetch_on_announce`）。
 
 ### 文件
 
-- **先传再贴**：访达粘贴要的是本机真实存在的文件，所以文件在对方复制时就传过来，放进接收方自己的暂存目录（macOS：`~/Library/Caches/RDMachine/Clipboard/<时间>-<随机>/`，目录只有本人可读写），再把这些路径写进剪贴板。之后在访达里粘贴就是一次普通的本机复制。传完之前粘贴，贴出来的还是原来的内容；Mac 客户端的远程窗口左下角显示进度。
-- **上限（方案 A）**：一次复制的文件数据超过上限就不发文件，只发文件名（文本），offer 里的 `skipped` 告诉对方复制了多少；两端都提示一句（Mac 客户端在窗口左下角）。上限默认 256 MiB，每端自己设，生效的是两端里小的那个（hello 里交换）：服务端是设置窗口的“复制文件上限”或 `--clipboard-file-limit-mb=N`，Mac 客户端是 Edit → Copied Files Limit（下次连接生效），命令行客户端是 `--clipboard-file-limit-mb=N`；0 = 不传文件。超过 10000 项也不发（`too_many`）。更大的文件以后用单独的传输窗口。
-- **暂存目录的清理**：新的一份收完后删掉以前的；会话开始时删掉以前留下的，只保留剪贴板上还指着的那一份（断开后仍然可以粘贴）。
-- **下载标记**：收到的文件打上 `com.apple.quarantine`（和浏览器下载的一样），打开收到的应用或脚本时 macOS 会先问。
+- **粘贴时传**：在访达里粘贴时，系统要文件的路径；我们请对方把文件发过来，放进本机自己的暂存目录（macOS：`~/Library/Caches/RDMachine/Clipboard/<时间>-<随机>/`，目录只有本人可读写），传完后把这些路径交给访达，访达再从那里复制到目标位置。传的时候访达在等，Mac 客户端的远程窗口左下角显示进度。
+- **上限**：一次粘贴的文件数据超过上限就不传，粘贴得到空，两端都提示一句（Mac 客户端在窗口左下角）。上限默认 256 MiB，每端自己设，生效的是两端里小的那个（hello 里交换）：服务端是设置窗口的“复制文件上限”或 `--clipboard-file-limit-mb=N`，Mac 客户端是 Edit → Copied Files Limit（下次连接生效），命令行客户端是 `--clipboard-file-limit-mb=N`；0 = 不传文件（对方只承诺文件名）。超过 10000 项也不传（`too_many`）。文件列表和大小在对方粘贴时才算，复制时不碰。
+- **暂存目录的清理**：新的一份取完后删掉以前的；会话开始时删掉以前留下的，只保留剪贴板上还指着的那一份。
+- **下载标记**：取来的文件打上 `com.apple.quarantine`（和浏览器下载的一样），打开取来的应用或脚本时 macOS 会先问。
 - **安全**：接收方检查每个路径（不能是绝对路径，不能有空段、`.`、`..`、控制字符或非法 UTF-8，名字不超过 255 字节），每个父目录必须是前面列出的目录（不能是文件或链接），权限位去掉 setuid 等；不合格的 offer 整个丢弃。文件用 `O_CREAT | O_EXCL | O_NOFOLLOW` 新建；链接原样建出来，从不跟随。数据的 `item` 和 `offset` 必须正好接上，否则 cancel（`error`）并删掉收到的部分。
 - **符号链接和特殊文件**：链接作为链接传（不跟随，链接指向的东西不传）；套接字、管道、设备文件不传。
 - **权限和时间**：文件和目录的权限位（至少保留本人读写）和修改时间（精确到秒）照原样设。
@@ -227,7 +232,7 @@ rdaccel 发送时应用消息排在画面前面：一次全塞给它，画面就
 
 另外，没有 ack 的数据不超过“当前速度 × (最短 ack 时间 + 200 毫秒)”，至少 256 KiB。局域网上几秒内能到几百 Mbps；慢的链路上停在链路速度附近，画面优先。
 
-实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、offer、发送、接收、暂存，平台无关，Linux 上用内存剪贴板测试）、`clipboard_wire.h`（消息）、`clipboard_files.h`（列文件、暂存目录）、`transfer_pacer.h`（节奏）；macOS 剪贴板在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel；Mac 客户端的进度在 `client/main.mm`（`clipboardStatus:`）。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板），`session/tests/test_media_e2e.cpp`（两端真实连接，`ClipboardE2E.FilesGoBothWays`）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
+实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、宣布、承诺、按请求发送和接收、暂存，平台无关，Linux 上用内存剪贴板测试；`ClipboardPromise` 是放在剪贴板上的承诺）、`clipboard_wire.h`（消息）、`clipboard_files.h`（列文件、暂存目录）、`transfer_pacer.h`（节奏）；macOS 剪贴板（包括延迟提供数据的 `RDMPromiseProvider`）在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel；Mac 客户端的进度在 `client/main.mm`（`clipboardStatus:`）。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板；`MacPromiseTest` 用 AppKit 读承诺，和访达一样），`session/tests/test_media_e2e.cpp`（两端真实连接，`ClipboardE2E.FilesGoBothWays`）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
 
 ## 键盘语言同步
 

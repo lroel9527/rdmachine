@@ -432,7 +432,7 @@ std::string ReadFile(const std::filesystem::path& p) {
 
 }  // namespace
 
-TEST_F(ClipboardE2E, TextGoesBothWays) {
+TEST_F(ClipboardE2E, TextIsFetchedWhenPasted) {
   Frames frames;
   auto client_clipboard = std::make_shared<FakeClipboard>();
   client_clipboard->Copy("copied before connecting");
@@ -442,17 +442,20 @@ TEST_F(ClipboardE2E, TextGoesBothWays) {
   auto s = RemoteSession::Start(std::move(o), &r);
   ASSERT_TRUE(s) << r.error << ": " << r.detail;
 
-  // What the client had is pasted on the server.
-  EXPECT_TRUE(WaitFor([&] { return server_clipboard_->text() == "copied before connecting"; }));
-  // Server to client, including non-ASCII text.
+  // What the client had before connecting is not offered.
+  std::this_thread::sleep_for(700ms);
+  EXPECT_FALSE(server_clipboard_->promise());
+  // A copy on the client is promised on the server, and fetched when pasted.
+  client_clipboard->Copy("客户端的文字 ✓");
+  ASSERT_TRUE(WaitFor([&] { return server_clipboard_->promise() != nullptr; }));
+  EXPECT_EQ(server_clipboard_->promise()->FetchFormat(std::string(kMimeText), nullptr), "客户端的文字 ✓");
+  // Server to client.
   server_clipboard_->Copy("服务端的文字 ✓");
-  EXPECT_TRUE(WaitFor([&] { return client_clipboard->text() == "服务端的文字 ✓"; }));
-  // Client to server again.
-  client_clipboard->Copy("client again");
-  EXPECT_TRUE(WaitFor([&] { return server_clipboard_->text() == "client again"; }));
-  // No echo: each side wrote exactly what it received.
+  ASSERT_TRUE(WaitFor([&] { return client_clipboard->promise() != nullptr; }));
+  EXPECT_EQ(client_clipboard->promise()->FetchFormat(std::string(kMimeText), nullptr), "服务端的文字 ✓");
+  // No echo: neither side wrote anything but the one promise.
   std::this_thread::sleep_for(500ms);
-  EXPECT_EQ(server_clipboard_->writes(), 2);
+  EXPECT_EQ(server_clipboard_->writes(), 1);
   EXPECT_EQ(client_clipboard->writes(), 1);
   s->Close();
 }
@@ -481,28 +484,29 @@ TEST_F(ClipboardE2E, FilesGoBothWays) {
   c.formats = {{std::string(kMimeText), "project"}};
   c.files = {(tmp_ / "client" / "project").string()};
   client_clipboard->CopyContent(c);
-  ASSERT_TRUE(WaitFor([&] { return server_clipboard_->content().files.size() == 1; }, 30s));
-  const std::filesystem::path got = server_clipboard_->content().files[0];
-  EXPECT_EQ(got.filename(), "project");
-  EXPECT_EQ(got.parent_path().parent_path(), tmp_ / "server-staging");
-  EXPECT_EQ(ReadFile(got / "data.bin"), Pattern(3'000'000, 1));
-  EXPECT_EQ(ReadFile(got / "notes" / "readme.txt"), "读我 ✓");
-  EXPECT_EQ(server_clipboard_->text(), "project");
+  ASSERT_TRUE(WaitFor([&] { return server_clipboard_->promise() != nullptr; }));
+  EXPECT_FALSE(std::filesystem::exists(tmp_ / "server-staging") &&
+               !std::filesystem::is_empty(tmp_ / "server-staging"));  // nothing until pasted
+  auto got = server_clipboard_->promise()->FetchFiles(nullptr);
+  ASSERT_TRUE(got);
+  ASSERT_EQ(got->size(), 1u);
+  const std::filesystem::path dir = (*got)[0];
+  EXPECT_EQ(dir.filename(), "project");
+  EXPECT_EQ(dir.parent_path().parent_path(), tmp_ / "server-staging");
+  EXPECT_EQ(ReadFile(dir / "data.bin"), Pattern(3'000'000, 1));
+  EXPECT_EQ(ReadFile(dir / "notes" / "readme.txt"), "读我 ✓");
 
   ClipboardContent back;
   back.files = {(tmp_ / "server" / "reply.txt").string()};
   server_clipboard_->CopyContent(back);
-  // (The client's clipboard still holds its own copy until then.)
-  ASSERT_TRUE(WaitFor([&] {
-    const auto files = client_clipboard->content().files;
-    return files.size() == 1 && files[0].find("client-staging") != std::string::npos;
-  }, 30s));
-  EXPECT_EQ(ReadFile(client_clipboard->content().files[0]), "got it");
+  ASSERT_TRUE(WaitFor([&] { return client_clipboard->promise() != nullptr; }));
+  auto reply = client_clipboard->promise()->FetchFiles(nullptr);
+  ASSERT_TRUE(reply);
+  EXPECT_EQ(ReadFile((*reply)[0]), "got it");
   {
     std::lock_guard lock(mu);
     ASSERT_FALSE(statuses.empty());
     EXPECT_EQ(statuses.back().state, ClipboardTransferStatus::State::kDone);
-    EXPECT_EQ(statuses.back().direction, ClipboardTransferStatus::Direction::kReceiving);
   }
   s->Close();
 }
@@ -512,16 +516,16 @@ TEST_F(MediaE2E, ViewOnlySessionDoesNotTakeTheClientsClipboard) {
   // only: the server's clipboard still reaches the client.
   Frames frames;
   auto client_clipboard = std::make_shared<FakeClipboard>();
-  client_clipboard->Copy("from the client");
   auto o = Options(&frames);
   o.clipboard = client_clipboard;
   ConnectResult r;
   auto s = RemoteSession::Start(std::move(o), &r);
   ASSERT_TRUE(s) << r.error << ": " << r.detail;
   server_clipboard_->Copy("from the server");
-  EXPECT_TRUE(WaitFor([&] { return client_clipboard->text() == "from the server"; }));
-  client_clipboard->Copy("from the client, later");
+  ASSERT_TRUE(WaitFor([&] { return client_clipboard->promise() != nullptr; }));
+  EXPECT_EQ(client_clipboard->promise()->FetchFormat(std::string(kMimeText), nullptr), "from the server");
+  client_clipboard->Copy("from the client");
   std::this_thread::sleep_for(700ms);
-  EXPECT_EQ(server_clipboard_->text(), "from the server");
+  EXPECT_FALSE(server_clipboard_->promise());
   EXPECT_EQ(server_clipboard_->writes(), 0);
 }
