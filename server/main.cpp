@@ -2,8 +2,8 @@
 //
 //   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
-//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--headless]
-//                    [--fingerprint] [--version]
+//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE]
+//                    [--clipboard-file-limit-mb=N] [--headless] [--fingerprint] [--version]
 //
 // On macOS it puts an icon in the menu bar: connection status, pairing codes,
 // the fingerprint, disconnect, settings and a floating statistics panel for
@@ -19,9 +19,11 @@
 // config directory; --fingerprint prints it for comparing with what clients
 // show.
 //
-// --clipboard shares the text clipboard with the client: both (default),
-// send (only from this computer to the client), receive (only from the
-// client) or off. View-only sessions never take the client's clipboard.
+// --clipboard shares the clipboard (text, rich text, images and copied
+// files) with the client: both (default), send (only from this computer to
+// the client), receive (only from the client) or off. View-only sessions
+// never take the client's clipboard. --clipboard-file-limit-mb caps the file
+// data of one copy (default 256; 0 = no files); larger copies are not sent.
 // Only macOS has a clipboard backend so far.
 //
 // macOS needs two permissions for the program that runs this: Screen
@@ -96,7 +98,7 @@ int Usage() {
                "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
                "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
-               "                        [--headless] [--fingerprint] [--version]\n");
+               "                        [--clipboard-file-limit-mb=N] [--headless] [--fingerprint] [--version]\n");
   return 2;
 }
 
@@ -159,6 +161,10 @@ int main(int argc, char** argv) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();
       ov.clipboard_mode = *m;
+    } else if (Flag(a, "--clipboard-file-limit-mb", &v)) {
+      const int mb = std::atoi(v.c_str());
+      if (mb < 0 || (mb == 0 && v != "0")) return Usage();
+      ov.clipboard_file_limit_mb = mb;
     } else if (Flag(a, "--headless", nullptr)) {
       headless = true;
     } else if (Flag(a, "--fingerprint", nullptr)) {

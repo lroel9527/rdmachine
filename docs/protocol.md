@@ -179,20 +179,55 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ## 剪贴板
 
-文本剪贴板不走控制连接，而是走画面连接上 rdaccel 的应用消息：类型 `RDA_MSG_CLIPBOARD_TEXT`（1），内容是 UTF-8 文本，不带结尾的 NUL。rdaccel 的应用消息可靠、有序、加密，和画面分开走，不会卡住画面。控制协议因此没有新消息，版本仍是 0。
+在一边复制的内容可以在另一边粘贴：纯文本、富文本（RTF、HTML）、图片（PNG），以及在访达里复制的文件和文件夹。剪贴板不走控制连接，而是走画面连接上 rdaccel 的应用消息：可靠、有序、加密，和画面分开走。控制协议因此没有新消息，版本仍是 0。
 
-规则（两端相同）：
+### 消息（剪贴板版本 1）
 
-- **什么时候发**：各自轮询本机剪贴板（macOS 的 `NSPasteboard.changeCount`，每 250 毫秒一次），内容变了就把纯文本发给对方。客户端连上时还会把当时剪贴板里的文本发一次（先复制、再连接、再粘贴）；服务端只发连上之后的变化。画面连接还没连通时发不出去，连通后补发最新的一次。
-- **收到之后**：写进本机剪贴板，替换原有内容。几条消息来不及写时只写最新的一条。
-- **不回传**：从对方收到的文本不会再发回去（记住最后一次收发的文本，并且用写入剪贴板时得到的 changeCount 区分“自己写的”和“用户复制的”），所以两端不会来回弹。
-- **不发**：空文本、非文本内容（图片、文件，以后再加）、密码管理器标记为 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的内容。
-- **大小**：超过 4 MiB 的文本两端都不发也不收（rdaccel 允许每条 16 MiB），只在日志里记一行。收到不合法的 UTF-8 直接丢弃。
-- **方向**：每端可以设 `both`（默认）、`send`（只从本机发给对方）、`receive`（只收对方的）或 `off`，和 NoMachine 的四档对应。服务端：`rdmachine-server --clipboard=…`；命令行客户端：`rdmachine-connect --clipboard=…`；Mac 客户端暂时固定 `both`，设置项等偏好设置窗口一起做。
+| 类型 | 方向 | 内容 |
+| --- | --- | --- |
+| `0x10005` hello（`RDA_MSG_USER_FIRST + 5`） | 双向，最先发 | JSON `{"version":1,"max_file_bytes":268435456}`：本端说的剪贴板版本，以及一次最多收多少文件数据（0 = 不收文件） |
+| `0x10006` offer | 发送方 | JSON：这次复制了什么。`id`（发送方自己编号）、`formats`（`[{"mime":"text/plain","size":12}]`）、`entries`（文件，见下）、可选的 `skipped`（`{"files":3,"bytes":2147483648,"reason":"too_large","limit":268435456}`：复制了但没发的文件，以及起作用的上限） |
+| `0x10007` data | 发送方 | 二进制：`id`（8 字节）、`item`（4）、`offset`（8），小端，后面是数据。每条最多 128 KiB |
+| `0x10008` ack | 接收方 | 二进制：`id`（8）、已写好的字节数（8，整个 offer 累计） |
+| `0x10009` cancel | 双向 | JSON `{"id":7,"from_sender":true,"reason":"superseded"}`；`from_sender` 说明 `id` 是哪一方的编号 |
+| `1` 纯文本（`RDA_MSG_CLIPBOARD_TEXT`） | 双向 | UTF-8 文本，不带结尾的 NUL。只和没说过 hello 的旧版本对端用 |
+
+格式用 MIME 名：`text/plain`（UTF-8）、`text/rtf`、`text/html`（UTF-8）、`image/png`。不认识的格式不发；收到不认识的忽略。
+
+`entries` 的每一项：`path`（相对路径，`/` 分隔）、`kind`（`file`、`dir`、`link`）、文件的 `size`、链接的 `target`、可选的 `mode`（权限位，最多 0777）和 `mtime`（秒）。目录总在它里面的内容之前，没有 `/` 的是复制的那几项。
+
+数据按“项”的顺序发：先是每个格式，再是每个文件（`entries` 里 `kind` 为 `file` 的，按出现顺序）。每项从头到尾依次发，空的项没有 data 消息。接收方收到最后一个字节后，把整份内容写进本机剪贴板。
+
+### 规则（两端相同）
+
+- **版本**：各自连通后先发 hello。对端 1.5 秒内没说 hello 就当它是旧版本，只给它发纯文本（类型 1），和以前一样；收到对端的纯文本也照收。所以新服务端和旧客户端（或反过来）之间文本照常同步，只是没有其他格式和文件。
+- **什么时候发**：各自轮询本机剪贴板（macOS 的 `NSPasteboard.changeCount`，每 250 毫秒一次），内容变了就发 offer。客户端连上时还会把当时剪贴板里的内容发一次（先复制、再连接、再粘贴）；服务端只发连上之后的变化。画面连接还没连通时发不出去，连通后补发最新的一次。
+- **不回传**：从对方收到的内容不会再发回去（记住最后一次收发的内容，并且用写入剪贴板时得到的 changeCount 区分“自己写的”和“用户复制的”），所以两端不会来回弹。
+- **新的覆盖旧的**：发送中途本机又复制了别的，发送方 cancel（`superseded`）旧的再发新的；接收中途接收方本机复制了别的，接收方 cancel 掉收到一半的（它的复制更新）；收到对方的新 offer 时，本机正在发的也 cancel 掉。收到一半的文件删掉。
+- **不发**：空内容、密码管理器标记为 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的内容。复制的是文件时只带文件名作为文本（访达还会放图标之类，有文件时没用）。
+- **方向**：每端可以设 `both`（默认）、`send`（只从本机发给对方）、`receive`（只收对方的）或 `off`，和 NoMachine 的四档对应。不收的一方对 offer 回 cancel（`refused`）。服务端：`rdmachine-server --clipboard=…`；命令行客户端：`rdmachine-connect --clipboard=…`；Mac 客户端暂时固定 `both`，设置项等偏好设置窗口一起做。
 - **只看不控**：`view_only` 的会话（客户端请求或服务端 `--view-only`）里，服务端不接收客户端的剪贴板，只把自己的发出去。不想让对方拿到被控端剪贴板时用 `--clipboard=receive` 或 `off`。
-- 被拒收的方向静默丢弃，不回错误，也不断开连接。
 
-实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`，平台无关，Linux 上用内存剪贴板测试），macOS 剪贴板在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
+### 文件
+
+- **先传再贴**：访达粘贴要的是本机真实存在的文件，所以文件在对方复制时就传过来，放进接收方自己的暂存目录（macOS：`~/Library/Caches/RDMachine/Clipboard/<时间>-<随机>/`，目录只有本人可读写），再把这些路径写进剪贴板。之后在访达里粘贴就是一次普通的本机复制。传完之前粘贴，贴出来的还是原来的内容；Mac 客户端的远程窗口左下角显示进度。
+- **上限（方案 A）**：一次复制的文件数据超过上限就不发文件，只发文件名（文本），offer 里的 `skipped` 告诉对方复制了多少；两端都提示一句（Mac 客户端在窗口左下角）。上限默认 256 MiB，每端自己设，生效的是两端里小的那个（hello 里交换）：服务端是设置窗口的“复制文件上限”或 `--clipboard-file-limit-mb=N`，Mac 客户端是 Edit → Copied Files Limit（下次连接生效），命令行客户端是 `--clipboard-file-limit-mb=N`；0 = 不传文件。超过 10000 项也不发（`too_many`）。更大的文件以后用单独的传输窗口。
+- **暂存目录的清理**：新的一份收完后删掉以前的；会话开始时删掉以前留下的，只保留剪贴板上还指着的那一份（断开后仍然可以粘贴）。
+- **下载标记**：收到的文件打上 `com.apple.quarantine`（和浏览器下载的一样），打开收到的应用或脚本时 macOS 会先问。
+- **安全**：接收方检查每个路径（不能是绝对路径，不能有空段、`.`、`..`、控制字符或非法 UTF-8，名字不超过 255 字节），每个父目录必须是前面列出的目录（不能是文件或链接），权限位去掉 setuid 等；不合格的 offer 整个丢弃。文件用 `O_CREAT | O_EXCL | O_NOFOLLOW` 新建；链接原样建出来，从不跟随。数据的 `item` 和 `offset` 必须正好接上，否则 cancel（`error`）并删掉收到的部分。
+- **符号链接和特殊文件**：链接作为链接传（不跟随，链接指向的东西不传）；套接字、管道、设备文件不传。
+- **权限和时间**：文件和目录的权限位（至少保留本人读写）和修改时间（精确到秒）照原样设。
+
+### 节奏
+
+rdaccel 发送时应用消息排在画面前面：一次全塞给它，画面就要等文件发完，它的码率控制也会看到排队而压低画质。所以发送方自己控制速度（`core/include/rdmachine/transfer_pacer.h`），像后台流量一样：从 8 Mbps 开始，每 100 毫秒没有问题就快 25%，有问题就慢 30%（最低 256 kbps）。“有问题”是：
+
+- 接收方的 ack 比见过的最快的慢了 25 毫秒以上（路上在排队，或者接收方的磁盘跟不上：ack 在数据写好之后才发）；
+- 服务端发送时，rdaccel 因为拥塞跳过了画面帧（`rda_host_stats.frames_dropped_congestion` 变大）。
+
+另外，没有 ack 的数据不超过“当前速度 × (最短 ack 时间 + 200 毫秒)”，至少 256 KiB。局域网上几秒内能到几百 Mbps；慢的链路上停在链路速度附近，画面优先。
+
+实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、offer、发送、接收、暂存，平台无关，Linux 上用内存剪贴板测试）、`clipboard_wire.h`（消息）、`clipboard_files.h`（列文件、暂存目录）、`transfer_pacer.h`（节奏）；macOS 剪贴板在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel；Mac 客户端的进度在 `client/main.mm`（`clipboardStatus:`）。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板），`session/tests/test_media_e2e.cpp`（两端真实连接，`ClipboardE2E.FilesGoBothWays`）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
 
 ## 键盘语言同步
 
@@ -221,7 +256,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 - 服务端：`ServerSession`（`core/include/rdmachine/server_session.h`）是不做 I/O 的状态机，按上面的规则处理每条消息；平台相关的部分（PAM 校验密码、启动 rdaccel Host）由 `ServerDelegate` 提供。`ControlServer` 在 TLS 上为每个连接开一个线程驱动它，负责 15 秒无流量发 `ping`、45 秒收不到消息发 `bye`（`idle_timeout`）后关闭。
 - 限流、配对码、一次性令牌：`core/include/rdmachine/auth_guards.h`。账号密码和配对码的失败都计入同一个按 IP 的限流。
 - 客户端：`ConnectAndStartSession`（`core/include/rdmachine/control_client.h`）走完 TLS、指纹确认、`hello`、`auth`、`session_request`，成功后把控制连接留给调用方在会话期间使用。除了上表的错误码，客户端还会报 `connect_failed`、`untrusted_server`、`timeout`、`connection_closed`、`bad_message`。
-- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、配对码、忙、坏帧、空闲超时）；剪贴板见 `core/tests/test_clipboard_sync.cpp` 和 `session/tests/test_media_e2e.cpp`（Xvfb 上两端真实连接，内存剪贴板）。
+- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、配对码、忙、坏帧、空闲超时）；剪贴板见上面的“剪贴板”一节。
 
 ## 错误码
 
@@ -244,5 +279,5 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 - 公钥登录（类似 SSH 的 authorized_keys）和被控端审批弹窗（NoMachine 的 0/1/2 三档）：M1。
 - 登录窗口和锁屏时的连接：M1（服务端拆成 LaunchDaemon + 用户 / 登录窗口会话里的 agent，协议本身不变）。
-- 切换显示器、文件传输协商、断线后恢复同一会话：M1 起逐步加消息类型。
+- 切换显示器、单独的文件传输窗口（大文件、选目录，类似 NoMachine 的 Transfer a file）、断线后恢复同一会话：M1 起逐步加消息类型。
 - 请求桌面：Linux 服务端的虚拟屏；多块屏的桌面；会话期间不让被控端的真实屏幕显示画面（隐私屏）。

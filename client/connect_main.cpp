@@ -3,7 +3,8 @@
 //
 //   rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]
 //                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
-//                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
+//                     [--known-hosts=PATH] [--clipboard=both|send|receive|off]
+//                     [--clipboard-file-limit-mb=N] [--click=X,Y]
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
 //                     [--text-mode] [--set-text-mode=on|off]
@@ -13,7 +14,8 @@
 // --accept-new-host); it is then pinned in the known-hosts file. Exits 0
 // once --frames pictures arrived (default 1), 1 on failure or timeout.
 // On macOS the clipboard is shared while connected (--clipboard, default
-// both); other systems have no clipboard backend yet.
+// both), copied files included up to --clipboard-file-limit-mb per copy
+// (default 256, 0 = no files); other systems have no clipboard backend yet.
 //
 // --click=X,Y moves the server's pointer to pixel (X, Y) of the shared
 // display and clicks the left button once the pictures arrived, then waits
@@ -116,7 +118,7 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
-               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n"
+               "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--clipboard-file-limit-mb=N] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n"
                "                         [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]\n"
                "                         [--text-mode] [--set-text-mode=on|off]\n");
   return 2;
@@ -199,6 +201,11 @@ int main(int argc, char** argv) {
       if (!m) return Usage();
       opts.clipboard_mode = *m;
     }
+    else if (Flag(a, "--clipboard-file-limit-mb", &v)) {
+      const int mb = std::atoi(v.c_str());
+      if (mb < 0 || (mb == 0 && v != "0")) return Usage();
+      opts.clipboard_file_limit = static_cast<uint64_t>(mb) << 20;
+    }
     else if (Flag(a, "--version", nullptr)) {
       std::printf("rdmachine-connect %s (protocol %d, rdaccel %s)\n", rdm::VersionString(), rdm::kProtocolVersion,
                   rda_version_string());
@@ -253,6 +260,7 @@ int main(int argc, char** argv) {
   opts.viewer.on_stream_info = &OnStreamInfo;
   opts.viewer.on_frame = &OnFrame;
   opts.clipboard = rdm::SystemClipboard();
+  opts.clipboard_staging_dir = rdm::ClipboardStagingDir();
   opts.log = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
   opts.on_ended = [&](const std::string& reason) {
     std::fprintf(stderr, "session ended: %s\n", reason.c_str());

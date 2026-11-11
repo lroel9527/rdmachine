@@ -14,6 +14,9 @@ static_assert(kInputSourceMessageType == RDA_MSG_USER_FIRST + 1, "an application
 static_assert(kSessionStatsMessageType == RDA_MSG_USER_FIRST + 2, "an application message type");
 static_assert(kDesktopRequestMessageType == RDA_MSG_USER_FIRST + 3, "an application message type");
 static_assert(kPictureModeMessageType == RDA_MSG_USER_FIRST + 4, "an application message type");
+static_assert(kClipboardTextMessageType == RDA_MSG_CLIPBOARD_TEXT, "rdaccel's clipboard text message");
+static_assert(kClipboardHelloMessageType == RDA_MSG_USER_FIRST + 5 && kClipboardCancelMessageType == RDA_MSG_USER_FIRST + 9,
+              "application message types");
 
 namespace {
 
@@ -83,7 +86,10 @@ void MediaHost::OnInput(void* user, const rda_input_event* ev) {
 
 void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   auto* self = static_cast<MediaHost*>(user);
-  if (type == RDA_MSG_CLIPBOARD_TEXT && self->clipboard_) self->clipboard_->OnRemoteText(payload, n);
+  if (ClipboardSync::IsClipboardMessage(type)) {
+    if (self->clipboard_) self->clipboard_->OnMessage(type, payload, n);
+    return;
+  }
   if (type == kInputSourceMessageType) {
     if (auto wanted = DecodeInputSource(std::string(reinterpret_cast<const char*>(payload), n))) {
       self->SyncInputSource(*wanted);
@@ -259,13 +265,25 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   if (clip_mode != ClipboardMode::kOff) {
     ClipboardSync::Options so;
     so.mode = clip_mode;
+    so.max_file_bytes = options_.clipboard_file_limit;
+    so.staging_dir = options_.clipboard_staging_dir;
+    so.on_status = options_.on_clipboard_status;
     so.log = options_.log;
+    // File data yields to the picture: it slows down when frames are skipped
+    // for congestion.
+    so.congestion_events = [this]() -> uint64_t {
+      rda_host* h = clipboard_host_.load();
+      if (!h) return 0;
+      rda_host_stats st{};
+      st.struct_size = sizeof st;
+      return rda_host_get_stats(h, &st) == RDA_OK ? st.frames_dropped_congestion : 0;
+    };
     clipboard_ = std::make_unique<ClipboardSync>(
         options_.clipboard,
-        [this](const std::string& text) {
+        [this](uint32_t type, std::string_view payload) {
           rda_host* h = clipboard_host_.load();
-          return h && rda_host_send_message(h, RDA_MSG_CLIPBOARD_TEXT, reinterpret_cast<const uint8_t*>(text.data()),
-                                            text.size()) == RDA_OK;
+          return h && rda_host_send_message(h, type, reinterpret_cast<const uint8_t*>(payload.data()),
+                                            payload.size()) == RDA_OK;
         },
         so);
   }

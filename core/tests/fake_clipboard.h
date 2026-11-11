@@ -12,16 +12,16 @@ class FakeClipboard : public Clipboard {
     std::lock_guard lock(mu_);
     return count_;
   }
-  std::optional<std::string> ReadText() override {
+  std::optional<ClipboardContent> Read() override {
     std::lock_guard lock(mu_);
     ++reads_;
     if (concealed_) return std::nullopt;
-    return text_;
+    return content_;
   }
-  std::optional<int64_t> WriteText(const std::string& text) override {
+  std::optional<int64_t> Write(const ClipboardContent& content) override {
     std::lock_guard lock(mu_);
     ++writes_;
-    text_ = text;
+    content_ = content;
     concealed_ = false;
     return ++count_;
   }
@@ -29,19 +29,30 @@ class FakeClipboard : public Clipboard {
   // What a local application (the user) does.
   void Copy(const std::string& text, bool concealed = false) {
     std::lock_guard lock(mu_);
-    text_ = text;
+    content_ = ClipboardContent::Text(text);
     concealed_ = concealed;
     ++count_;
   }
-  void CopyNonText() {
+  void CopyContent(const ClipboardContent& c) {
     std::lock_guard lock(mu_);
-    text_.reset();
+    content_ = c;
+    concealed_ = false;
+    ++count_;
+  }
+  void CopyNothingShared() {
+    std::lock_guard lock(mu_);
+    content_ = ClipboardContent{};
     concealed_ = false;
     ++count_;
   }
   std::optional<std::string> text() {
     std::lock_guard lock(mu_);
-    return text_;
+    if (const std::string* t = content_.Find(kMimeText)) return *t;
+    return std::nullopt;
+  }
+  ClipboardContent content() {
+    std::lock_guard lock(mu_);
+    return content_;
   }
   int writes() {
     std::lock_guard lock(mu_);
@@ -50,7 +61,7 @@ class FakeClipboard : public Clipboard {
 
  private:
   std::mutex mu_;
-  std::optional<std::string> text_;
+  ClipboardContent content_;
   bool concealed_ = false;
   int64_t count_ = 0;
   int reads_ = 0;

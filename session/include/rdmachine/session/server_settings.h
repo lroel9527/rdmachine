@@ -16,6 +16,8 @@ struct ServerSettings {
   bool offer_pairing_codes = true;
   bool view_only = false;
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
+  // Files copied on either side: at most this many MiB per copy (0 = no files).
+  int32_t clipboard_file_limit_mb = static_cast<int32_t>(kDefaultClipboardFileLimit >> 20);
   int32_t fps = 0;           // 0 = rdaccel's default
   int32_t bitrate_kbps = 0;  // 0 = rdaccel's default
 

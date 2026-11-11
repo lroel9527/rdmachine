@@ -103,8 +103,8 @@ void RemoteSession::OnState(void* user, rda_state state, rda_status reason) {
 
 void RemoteSession::OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   auto* self = static_cast<RemoteSession*>(user);
-  if (type == RDA_MSG_CLIPBOARD_TEXT && self->clipboard_) {
-    self->clipboard_->OnRemoteText(payload, n);
+  if (ClipboardSync::IsClipboardMessage(type) && self->clipboard_) {
+    self->clipboard_->OnMessage(type, payload, n);
     return;
   }
   const auto& app = self->options_.viewer;
@@ -123,13 +123,16 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     ClipboardSync::Options so;
     so.mode = s->options_.clipboard_mode;
     so.send_on_start = true;  // copy here, connect, paste there
+    so.max_file_bytes = s->options_.clipboard_file_limit;
+    so.staging_dir = s->options_.clipboard_staging_dir;
+    so.on_status = s->options_.on_clipboard_status;
     so.log = s->options_.log;
     RemoteSession* raw = s.get();
     s->clipboard_ = std::make_unique<ClipboardSync>(
         s->options_.clipboard,
-        [raw](const std::string& text) {
-          return rda_viewer_send_message(raw->viewer_, RDA_MSG_CLIPBOARD_TEXT,
-                                         reinterpret_cast<const uint8_t*>(text.data()), text.size()) == RDA_OK;
+        [raw](uint32_t type, std::string_view payload) {
+          return rda_viewer_send_message(raw->viewer_, type, reinterpret_cast<const uint8_t*>(payload.data()),
+                                         payload.size()) == RDA_OK;
         },
         so);
   }

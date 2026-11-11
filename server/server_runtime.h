@@ -22,6 +22,7 @@ struct SettingsOverrides {
   std::optional<bool> offer_pairing_codes;
   std::optional<bool> view_only;
   std::optional<ClipboardMode> clipboard_mode;
+  std::optional<int32_t> clipboard_file_limit_mb;
   std::optional<int32_t> fps;
   std::optional<int32_t> bitrate_kbps;
 

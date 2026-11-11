@@ -1,67 +1,153 @@
-// The real macOS clipboard (NSPasteboard) behind SystemClipboard(). Runs on
-// any Mac with a logged-in session; keeps and restores whatever text was
-// on the clipboard so running it does not lose what you copied.
+// The real macOS clipboard code (NSPasteboard) behind SystemClipboard(), on
+// a private pasteboard: the general one would reach a running session's
+// peer (an installed server shares it) and lose what the user copied.
 #import <AppKit/AppKit.h>
 #include <gtest/gtest.h>
+#include <sys/xattr.h>
+
+#include <filesystem>
+#include <fstream>
 
 #include "rdmachine/session/system_clipboard.h"
 
 using namespace rdm;
+namespace fs = std::filesystem;
 
 namespace {
 
 class MacClipboardTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    saved_ = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-    clipboard_ = SystemClipboard();
+    pb_ = [NSPasteboard pasteboardWithUniqueName];
+    clipboard_ = SystemClipboard(pb_.name.UTF8String);
     ASSERT_TRUE(clipboard_);
+    std::string tmpl = (fs::temp_directory_path() / "rdm-pb-XXXXXX").string();
+    dir_ = mkdtemp(tmpl.data());
   }
   void TearDown() override {
-    NSPasteboard* pb = [NSPasteboard generalPasteboard];
-    [pb clearContents];
-    if (saved_) [pb setString:saved_ forType:NSPasteboardTypeString];
+    [pb_ releaseGlobally];
+    std::error_code ec;
+    fs::remove_all(dir_, ec);
   }
 
-  NSString* saved_ = nil;
+  NSPasteboard* pb_ = nil;
   std::shared_ptr<Clipboard> clipboard_;
+  fs::path dir_;
 };
+
+std::string Text(const ClipboardContent& c) {
+  const std::string* t = c.Find(kMimeText);
+  return t ? *t : std::string();
+}
 
 }  // namespace
 
-TEST_F(MacClipboardTest, WriteThenRead) {
+TEST_F(MacClipboardTest, TextWriteThenRead) {
   const std::string text = "rdmachine 剪贴板测试 ✓ 😀";
-  const std::optional<int64_t> count = clipboard_->WriteText(text);
+  const std::optional<int64_t> count = clipboard_->Write(ClipboardContent::Text(text));
   ASSERT_TRUE(count);
   EXPECT_EQ(clipboard_->ChangeCount(), *count);  // the count is the write's own
-  EXPECT_EQ(clipboard_->ReadText(), text);
-  NSString* direct = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-  EXPECT_EQ(std::string(direct.UTF8String), text);
+  auto c = clipboard_->Read();
+  ASSERT_TRUE(c);
+  EXPECT_EQ(*c, ClipboardContent::Text(text));
+  EXPECT_EQ(std::string([pb_ stringForType:NSPasteboardTypeString].UTF8String), text);
 }
 
 TEST_F(MacClipboardTest, ChangeCountMovesWhenOthersCopy) {
-  ASSERT_TRUE(clipboard_->WriteText("ours"));
+  ASSERT_TRUE(clipboard_->Write(ClipboardContent::Text("ours")));
   const int64_t before = clipboard_->ChangeCount();
-  NSPasteboard* pb = [NSPasteboard generalPasteboard];
-  [pb clearContents];
-  [pb setString:@"someone else's" forType:NSPasteboardTypeString];
+  [pb_ clearContents];
+  [pb_ setString:@"someone else's" forType:NSPasteboardTypeString];
   EXPECT_NE(clipboard_->ChangeCount(), before);
-  EXPECT_EQ(clipboard_->ReadText(), "someone else's");
+  EXPECT_EQ(Text(*clipboard_->Read()), "someone else's");
 }
 
 TEST_F(MacClipboardTest, ConcealedAndTransientAreNotRead) {
   for (NSString* marker : @[ @"org.nspasteboard.ConcealedType", @"org.nspasteboard.TransientType" ]) {
-    NSPasteboard* pb = [NSPasteboard generalPasteboard];
-    [pb clearContents];
-    [pb setString:@"hunter2" forType:NSPasteboardTypeString];
-    [pb setData:[NSData data] forType:marker];
-    EXPECT_EQ(clipboard_->ReadText(), std::nullopt) << marker.UTF8String;
+    [pb_ clearContents];
+    [pb_ setString:@"hunter2" forType:NSPasteboardTypeString];
+    [pb_ setData:[NSData data] forType:marker];
+    EXPECT_EQ(clipboard_->Read(), std::nullopt) << marker.UTF8String;
   }
 }
 
-TEST_F(MacClipboardTest, NonTextIsNotRead) {
-  NSPasteboard* pb = [NSPasteboard generalPasteboard];
-  [pb clearContents];
-  [pb setData:[NSData dataWithBytes:"\x89PNG" length:4] forType:NSPasteboardTypePNG];
-  EXPECT_EQ(clipboard_->ReadText(), std::nullopt);
+TEST_F(MacClipboardTest, RichTextAndImagesBothWays) {
+  NSImage* img = [[NSImage alloc] initWithSize:NSMakeSize(4, 3)];
+  [img lockFocus];
+  [NSColor.redColor setFill];
+  NSRectFill(NSMakeRect(0, 0, 4, 3));
+  [img unlockFocus];
+  NSData* tiff = img.TIFFRepresentation;
+  [pb_ clearContents];
+  [pb_ setString:@"bold" forType:NSPasteboardTypeString];
+  [pb_ setData:[@"{\\rtf1 \\b bold}" dataUsingEncoding:NSUTF8StringEncoding] forType:NSPasteboardTypeRTF];
+  [pb_ setString:@"<b>bold</b>" forType:NSPasteboardTypeHTML];
+  [pb_ setData:tiff forType:NSPasteboardTypeTIFF];
+  auto c = clipboard_->Read();
+  ASSERT_TRUE(c);
+  EXPECT_EQ(Text(*c), "bold");
+  ASSERT_TRUE(c->Find(kMimeRtf));
+  EXPECT_EQ(*c->Find(kMimeRtf), "{\\rtf1 \\b bold}");
+  ASSERT_TRUE(c->Find(kMimeHtml));
+  EXPECT_EQ(*c->Find(kMimeHtml), "<b>bold</b>");
+  // TIFF comes out as PNG.
+  ASSERT_TRUE(c->Find(kMimePng));
+  EXPECT_EQ(c->Find(kMimePng)->substr(0, 4), "\x89PNG");
+
+  ASSERT_TRUE(clipboard_->Write(*c));
+  EXPECT_EQ(clipboard_->Read(), c);
+  NSImage* back = [[NSImage alloc] initWithPasteboard:pb_];
+  ASSERT_TRUE(back);
+  EXPECT_EQ(back.size.width, 4);
+}
+
+TEST_F(MacClipboardTest, FilesAreReadAsPathsWithTheirNames) {
+  std::ofstream(dir_ / "a.txt") << "a";
+  fs::create_directories(dir_ / "folder");
+  [pb_ clearContents];
+  // As Finder copies: one item per file, each with its file URL and name.
+  NSMutableArray* items = [NSMutableArray array];
+  for (NSString* name : @[ @"a.txt", @"folder" ]) {
+    NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
+    NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:(dir_ / name.UTF8String).c_str()]];
+    [item setString:url.absoluteString forType:NSPasteboardTypeFileURL];
+    [item setString:name forType:NSPasteboardTypeString];
+    [items addObject:item];
+  }
+  ASSERT_TRUE([pb_ writeObjects:items]);
+  auto c = clipboard_->Read();
+  ASSERT_TRUE(c);
+  ASSERT_EQ(c->files.size(), 2u);
+  EXPECT_EQ(fs::canonical(c->files[0]), fs::canonical(dir_ / "a.txt"));
+  EXPECT_EQ(fs::canonical(c->files[1]), fs::canonical(dir_ / "folder"));
+  EXPECT_EQ(Text(*c), "a.txt\nfolder");  // every item's name; nothing but text with files
+  EXPECT_EQ(c->formats.size(), 1u);
+}
+
+TEST_F(MacClipboardTest, ReceivedFilesArePastableAndMarkedDownloaded) {
+  std::ofstream(dir_ / "got.txt") << "x";
+  fs::create_directories(dir_ / "dir" / "sub");
+  std::ofstream(dir_ / "dir" / "sub" / "inner.sh") << "echo";
+  ClipboardContent c;
+  c.formats = {{std::string(kMimeText), "got.txt"}};
+  c.files = {fs::canonical(dir_ / "got.txt").string(), fs::canonical(dir_ / "dir").string()};
+  const std::optional<int64_t> count = clipboard_->Write(c);
+  ASSERT_TRUE(count);
+  EXPECT_EQ(clipboard_->ChangeCount(), *count);
+  EXPECT_EQ(clipboard_->Read(), c);
+  // What Finder reads to paste.
+  NSArray<NSURL*>* urls = [pb_ readObjectsForClasses:@[ NSURL.class ]
+                                             options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+  ASSERT_EQ(urls.count, 2u);
+  for (const auto& p : {dir_ / "got.txt", dir_ / "dir", dir_ / "dir" / "sub" / "inner.sh"}) {
+    char buf[128];
+    const ssize_t n = getxattr(p.c_str(), "com.apple.quarantine", buf, sizeof buf, 0, XATTR_NOFOLLOW);
+    ASSERT_GT(n, 0) << p;
+    EXPECT_NE(std::string(buf, static_cast<size_t>(n)).find("RDMachine"), std::string::npos);
+  }
+}
+
+TEST_F(MacClipboardTest, StagingIsInTheUsersCaches) {
+  const std::string d = ClipboardStagingDir();
+  EXPECT_NE(d.find("/Library/Caches/RDMachine/Clipboard"), std::string::npos) << d;
 }

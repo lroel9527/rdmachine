@@ -7,6 +7,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 #include <vector>
 #include <mutex>
@@ -399,8 +401,34 @@ namespace {
 // XTest on the Xvfb screen.
 class ClipboardE2E : public MediaE2E {
  protected:
-  void Configure(MediaHostOptions& mo) override { mo.inject_input = true; }
+  void Configure(MediaHostOptions& mo) override {
+    mo.inject_input = true;
+    std::string tmpl = (std::filesystem::temp_directory_path() / "rdm-e2e-XXXXXX").string();
+    tmp_ = mkdtemp(tmpl.data());
+    mo.clipboard_staging_dir = (tmp_ / "server-staging").string();
+  }
+  void TearDown() override {
+    std::error_code ec;
+    if (!tmp_.empty()) std::filesystem::remove_all(tmp_, ec);
+  }
+  std::filesystem::path tmp_;
 };
+
+std::string Pattern(size_t n, int seed) {
+  std::string s(n, '\0');
+  for (size_t i = 0; i < n; ++i) s[i] = static_cast<char>((i * 131 + seed * 7 + i / 977) & 0xFF);
+  return s;
+}
+
+void WriteFile(const std::filesystem::path& p, const std::string& data) {
+  std::filesystem::create_directories(p.parent_path());
+  std::ofstream(p, std::ios::binary) << data;
+}
+
+std::string ReadFile(const std::filesystem::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), {});
+}
 
 }  // namespace
 
@@ -426,6 +454,56 @@ TEST_F(ClipboardE2E, TextGoesBothWays) {
   std::this_thread::sleep_for(500ms);
   EXPECT_EQ(server_clipboard_->writes(), 2);
   EXPECT_EQ(client_clipboard->writes(), 1);
+  s->Close();
+}
+
+TEST_F(ClipboardE2E, FilesGoBothWays) {
+  // A folder from the client, pasted on the server; a file back.
+  WriteFile(tmp_ / "client" / "project" / "data.bin", Pattern(3'000'000, 1));
+  WriteFile(tmp_ / "client" / "project" / "notes" / "readme.txt", "读我 ✓");
+  WriteFile(tmp_ / "server" / "reply.txt", "got it");
+  Frames frames;
+  auto client_clipboard = std::make_shared<FakeClipboard>();
+  auto o = Options(&frames);
+  o.clipboard = client_clipboard;
+  o.clipboard_staging_dir = (tmp_ / "client-staging").string();
+  std::mutex mu;
+  std::vector<ClipboardTransferStatus> statuses;
+  o.on_clipboard_status = [&](const ClipboardTransferStatus& st) {
+    std::lock_guard lock(mu);
+    statuses.push_back(st);
+  };
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+
+  ClipboardContent c;
+  c.formats = {{std::string(kMimeText), "project"}};
+  c.files = {(tmp_ / "client" / "project").string()};
+  client_clipboard->CopyContent(c);
+  ASSERT_TRUE(WaitFor([&] { return server_clipboard_->content().files.size() == 1; }, 30s));
+  const std::filesystem::path got = server_clipboard_->content().files[0];
+  EXPECT_EQ(got.filename(), "project");
+  EXPECT_EQ(got.parent_path().parent_path(), tmp_ / "server-staging");
+  EXPECT_EQ(ReadFile(got / "data.bin"), Pattern(3'000'000, 1));
+  EXPECT_EQ(ReadFile(got / "notes" / "readme.txt"), "读我 ✓");
+  EXPECT_EQ(server_clipboard_->text(), "project");
+
+  ClipboardContent back;
+  back.files = {(tmp_ / "server" / "reply.txt").string()};
+  server_clipboard_->CopyContent(back);
+  // (The client's clipboard still holds its own copy until then.)
+  ASSERT_TRUE(WaitFor([&] {
+    const auto files = client_clipboard->content().files;
+    return files.size() == 1 && files[0].find("client-staging") != std::string::npos;
+  }, 30s));
+  EXPECT_EQ(ReadFile(client_clipboard->content().files[0]), "got it");
+  {
+    std::lock_guard lock(mu);
+    ASSERT_FALSE(statuses.empty());
+    EXPECT_EQ(statuses.back().state, ClipboardTransferStatus::State::kDone);
+    EXPECT_EQ(statuses.back().direction, ClipboardTransferStatus::Direction::kReceiving);
+  }
   s->Close();
 }
 

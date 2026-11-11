@@ -1,17 +1,22 @@
 #pragma once
-// Text clipboard sharing between the two ends of a session (docs/protocol.md,
-// "剪贴板"). Platform independent: the system clipboard comes in through the
-// Clipboard interface (NSPasteboard on macOS) and text goes out through a
-// send function (rdaccel's RDA_MSG_CLIPBOARD_TEXT message), so the logic is
-// tested on Linux with an in-memory clipboard.
+// Clipboard sharing between the two ends of a session (docs/protocol.md,
+// "剪贴板"): text, rich text, images and files. Platform independent: the
+// system clipboard comes in through the Clipboard interface (NSPasteboard on
+// macOS) and messages go out through a send function (rdaccel application
+// messages, see clipboard_wire.h), so the logic is tested on Linux with an
+// in-memory clipboard.
 //
 // Each side polls its own clipboard (NSPasteboard has no change
-// notification), sends new text to the peer and writes the peer's text into
-// its own clipboard. Text that came from the peer is never sent back, so the
-// two sides do not ping-pong.
+// notification) and offers what was copied to the peer, which writes it
+// into its own clipboard. Content that came from the peer is never offered
+// back, so the two sides do not ping-pong. Files are sent before the peer's
+// clipboard changes: the receiver rebuilds them in a staging directory and
+// puts that on its clipboard, so pasting is an ordinary local copy. Copies
+// with more file data than the limit are not sent (a notice says so).
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -19,8 +24,33 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
+
+#include "rdmachine/clipboard_wire.h"
+#include "rdmachine/transfer_pacer.h"
 
 namespace rdm {
+
+struct ClipboardFormat {
+  std::string mime;  // kMimeText, kMimeRtf, kMimeHtml, kMimePng
+  std::string data;
+
+  bool operator==(const ClipboardFormat&) const = default;
+};
+
+// What is on a clipboard, as far as it is shared.
+struct ClipboardContent {
+  std::vector<ClipboardFormat> formats;
+  // Absolute paths on this computer, as copied in a file manager.
+  std::vector<std::string> files;
+
+  bool empty() const { return formats.empty() && files.empty(); }
+  const std::string* Find(std::string_view mime) const;
+  bool operator==(const ClipboardContent&) const = default;
+
+  static ClipboardContent Text(std::string text);
+};
 
 // The system clipboard. Called only from the ClipboardSync's own thread (or
 // the caller of PollOnce), never from two threads at once.
@@ -30,19 +60,20 @@ class Clipboard {
   // A number that changes whenever anyone changes the clipboard
   // (NSPasteboard.changeCount).
   virtual int64_t ChangeCount() = 0;
-  // The clipboard's plain text; nullopt when it holds no text, or text that
-  // must not leave this computer (macOS: marked concealed or transient by a
-  // password manager).
-  virtual std::optional<std::string> ReadText() = 0;
-  // Replaces the clipboard's contents with `text` and returns the change
-  // count that this write produced (NSPasteboard's clearContents returns it),
-  // or nullopt on failure. Taking the count from the write itself, rather
-  // than reading it afterwards, keeps a copy made right after our write
-  // from being mistaken for ours.
-  virtual std::optional<int64_t> WriteText(const std::string& text) = 0;
+  // What the clipboard holds in the shared formats; nullopt when it holds
+  // something that must not leave this computer (macOS: marked concealed or
+  // transient by a password manager). Files copied in a file manager come
+  // with their names as text, and nothing else.
+  virtual std::optional<ClipboardContent> Read() = 0;
+  // Replaces the clipboard's contents and returns the change count that this
+  // write produced (NSPasteboard's clearContents returns it), or nullopt on
+  // failure. Taking the count from the write itself, rather than reading it
+  // afterwards, keeps a copy made right after our write from being mistaken
+  // for ours.
+  virtual std::optional<int64_t> Write(const ClipboardContent& content) = 0;
 };
 
-// Which way text may go, as the user sets it (NoMachine has the same four).
+// Which way the clipboard may go, as the user sets it (NoMachine has the same four).
 enum class ClipboardMode {
   kBoth,     // both ways (default)
   kSend,     // only from this side to the peer
@@ -57,21 +88,65 @@ const char* ClipboardModeName(ClipboardMode m);
 // above U+10FFFF).
 bool IsValidUtf8(std::string_view s);
 
+constexpr uint64_t kDefaultClipboardFileLimit = uint64_t{256} << 20;
+
+// A copy on its way, for a progress display.
+struct ClipboardTransferStatus {
+  enum class Direction { kSending, kReceiving };
+  enum class State {
+    kRunning,
+    kDone,
+    kFailed,     // detail says why
+    kCancelled,  // the other side refused or gave up (detail: its reason)
+    kSkipped,    // files over a limit were left out (detail: "too_large", "too_many", "not_accepted")
+  };
+  Direction direction = Direction::kSending;
+  State state = State::kRunning;
+  uint64_t bytes_done = 0;
+  uint64_t bytes_total = 0;
+  size_t files = 0;      // files in the copy
+  std::string name;      // the first copied file's name; empty without files
+  std::string detail;
+  uint64_t skipped_bytes = 0;  // kSkipped: the file data left out (at least)
+  uint64_t limit_bytes = 0;    // kSkipped: the limit that applied (0 = files not taken)
+};
+
 class ClipboardSync {
  public:
-  // Sends text to the peer; false if it could not be sent now (for example
-  // the media connection is not up yet), and it is tried again later.
-  using SendFn = std::function<bool(const std::string& text)>;
+  // Sends a message to the peer; false if it could not be sent now (for
+  // example the media connection is not up yet).
+  using SendFn = std::function<bool(uint32_t type, std::string_view payload)>;
 
   struct Options {
     ClipboardMode mode = ClipboardMode::kBoth;
-    // Larger text is neither sent nor accepted (rdaccel allows 16 MiB per
-    // message; this keeps one copy from hogging the link).
-    size_t max_bytes = 4u << 20;
+    // Plain text to and from a peer of an older version, which takes it as
+    // one message (rdaccel allows 16 MiB).
+    size_t max_text_bytes = 4u << 20;
+    // All formats of one copy together (text, rich text, an image).
+    size_t max_format_bytes = 64u << 20;
+    // File data of one copy, both ways; the peer's own limit applies too.
+    // 0 = no files.
+    uint64_t max_file_bytes = kDefaultClipboardFileLimit;
+    size_t max_file_entries = 10000;
+    // Where files from the peer are put (a directory of this side's own,
+    // created when needed). Empty = files are not taken.
+    std::string staging_dir;
     int poll_ms = 250;
+    // A peer that has not said hello this long after this side's hello is an
+    // older version (plain text only); until then a copy waits.
+    int hello_wait_ms = 1500;
     // Send what is on the clipboard when syncing starts (the client: copy,
     // then connect, then paste over there). Otherwise only later changes go.
     bool send_on_start = false;
+    // Cumulative count of picture frames skipped for congestion (the
+    // server's rdaccel host knows it); file data slows down when it rises.
+    std::function<uint64_t()> congestion_events;
+    // Progress of copies with files, both ways. On the sync thread.
+    std::function<void(const ClipboardTransferStatus&)> on_status;
+    TransferPacer::Options pacer;
+    // Microseconds on a monotonic clock; empty = std::chrono::steady_clock
+    // (tests drive their own).
+    std::function<uint64_t()> clock;
     std::function<void(const std::string&)> log;  // may be empty
   };
 
@@ -81,39 +156,74 @@ class ClipboardSync {
   ClipboardSync(const ClipboardSync&) = delete;
   ClipboardSync& operator=(const ClipboardSync&) = delete;
 
+  // The message types this class takes (route them to OnMessage).
+  static bool IsClipboardMessage(uint32_t type);
+
   // Takes the clipboard's current state as the starting point and starts
-  // the polling thread. Call once.
+  // the sync thread. Call once.
   void Start();
-  // Stops and joins the thread. Text received but not yet applied is dropped.
+  // Stops and joins the thread. A copy on its way is dropped.
   void Stop();
 
-  // Text from the peer. Any thread, never blocks on the clipboard: it is
-  // written on the sync thread (if several arrive in between, the newest
-  // wins).
-  void OnRemoteText(const uint8_t* bytes, size_t n);
+  // A clipboard message from the peer. Any thread, never blocks on the
+  // clipboard or the disk: the work is done on the sync thread.
+  void OnMessage(uint32_t type, const uint8_t* payload, size_t n);
 
   // Without Start(): take the starting point / run one round by hand (tests).
   void Begin();
   void PollOnce();
 
  private:
+  struct Outgoing;
+  struct Incoming;
+
   void Run();
+  // One round: messages from the peer, the clipboard (if check_clipboard),
+  // then file data as the pacer allows. Returns when to come back (steady
+  // clock microseconds).
+  uint64_t Step(bool check_clipboard);
+  void Handle(uint32_t type, const std::string& payload, uint64_t now);
+  void HandleOffer(const std::string& payload);
+  void HandleData(const std::string& payload);
+  void HandleAck(const std::string& payload, uint64_t now);
+  void HandleCancel(const std::string& payload);
+  // false: could not be sent now (try again later).
+  bool StartSending(const ClipboardContent& content, uint64_t now);
+  uint64_t Pump(uint64_t now);
+  void AdvanceIncoming();
+  void CompleteIncoming();
+  void DropIncoming(const std::string& reason, bool tell_peer, ClipboardTransferStatus::State state, const std::string& detail);
+  void DropOutgoing(const std::string& reason, bool tell_peer, ClipboardTransferStatus::State state, const std::string& detail);
+  void WriteToClipboard(const ClipboardContent& content);
+  void Report(const ClipboardTransferStatus& s);
+  void ReportOutgoing(ClipboardTransferStatus::State state, const std::string& detail, uint64_t now, bool force);
+  void ReportIncoming(ClipboardTransferStatus::State state, const std::string& detail, uint64_t now, bool force);
   void Log(const std::string& line);
+  uint64_t Now() const;
 
   const std::shared_ptr<Clipboard> clipboard_;
   const SendFn send_;
   const Options options_;
 
-  std::mutex mu_;  // guards incoming_, stop_
+  std::mutex mu_;  // guards events_, events_bytes_, overflow_, stop_
   std::condition_variable wake_;
-  std::optional<std::string> incoming_;
+  std::deque<std::pair<uint32_t, std::string>> events_;
+  size_t events_bytes_ = 0;
+  bool overflow_ = false;
   bool stop_ = false;
   std::thread thread_;
 
   // Sync thread only.
   int64_t seen_count_ = 0;
   bool send_pending_ = false;  // the local clipboard changed and is not sent yet
-  std::optional<std::string> last_synced_;  // last text sent or received
+  std::optional<ClipboardContent> last_synced_;  // last content sent or received
+  bool hello_sent_ = false;
+  uint64_t hello_sent_us_ = 0;
+  std::optional<ClipboardHello> peer_hello_;  // nullopt: an older peer (so far)
+  uint64_t next_id_ = 0;
+  std::unique_ptr<Outgoing> outgoing_;
+  std::unique_ptr<Incoming> incoming_;
+  uint64_t next_clipboard_check_us_ = 0;
 };
 
 }  // namespace rdm

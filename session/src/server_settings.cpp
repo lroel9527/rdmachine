@@ -34,6 +34,7 @@ bool LoadServerSettings(const std::string& config_dir, ServerSettings* out, std:
   if (auto it = j.find("clipboard"); it != j.end() && it->is_string()) {
     if (auto m = ParseClipboardMode(it->get<std::string>())) out->clipboard_mode = *m;
   }
+  num("clipboard_file_limit_mb", 0, 1 << 20, &out->clipboard_file_limit_mb);
   num("fps", 0, 240, &out->fps);
   num("bitrate_kbps", 0, 1'000'000, &out->bitrate_kbps);
   return true;
@@ -46,6 +47,7 @@ bool SaveServerSettings(const std::string& config_dir, const ServerSettings& s, 
       {"offer_pairing_codes", s.offer_pairing_codes},
       {"view_only", s.view_only},
       {"clipboard", ClipboardModeName(s.clipboard_mode)},
+      {"clipboard_file_limit_mb", s.clipboard_file_limit_mb},
       {"fps", s.fps},
       {"bitrate_kbps", s.bitrate_kbps},
   };

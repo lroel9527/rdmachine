@@ -73,6 +73,53 @@ NSString* const kTextModeChanged = @"RDMTextModeChanged";
 
 bool TextMode() { return [NSUserDefaults.standardUserDefaults boolForKey:kTextModeKey]; }
 
+// Files copied on either Mac: at most this many MB per copy (0 = files are
+// not copied). Applies from the next connection.
+NSString* const kClipboardFileLimitKey = @"ClipboardFileLimitMB";
+const int kClipboardFileLimits[] = {0, 64, 256, 1024, 4096};
+int ClipboardFileLimitMB() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  if (![d objectForKey:kClipboardFileLimitKey]) return static_cast<int>(rdm::kDefaultClipboardFileLimit >> 20);
+  return static_cast<int>(std::max<NSInteger>(0, [d integerForKey:kClipboardFileLimitKey]));
+}
+
+NSString* Megabytes(uint64_t bytes) {
+  const double mb = static_cast<double>(bytes) / (1 << 20);
+  if (mb >= 1024) return [NSString stringWithFormat:@"%.1f GB", mb / 1024];
+  if (mb >= 10) return [NSString stringWithFormat:@"%.0f MB", mb];
+  return [NSString stringWithFormat:@"%.1f MB", mb];
+}
+
+// One line for the clipboard banner in a remote window.
+NSString* DescribeClipboardStatus(const rdm::ClipboardTransferStatus& s) {
+  using State = rdm::ClipboardTransferStatus::State;
+  const bool out = s.direction == rdm::ClipboardTransferStatus::Direction::kSending;
+  NSString* what = s.name.empty() ? [NSString stringWithFormat:@"%zu files", s.files]
+                   : s.files > 1  ? [NSString stringWithFormat:@"“%@” and %zu more", NS(s.name), s.files - 1]
+                                  : [NSString stringWithFormat:@"“%@”", NS(s.name)];
+  switch (s.state) {
+    case State::kRunning: {
+      const int pct = s.bytes_total ? static_cast<int>(s.bytes_done * 100 / s.bytes_total) : 0;
+      return [NSString stringWithFormat:@"%@ %@ — %d%% (%@ of %@)", out ? @"Copying to the remote Mac:" : @"Copying from the remote Mac:",
+                                        what, pct, Megabytes(s.bytes_done), Megabytes(s.bytes_total)];
+    }
+    case State::kDone:
+      return [NSString stringWithFormat:@"%@ can be pasted %@", what, out ? @"on the remote Mac" : @"here"];
+    case State::kSkipped: {
+      NSString* why = s.detail == "too_many"       ? @"too many files"
+                      : s.detail == "not_accepted" ? @"copying files is turned off"
+                                                   : [NSString stringWithFormat:@"%@ is over the %@ limit",
+                                                                                Megabytes(s.skipped_bytes), Megabytes(s.limit_bytes)];
+      return [NSString stringWithFormat:@"%@: %@", out ? @"Files not copied to the remote Mac" : @"Files copied on the remote Mac did not come over", why];
+    }
+    case State::kFailed:
+      return [NSString stringWithFormat:@"Copying %@ failed: %@", what, NS(s.detail)];
+    case State::kCancelled:
+      return [NSString stringWithFormat:@"Copying %@ stopped (%@)", what, NS(s.detail)];
+  }
+  return @"";
+}
+
 // View > Text Mode at Standard Resolution: in text mode, ask for a desktop
 // of one pixel per point even on a Retina screen. A 2x desktop has four
 // times the pixels to send; at 1x the text is the server's own 1x rendering
@@ -280,6 +327,7 @@ NSString* DescribeError(const rdm::ConnectResult& r) {
 - (void)streamInfo:(int32_t)w height:(int32_t)h;
 - (void)cursor:(const rda_cursor_state*)c;
 - (void)statsReport:(const rdm::SessionStatsReport&)r;
+- (void)clipboardStatus:(const rdm::ClipboardTransferStatus&)s;
 @end
 
 static void OnStreamInfo(void* user, int32_t w, int32_t h) {
@@ -393,6 +441,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   std::optional<rdm::DesktopSpec> _desktopWanted;  // last asked for
   CALayer* _statsLayer;          // the statistics overlay's background; main thread
   CATextLayer* _statsText;       // its text
+  CALayer* _clipLayer;           // the clipboard banner (copies with files); main thread
+  CATextLayer* _clipText;
+  NSString* _clipLine;           // what it says; nil = hidden
+  uint64_t _clipGeneration;      // hides a finished banner only if nothing newer came
   std::optional<rdm::SessionStatsReport> _stats;
   std::chrono::steady_clock::time_point _connectedAt;
   // Input to screen: from a key, click or scroll sent on a still screen to
@@ -451,8 +503,17 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _cursorLayer = [CALayer layer];
   _cursorLayer.anchorPoint = CGPointZero;
   _cursorLayer.hidden = YES;
+  _clipLayer = [CALayer layer];
+  _clipLayer.hidden = YES;
+  _clipLayer.zPosition = 21;
+  _clipLayer.cornerRadius = 6;
+  _clipLayer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.7].CGColor;
+  _clipText = [CATextLayer layer];
+  _clipText.wrapped = NO;
+  [_clipLayer addSublayer:_clipText];
   [_layer addSublayer:_cursorLayer];
   [_layer addSublayer:_statsLayer];
+  [_layer addSublayer:_clipLayer];
   return self;
 }
 
@@ -734,6 +795,56 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   });
 }
 
+// Clipboard thread -> main thread.
+- (void)clipboardStatus:(const rdm::ClipboardTransferStatus&)s {
+  NSString* line = DescribeClipboardStatus(s);
+  // Finished, one way or another: shown for a while, then gone.
+  const bool done = s.state != rdm::ClipboardTransferStatus::State::kRunning;
+  const double hold = s.state == rdm::ClipboardTransferStatus::State::kDone ? 3 : 8;
+  __weak RemoteWindowController* weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    RemoteWindowController* me = weakSelf;
+    if (!me) return;
+    const uint64_t gen = ++me->_clipGeneration;
+    me->_clipLine = line;
+    [me renderClipboard];
+    if (!done) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(hold * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      RemoteWindowController* again = weakSelf;
+      if (!again || again->_clipGeneration != gen) return;
+      again->_clipLine = nil;
+      [again renderClipboard];
+    });
+  });
+}
+
+// Main thread. Bottom left, clear of the statistics (top right).
+- (void)renderClipboard {
+  if (!_clipLine) {
+    _clipLayer.hidden = YES;
+    return;
+  }
+  NSDictionary* attrs = @{
+    NSFontAttributeName : [NSFont systemFontOfSize:12 weight:NSFontWeightMedium],
+    NSForegroundColorAttributeName : NSColor.whiteColor,
+  };
+  NSAttributedString* text = [[NSAttributedString alloc] initWithString:_clipLine attributes:attrs];
+  const CGRect b = _layer.bounds;
+  const CGFloat padX = 9, padY = 5, margin = 10;
+  const NSSize size = [text boundingRectWithSize:NSMakeSize(std::max<CGFloat>(100, b.size.width - 2 * margin - 2 * padX), 100)
+                                         options:NSStringDrawingUsesLineFragmentOrigin].size;
+  const CGFloat tw = std::ceil(size.width), th = std::ceil(size.height);
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  _clipLayer.frame = CGRectMake(margin, margin, tw + 2 * padX, th + 2 * padY);
+  _clipText.frame = CGRectMake(padX, padY, tw, th);
+  _clipText.contentsScale = _window.backingScaleFactor;
+  _clipText.truncationMode = kCATruncationMiddle;
+  _clipText.string = text;
+  _clipLayer.hidden = NO;
+  [CATransaction commit];
+}
+
 // Main thread.
 - (void)renderStats {
   if (!StatsShown() || !_stats || !_viewer) {
@@ -798,6 +909,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 - (void)windowDidResize:(NSNotification*)note {
   [self desktopNeedsUpdate];  // zoom, tiling, a script: resizes without a drag
   [self renderStats];
+  [self renderClipboard];
   [self rebuildCursor];
   [self placeCursor];
 }
@@ -1207,8 +1319,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSNotificationCenter.defaultCenter postNotificationName:kStatsChanged object:nil];
 }
 
+- (void)setClipboardFileLimit:(NSMenuItem*)item {
+  [NSUserDefaults.standardUserDefaults setInteger:item.tag forKey:kClipboardFileLimitKey];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
-  if (item.action == @selector(toggleStatsShown:)) {
+  if (item.action == @selector(setClipboardFileLimit:)) {
+    item.state = item.tag == ClipboardFileLimitMB() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleStatsShown:)) {
     item.state = StatsShown() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleStatsField:)) {
     item.state = [StatsFieldsOn() containsObject:item.representedObject] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1262,6 +1380,18 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
   [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
   [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+  [edit addItem:NSMenuItem.separatorItem];
+  NSMenuItem* limitItem = [edit addItemWithTitle:@"Copied Files Limit" action:nil keyEquivalent:@""];
+  NSMenu* limits = [[NSMenu alloc] initWithTitle:@"Copied Files Limit"];
+  for (int mb : kClipboardFileLimits) {
+    NSString* title = mb == 0 ? @"Don't Copy Files" : [NSString stringWithFormat:@"Up to %@", Megabytes(static_cast<uint64_t>(mb) << 20)];
+    NSMenuItem* it = [limits addItemWithTitle:title action:@selector(setClipboardFileLimit:) keyEquivalent:@""];
+    it.target = self;
+    it.tag = mb;
+  }
+  limitItem.submenu = limits;
+  limitItem.toolTip = @"Files copied on one Mac are sent before they can be pasted on the other. Larger copies are "
+                      @"not sent (a note says so). Applies from the next connection.";
   editItem.submenu = edit;
   NSMenuItem* viewItem = [[NSMenuItem alloc] init];
   [bar addItem:viewItem];
@@ -1421,9 +1551,18 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.viewer.on_frame = &OnFrame;
   opts.viewer.on_cursor = &OnCursor;
   opts.viewer.on_message = &OnMessage;
-  // Text copied on either Mac can be pasted on the other (both ways for now;
-  // a setting comes with the preferences window).
+  // What is copied on either Mac (text, rich text, images, files) can be
+  // pasted on the other (both ways for now; a setting comes with the
+  // preferences window). Files up to Edit → Copied Files Limit.
   opts.clipboard = rdm::SystemClipboard();
+  opts.clipboard_file_limit = static_cast<uint64_t>(ClipboardFileLimitMB()) << 20;
+  opts.clipboard_staging_dir = rdm::ClipboardStagingDir();
+  {
+    __weak RemoteWindowController* weakStatus = remote;
+    opts.on_clipboard_status = [weakStatus](const rdm::ClipboardTransferStatus& st) {
+      [weakStatus clipboardStatus:st];
+    };
+  }
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
   opts.on_ended = [weakSelf, weakRemote](const std::string& reason) {
