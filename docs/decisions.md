@@ -10,7 +10,7 @@
 | D3 | 控制连接：TLS 1.3 + 首次确认证书指纹 | M0 支持系统账号密码和配对码；每次会话生成新的 rdaccel 密钥（[协议](protocol.md)） |
 | D4 | TCP 4100 控制 + rdaccel UDP 画面，UDP 不通退回 rdaccel TCP | 换网络不断线以后靠 rdaccel 加连接 ID |
 | D5 | M0 只控制已登录用户的物理桌面，M1 补登录窗口和锁屏 | 无显示器的虚拟屏放到 M2 实验 |
-| 系统版本 | 最低 macOS 12.3 | 为了 2016 款 Intel MacBook Pro；rdaccel 从 1.0.1 起支持（[rdaccel#39](https://github.com/lroel9527/rdaccel/issues/39)），rdmachine 的子模块现在用 1.8.1 |
+| 系统版本 | 最低 macOS 12.3 | 为了 2016 款 Intel MacBook Pro；rdaccel 从 1.0.1 起支持（[rdaccel#39](https://github.com/lroel9527/rdaccel/issues/39)），rdmachine 的子模块现在用 1.8.2 |
 | 签名 | 暂无 Apple Developer 账号，M0 用本机证书签名自测 | 不做公证分发；用 `packaging/macos/create-signing-identity.sh` 建一张固定的自签证书，应用标识固定为 `org.rdmachine.server` / `org.rdmachine.client`，重新编译后权限不丢 |
 | 桌面 | 客户端请求桌面，服务端建虚拟屏（2026-11-10） | D5 里“虚拟屏放到 M2”提前：HiDPI 只能在被控端解决，客户端缩放补不回来。客户端只说要什么（像素宽高 + 每点像素数），服务端用 `CGVirtualDisplay` 建一块同样规格的显示器，设为主屏，真实显示器镜像它，会话结束后恢复；没有显示器的 Mac 也因此能用。`CGVirtualDisplay` 没有公开头文件（BetterDisplay、DeskPad 等同样在用），按类名查找，系统没有或创建失败时退回共享真实显示器、客户端缩放。边界：规格和消息在 `core/`（`desktop.h`），建屏在 `session/`（`VirtualDesktop`）；rdaccel 只补了通用的两处（1.4.3：缩放系数从显示模式读、注入坐标跟随模式变化）。细节见[协议](protocol.md)的“请求桌面” |
 | 文字模式 | 省流量：文字清晰、立刻到，客户端决定开不开（2026-11-10） | 目的是少花流量（按流量计费的链路），不是链路慢：链路够快时画面要和平时一样立刻出来，只是文字颜色略减、照片和视频一秒只更新几次。最初按“链路极慢、慢慢补”做，实际使用中占位色块停留太久，rdaccel 1.7 改成现在这样；链路真的慢时才退到“先保持旧内容、之后补上”。由客户端请求（View → Data Saver，记住选择；`session_request.text_mode` 和会话中途的消息）。边界：怎么编码全在 rdaccel（1.5 的 `text_mode`，1.6 起文字块用上下文编码，都是通用的），rdmachine 只有开关、消息（`core/` 的 `picture_mode.h`）和浮窗上的一行提示。默认关：正常链路上普通模式画质更好。文字模式下客户端默认请求 1 倍的桌面（2026-11-10）：2 倍桌面的像素是 4 倍，100 kbps 上一屏文字看全要 16 秒、1 倍约 10 秒；1 倍是被控端按 1 倍渲染的文字（不是 2 倍缩小的），客户端把每个像素原样放大成 2 × 2，字比 Retina 粗糙但边缘清楚。不想要可以在菜单里关（View → Data Saver at Standard Resolution）。这只是“请求桌面”的规格不同，协议没有新东西。细节见[协议](protocol.md)的“文字模式” |
