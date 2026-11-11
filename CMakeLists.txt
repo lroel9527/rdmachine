@@ -7,7 +7,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
 
-project(rdmachine VERSION 2.2.1 LANGUAGES C CXX)
+project(rdmachine VERSION 2.2.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 if(NOT MSVC)
   add_compile_options(-Wall -Wextra)
+  # Keep the build machine's folders out of the binaries (__FILE__ in
+  # dependencies such as Mbed TLS, debug info): paths become relative.
+  add_compile_options(-ffile-prefix-map=${CMAKE_BINARY_DIR}/=
+                      -ffile-prefix-map=${CMAKE_SOURCE_DIR}/=)
 endif()
 
 include(FetchContent)
