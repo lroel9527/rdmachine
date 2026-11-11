@@ -9,7 +9,6 @@ ServerSettings SettingsOverrides::Apply(ServerSettings s) const {
   if (offer_pairing_codes) s.offer_pairing_codes = *offer_pairing_codes;
   if (view_only) s.view_only = *view_only;
   if (clipboard_mode) s.clipboard_mode = *clipboard_mode;
-  if (clipboard_file_limit_mb) s.clipboard_file_limit_mb = *clipboard_file_limit_mb;
   if (fps) s.fps = *fps;
   if (bitrate_kbps) s.bitrate_kbps = *bitrate_kbps;
   return s;
@@ -26,7 +25,6 @@ std::string SettingsOverrides::Describe() const {
   add(offer_pairing_codes.has_value(), "--no-pairing");
   add(view_only.has_value(), "--view-only");
   add(clipboard_mode.has_value(), "--clipboard");
-  add(clipboard_file_limit_mb.has_value(), "--clipboard-file-limit-mb");
   add(fps.has_value(), "--fps");
   add(bitrate_kbps.has_value(), "--bitrate-kbps");
   return out;
@@ -72,8 +70,6 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.inject_input = !s.view_only;
   mo.clipboard = SystemClipboard();
   mo.clipboard_mode = s.clipboard_mode;
-  mo.clipboard_file_limit = static_cast<uint64_t>(s.clipboard_file_limit_mb) << 20;
-  mo.clipboard_staging_dir = ClipboardStagingDir();
   mo.virtual_desktop = SystemVirtualDesktop();
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;
@@ -91,10 +87,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   saved_ = saved;
   code_.clear();
   Log("listening on port " + std::to_string(server_->port()) + (s.view_only ? " (view only)" : "") +
-      ", clipboard " + ClipboardModeName(s.clipboard_mode) +
-      (s.clipboard_file_limit_mb > 0 ? " (files up to " + std::to_string(s.clipboard_file_limit_mb) + " MiB)"
-                                     : " (no files)") +
-      (s.offer_pairing_codes ? "" : ", no pairing codes"));
+      ", clipboard " + ClipboardModeName(s.clipboard_mode) + (s.offer_pairing_codes ? "" : ", no pairing codes"));
   return true;
 }
 

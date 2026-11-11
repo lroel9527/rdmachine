@@ -2,9 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <sys/stat.h>
 #include <thread>
 #include <vector>
 
@@ -13,13 +10,9 @@
 
 using namespace rdm;
 using namespace std::chrono_literals;
-namespace fs = std::filesystem;
 
 namespace {
 
-OfferEntry File(std::string path, uint64_t size, uint32_t mode = 0, int64_t mtime = 0) {
-  return OfferEntry{std::move(path), OfferEntry::Kind::kFile, size, mode, mtime, {}};
-}
 
 struct Msg {
   uint32_t type;
@@ -111,38 +104,6 @@ std::optional<std::string> Paste(Side& at, Side& other, std::string_view mime) {
   return p->FetchFormat(std::string(mime), [&] { Round(at, other); }, 5000);
 }
 
-std::optional<std::vector<std::string>> PasteFiles(Side& at, Side& other) {
-  auto p = at.clipboard->promise();
-  if (!p) return std::nullopt;
-  return p->FetchFiles([&] { Round(at, other); }, 5000);
-}
-
-class TempDir {
- public:
-  TempDir() {
-    std::string tmpl = (fs::temp_directory_path() / "rdm-clip-XXXXXX").string();
-    path_ = mkdtemp(tmpl.data());
-  }
-  ~TempDir() {
-    std::error_code ec;
-    fs::remove_all(path_, ec);
-  }
-  const fs::path& path() const { return path_; }
-
- private:
-  fs::path path_;
-};
-
-void WriteFile(const fs::path& p, const std::string& data) {
-  fs::create_directories(p.parent_path());
-  std::ofstream(p, std::ios::binary) << data;
-}
-
-std::string ReadFile(const fs::path& p) {
-  std::ifstream in(p, std::ios::binary);
-  return std::string(std::istreambuf_iterator<char>(in), {});
-}
-
 std::string Pattern(size_t n, int seed) {
   std::string s(n, '\0');
   for (size_t i = 0; i < n; ++i) s[i] = static_cast<char>((i * 131 + seed * 7 + i / 977) & 0xFF);
@@ -191,8 +152,7 @@ TEST(ClipboardSync, HelloGoesFirst) {
   EXPECT_EQ(s.sent[0].type, kClipboardHelloMessageType);
   auto h = DecodeClipboardHello(s.sent[0].payload);
   ASSERT_TRUE(h);
-  EXPECT_EQ(h->version, 2);
-  EXPECT_EQ(h->max_file_bytes, 0u);  // no staging directory: no files taken
+  EXPECT_EQ(h->version, 3);
 }
 
 TEST(ClipboardSync, ACopyIsOnlyAnnouncedNotSent) {
@@ -218,7 +178,6 @@ TEST(ClipboardSync, ACopyIsOnlyAnnouncedNotSent) {
   auto p = b.clipboard->promise();
   ASSERT_TRUE(p);
   EXPECT_EQ(p->formats(), (std::vector<std::string>{"text/plain", "image/png"}));
-  EXPECT_EQ(p->files(), 0u);
   EXPECT_FALSE(b.clipboard->text());
 }
 
@@ -361,12 +320,10 @@ TEST(ClipboardSync, UnaskedOffersAreRefused) {
   Side b;
   b.sync.Begin();
   b.sync.PollOnce();
-  b.Receive(kClipboardHelloMessageType, EncodeClipboardHello({2, 0}));
-  ClipboardOffer o;
-  o.id = 5;
-  o.formats = {{"text/plain", 3}};
+  b.Receive(kClipboardHelloMessageType, EncodeClipboardHello({3}));
+  ClipboardOffer o{5, 77, "text/plain", 3, ""};
   b.Receive(kClipboardOfferMessageType, EncodeClipboardOffer(o));
-  b.Receive(kClipboardDataMessageType, EncodeClipboardData({5, 0, 0}, "abc"));
+  b.Receive(kClipboardDataMessageType, EncodeClipboardData({5, 0}, "abc"));
   b.sync.PollOnce();
   EXPECT_EQ(b.clipboard->writes(), 0);
   auto cancels = b.Logged(kClipboardCancelMessageType);
@@ -480,11 +437,11 @@ TEST(ClipboardSync, TheClientGivesAnOlderPeerNothing) {
   EXPECT_EQ(s.LoggedCount(), 0u);
 }
 
-TEST(ClipboardSync, AVersion1PeerIsAnOlderPeer) {
+TEST(ClipboardSync, AnEarlierVersionIsAnOlderPeer) {
   Side s(Server());
   s.sync.Begin();
   s.sync.PollOnce();
-  s.Receive(kClipboardHelloMessageType, EncodeClipboardHello({1, 1 << 20}));
+  s.Receive(kClipboardHelloMessageType, EncodeClipboardHello({2}));
   s.clipboard->Copy("hello");
   s.sync.PollOnce();
   EXPECT_EQ(s.Logged(kClipboardTextMessageType), std::vector<std::string>{"hello"});
@@ -499,9 +456,9 @@ TEST(ClipboardSync, WaitsForThePeersHelloBeforeFallingBack) {
   s.clipboard->Copy("hello");
   s.sync.PollOnce();
   EXPECT_EQ(s.LoggedCount(), 0u);  // the peer may yet say hello
-  s.Receive(kClipboardHelloMessageType, EncodeClipboardHello({2, 0}));
+  s.Receive(kClipboardHelloMessageType, EncodeClipboardHello({3}));
   s.sync.PollOnce();
-  EXPECT_EQ(s.Logged(kClipboardAnnounceMessageType).size(), 1u);  // it did: version 2
+  EXPECT_EQ(s.Logged(kClipboardAnnounceMessageType).size(), 1u);  // it did: version 3
   EXPECT_TRUE(s.Logged(kClipboardTextMessageType).empty());
 }
 
@@ -577,290 +534,98 @@ TEST(ClipboardSync, OtherMessagesAreNotTaken) {
   EXPECT_TRUE(ClipboardSync::IsClipboardMessage(kClipboardRequestMessageType));
 }
 
-// ---- files ---------------------------------------------------------------
+// ---- large pastes ---------------------------------------------------------
 
-class ClipboardFiles : public ::testing::Test {
- protected:
-  ClipboardSync::Options Opts(const fs::path& staging, uint64_t limit = kDefaultClipboardFileLimit) {
-    ClipboardSync::Options o = Fast();
-    o.staging_dir = staging.string();
-    o.max_file_bytes = limit;
-    o.on_status = [this](const ClipboardTransferStatus& s) { statuses.push_back(s); };
-    return o;
-  }
-  // A sender paced as on a real link (8 Mbps to start), on the test clock.
-  ClipboardSync::Options Paced(const fs::path& staging) {
-    ClipboardSync::Options o = Opts(staging);
-    o.pacer = TransferPacer::Options{};
-    o.clock = [] { return g_now_us; };
-    return o;
-  }
-  TempDir src, sa, sb;
-  std::vector<ClipboardTransferStatus> statuses;
-};
-
-TEST_F(ClipboardFiles, CopiedFilesStayUntilPasted) {
-  WriteFile(src.path() / "private.txt", "do not send");
-  Side a(Opts(sa.path())), b(Opts(sb.path()));
-  a.sync.Begin();
-  b.sync.Begin();
-  ClipboardContent c;
-  c.formats = {{std::string(kMimeText), "private.txt"}};
-  c.files = {(src.path() / "private.txt").string()};
-  a.clipboard->CopyContent(c);
-  Exchange(a, b);
-  // Announced: one file, nothing more (not even its name or size).
-  auto ann = DecodeClipboardAnnounce(a.Logged(kClipboardAnnounceMessageType).at(0));
-  ASSERT_TRUE(ann);
-  EXPECT_EQ(ann->files, 1u);
-  EXPECT_TRUE(a.Logged(kClipboardOfferMessageType).empty());
-  for (const auto& m : a.log) EXPECT_EQ(m.payload.find("private"), std::string::npos);
-  EXPECT_TRUE(fs::is_empty(sb.path()));
-  ASSERT_TRUE(b.clipboard->promise());
-  EXPECT_EQ(b.clipboard->promise()->files(), 1u);
-  EXPECT_TRUE(statuses.empty());  // and no notice anywhere
+// A copying side paced as on a real link (8 Mbps to start), on the test clock.
+ClipboardSync::Options Paced() {
+  ClipboardSync::Options o = Fast();
+  o.pacer = TransferPacer::Options{};
+  o.clock = [] { return g_now_us; };
+  return o;
 }
 
-TEST_F(ClipboardFiles, PastingFetchesFilesAndFolders) {
-  WriteFile(src.path() / "report.txt", "hello report");
-  WriteFile(src.path() / "photos" / "a.bin", Pattern(400'000, 1));
-  WriteFile(src.path() / "photos" / "deep" / "b.bin", Pattern(5, 2));
-  WriteFile(src.path() / "photos" / "empty.txt", "");
-  fs::create_directories(src.path() / "photos" / "nothing here");
-  fs::create_symlink("a.bin", src.path() / "photos" / "link");
-  chmod((src.path() / "report.txt").c_str(), 0640);
-
-  Side a(Opts(sa.path())), b(Opts(sb.path()));
+TEST(ClipboardSync, CopiedFilesGoOnlyAsTheirNames) {
+  // The in-memory clipboard stands for what macOS reads after a Finder copy:
+  // the names as text, nothing else.
+  Side a, b;
   a.sync.Begin();
   b.sync.Begin();
-  ClipboardContent c;
-  c.formats = {{std::string(kMimeText), "report.txt\nphotos"}, {std::string(kMimePng), "icon"}};
-  c.files = {(src.path() / "report.txt").string(), (src.path() / "photos").string()};
-  a.clipboard->CopyContent(c);
+  a.clipboard->Copy("report.pdf\nphotos");
   Exchange(a, b);
-  auto p = b.clipboard->promise();
-  ASSERT_TRUE(p);
-  // Only the names as text: an icon is pointless next to the files.
-  EXPECT_EQ(p->formats(), (std::vector<std::string>{"text/plain"}));
-  EXPECT_EQ(p->files(), 2u);
-
-  auto got = PasteFiles(b, a);
-  ASSERT_TRUE(got);
-  ASSERT_EQ(got->size(), 2u);
-  const fs::path report = (*got)[0], photos = (*got)[1];
-  EXPECT_EQ(report.filename(), "report.txt");
-  EXPECT_EQ(photos.filename(), "photos");
-  EXPECT_EQ(report.parent_path().parent_path(), sb.path());  // in the staging directory
-  EXPECT_EQ(ReadFile(report), "hello report");
-  EXPECT_EQ(ReadFile(photos / "a.bin"), Pattern(400'000, 1));
-  EXPECT_EQ(ReadFile(photos / "deep" / "b.bin"), Pattern(5, 2));
-  EXPECT_TRUE(fs::exists(photos / "empty.txt"));
-  EXPECT_EQ(fs::file_size(photos / "empty.txt"), 0u);
-  EXPECT_TRUE(fs::is_directory(photos / "nothing here"));
-  EXPECT_TRUE(fs::is_symlink(photos / "link"));
-  EXPECT_EQ(fs::read_symlink(photos / "link"), "a.bin");
-  struct stat st {};
-  ASSERT_EQ(stat(report.c_str(), &st), 0);
-  EXPECT_EQ(st.st_mode & 0777, 0640u);
-  struct stat src_st {};
-  ASSERT_EQ(stat((src.path() / "report.txt").c_str(), &src_st), 0);
-  EXPECT_EQ(st.st_mtime, src_st.st_mtime);  // whole seconds travel
-  EXPECT_EQ(Paste(b, a, kMimeText), "report.txt\nphotos");
-
-  bool sent_done = false, received_done = false;
-  for (const auto& s : statuses) {
-    if (s.state != ClipboardTransferStatus::State::kDone) continue;
-    EXPECT_EQ(s.files, 4u);
-    EXPECT_EQ(s.bytes_done, s.bytes_total);
-    EXPECT_EQ(s.name, "report.txt");
-    (s.direction == ClipboardTransferStatus::Direction::kSending ? sent_done : received_done) = true;
-  }
-  EXPECT_TRUE(sent_done);
-  EXPECT_TRUE(received_done);
-  // Pasting again uses what is here.
-  const size_t requests = b.Logged(kClipboardRequestMessageType).size();
-  EXPECT_EQ(PasteFiles(b, a), got);
-  EXPECT_EQ(b.Logged(kClipboardRequestMessageType).size(), requests);
+  EXPECT_EQ(b.clipboard->promise()->formats(), (std::vector<std::string>{"text/plain"}));
+  EXPECT_EQ(Paste(b, a, kMimeText), "report.pdf\nphotos");
 }
 
-TEST_F(ClipboardFiles, OverTheLimitThePasteGetsNothingAndBothSidesAreTold) {
-  WriteFile(src.path() / "big.bin", std::string(2000, 'x'));
-  Side a(Opts(sa.path(), 1000)), b(Opts(sb.path()));
+TEST(ClipboardSync, ANewerCopyStopsAPasteOnItsWay) {
+  Side a(Paced()), b;
   a.sync.Begin();
   b.sync.Begin();
   ClipboardContent c;
-  c.formats = {{std::string(kMimeText), "big.bin"}};
-  c.files = {(src.path() / "big.bin").string()};
-  a.clipboard->CopyContent(c);
-  Exchange(a, b);
-  EXPECT_TRUE(statuses.empty());  // nothing said before a paste
-  EXPECT_FALSE(PasteFiles(b, a));
-  EXPECT_EQ(Paste(b, a, kMimeText), "big.bin");  // the name still pastes
-  EXPECT_TRUE(fs::is_empty(sb.path()));
-  int skipped = 0;
-  for (const auto& s : statuses) {
-    if (s.state != ClipboardTransferStatus::State::kSkipped) continue;
-    ++skipped;
-    EXPECT_EQ(s.detail, "too_large");
-    EXPECT_EQ(s.skipped_bytes, 2000u);
-    EXPECT_EQ(s.limit_bytes, 1000u);  // the sender's, smaller than the receiver's
-    EXPECT_EQ(s.files, 1u);
-  }
-  EXPECT_EQ(skipped, 2);  // the sender and the receiver
-}
-
-TEST_F(ClipboardFiles, ThePeersLimitAppliesToo) {
-  WriteFile(src.path() / "big.bin", std::string(2000, 'x'));
-  Side a(Opts(sa.path())), b(Opts(sb.path(), 1000));
-  a.sync.Begin();
-  b.sync.Begin();
-  ClipboardContent c;
-  c.files = {(src.path() / "big.bin").string()};
-  a.clipboard->CopyContent(c);
-  Exchange(a, b);
-  EXPECT_FALSE(PasteFiles(b, a));
-  ASSERT_FALSE(statuses.empty());
-  EXPECT_EQ(statuses.front().limit_bytes, 1000u);
-}
-
-TEST_F(ClipboardFiles, APeerWithoutStagingIsPromisedOnlyTheNames) {
-  WriteFile(src.path() / "f.txt", "x");
-  Side a(Opts(sa.path())), b;  // b: no staging directory
-  a.sync.Begin();
-  b.sync.Begin();
-  ClipboardContent c;
-  c.formats = {{std::string(kMimeText), "f.txt"}};
-  c.files = {(src.path() / "f.txt").string()};
-  a.clipboard->CopyContent(c);
-  Exchange(a, b);
-  auto p = b.clipboard->promise();
-  ASSERT_TRUE(p);
-  EXPECT_EQ(p->files(), 0u);
-  EXPECT_EQ(Paste(b, a, kMimeText), "f.txt");
-}
-
-TEST_F(ClipboardFiles, ANewerCopyStopsAFetchOnItsWay) {
-  WriteFile(src.path() / "big.bin", Pattern(2'000'000, 5));
-  Side a(Paced(sa.path())), b(Opts(sb.path()));
-  a.sync.Begin();
-  b.sync.Begin();
-  ClipboardContent c;
-  c.files = {(src.path() / "big.bin").string()};
+  c.formats = {{std::string(kMimePng), Pattern(2'000'000, 5)}};
   a.clipboard->CopyContent(c);
   Exchange(a, b);
   auto p = b.clipboard->promise();
   int rounds = 0;
-  // Three rounds into the fetch, a copies something else.
-  auto got = p->FetchFiles([&] {
+  // Three rounds into the paste, a copies something else.
+  auto got = p->FetchFormat(std::string(kMimePng), [&] {
     if (++rounds == 3) a.clipboard->Copy("never mind");
     Round(b, a);
   }, 5000);
   EXPECT_FALSE(got);
   Exchange(a, b);
   EXPECT_EQ(Paste(b, a, kMimeText), "never mind");
-  EXPECT_TRUE(fs::is_empty(sb.path()));  // the partial copy is gone
 }
 
-TEST_F(ClipboardFiles, OlderFetchedCopiesAreDeleted) {
-  WriteFile(src.path() / "one.txt", "1");
-  WriteFile(src.path() / "two.txt", "2");
-  Side a(Opts(sa.path())), b(Opts(sb.path()));
+TEST(ClipboardSync, OverTheLimitAPasteGetsNothing) {
+  ClipboardSync::Options small = Fast();
+  small.max_format_bytes = 1000;
+  Side a(small), b;
   a.sync.Begin();
   b.sync.Begin();
   ClipboardContent c;
-  c.files = {(src.path() / "one.txt").string()};
+  c.formats = {{std::string(kMimeText), "short"}, {std::string(kMimePng), Pattern(2000, 1)}};
   a.clipboard->CopyContent(c);
   Exchange(a, b);
-  ASSERT_TRUE(PasteFiles(b, a));
-  c.files = {(src.path() / "two.txt").string()};
-  a.clipboard->CopyContent(c);
-  Exchange(a, b);
-  auto got = PasteFiles(b, a);
-  ASSERT_TRUE(got);
-  EXPECT_EQ(ReadFile((*got)[0]), "2");
-  EXPECT_EQ(std::distance(fs::directory_iterator(sb.path()), fs::directory_iterator()), 1);
+  EXPECT_FALSE(Paste(b, a, kMimePng));
+  EXPECT_EQ(a.DataBytes(), 0u);
+  EXPECT_EQ(Paste(b, a, kMimeText), "short");
 }
 
-TEST_F(ClipboardFiles, StartingAgainKeepsOnlyWhatIsOnTheClipboard) {
-  fs::create_directories(sb.path() / "1-old");
-  fs::create_directories(sb.path() / "2-current" / "x");
-  auto clip = std::make_shared<FakeClipboard>();
+TEST(ClipboardSync, ThePastingSidesLimitAppliesToo) {
+  ClipboardSync::Options small = Fast();
+  small.max_format_bytes = 1000;
+  Side a, b(small);
+  a.sync.Begin();
+  b.sync.Begin();
   ClipboardContent c;
-  c.files = {(sb.path() / "2-current" / "x").string()};
-  clip->CopyContent(c);
-  ClipboardSync s(clip, [](uint32_t, std::string_view) { return true; }, Opts(sb.path()));
-  s.Begin();
-  EXPECT_FALSE(fs::exists(sb.path() / "1-old"));
-  EXPECT_TRUE(fs::exists(sb.path() / "2-current" / "x"));
+  c.formats = {{std::string(kMimePng), Pattern(2000, 1)}};
+  a.clipboard->CopyContent(c);
+  Exchange(a, b);
+  EXPECT_FALSE(Paste(b, a, kMimePng));
 }
 
-// A peer that answers b's request for files with `offer` (and `data`).
-struct FakeSender {
-  Side& b;
-  void Announce() {
-    b.Receive(kClipboardHelloMessageType, EncodeClipboardHello({2, 0}));
-    b.Receive(kClipboardAnnounceMessageType, EncodeClipboardAnnounce({1, {}, 1}));
-    b.sync.PollOnce();
-  }
-  // Waits for the request b sends when its promise is asked.
-  uint64_t RequestId() {
-    for (const auto& m : b.log) {
-      if (m.type == kClipboardRequestMessageType) return DecodeClipboardRequest(m.payload)->id;
-    }
-    return 0;
-  }
-};
-
-TEST_F(ClipboardFiles, UnsafeAnswersAreRefused) {
-  for (const char* path : {"../escape", "/etc/passwd", "a/../../x"}) {
-    Side b(Opts(sb.path()));
-    b.sync.Begin();
-    b.sync.PollOnce();
-    FakeSender peer{b};
-    peer.Announce();
-    auto p = b.clipboard->promise();
-    ASSERT_TRUE(p);
-    bool answered = false;
-    auto got = p->FetchFiles([&] {
-      b.sync.PollOnce();
-      if (!answered && peer.RequestId() != 0) {
-        answered = true;
-        ClipboardOffer o;
-        o.id = 9;
-        o.request = peer.RequestId();
-        o.entries = {File(path, 1)};
-        // Encoded by hand: EncodeClipboardOffer would produce it, the decoder refuses it.
-        b.Receive(kClipboardOfferMessageType, EncodeClipboardOffer(o));
-        b.Receive(kClipboardDataMessageType, EncodeClipboardData({9, 0, 0}, "x"));
-      }
-    }, 300);
-    EXPECT_FALSE(got) << path;
-    EXPECT_TRUE(fs::is_empty(sb.path())) << path;
-  }
-  EXPECT_FALSE(fs::exists(sb.path().parent_path() / "escape"));
-}
-
-TEST_F(ClipboardFiles, DataOutOfOrderDropsTheFetch) {
-  Side b(Opts(sb.path()));
+TEST(ClipboardSync, DataOutOfOrderDropsThePaste) {
+  Side b;
   b.sync.Begin();
   b.sync.PollOnce();
-  FakeSender peer{b};
-  peer.Announce();
+  b.Receive(kClipboardHelloMessageType, EncodeClipboardHello({3}));
+  b.Receive(kClipboardAnnounceMessageType, EncodeClipboardAnnounce({1, {"text/plain"}}));
+  b.sync.PollOnce();
+  auto p = b.clipboard->promise();
+  ASSERT_TRUE(p);
   bool answered = false;
-  auto got = b.clipboard->promise()->FetchFiles([&] {
+  auto got = p->FetchFormat(std::string(kMimeText), [&] {
     b.sync.PollOnce();
-    if (!answered && peer.RequestId() != 0) {
+    if (answered) return;
+    for (const auto& m : b.log) {
+      if (m.type != kClipboardRequestMessageType) continue;
       answered = true;
-      ClipboardOffer o;
-      o.id = 9;
-      o.request = peer.RequestId();
-      o.entries = {File("f", 4)};
-      b.Receive(kClipboardOfferMessageType, EncodeClipboardOffer(o));
-      b.Receive(kClipboardDataMessageType, EncodeClipboardData({9, 0, 2}, "zz"));  // skips bytes 0-1
+      const uint64_t req = DecodeClipboardRequest(m.payload)->id;
+      b.Receive(kClipboardOfferMessageType, EncodeClipboardOffer({9, req, "text/plain", 4, ""}));
+      b.Receive(kClipboardDataMessageType, EncodeClipboardData({9, 2}, "zz"));  // skips bytes 0-1
     }
   }, 2000);
   EXPECT_FALSE(got);
-  EXPECT_TRUE(fs::is_empty(sb.path()));
   bool cancelled = false;
   for (const auto& m : b.log) {
     if (m.type == kClipboardCancelMessageType) {
@@ -871,58 +636,45 @@ TEST_F(ClipboardFiles, DataOutOfOrderDropsTheFetch) {
   EXPECT_TRUE(cancelled);
 }
 
-TEST_F(ClipboardFiles, AFileThatShrinksWhileSendingFailsCleanly) {
-  WriteFile(src.path() / "f.bin", Pattern(1'000'000, 4));
-  Side a(Paced(sa.path())), b(Opts(sb.path()));
+TEST(ClipboardSync, AVersion2FileRequestGetsNothing) {
+  Side a, b;
   a.sync.Begin();
   b.sync.Begin();
-  ClipboardContent c;
-  c.files = {(src.path() / "f.bin").string()};
-  a.clipboard->CopyContent(c);
+  a.clipboard->Copy("x");
   Exchange(a, b);
-  int rounds = 0;
-  auto got = b.clipboard->promise()->FetchFiles([&] {
-    if (++rounds == 3) fs::resize_file(src.path() / "f.bin", 10);
-    Round(b, a);
-  }, 5000);
-  EXPECT_FALSE(got);
-  EXPECT_TRUE(fs::is_empty(sb.path()));
-  bool failed = false;
-  for (const auto& s : statuses) failed |= s.state == ClipboardTransferStatus::State::kFailed;
-  EXPECT_TRUE(failed);
+  a.Receive(kClipboardRequestMessageType, R"({"announce":1,"id":50,"files":true})");
+  a.sync.PollOnce();
+  EXPECT_EQ(a.DataBytes(), 0u);
 }
 
-TEST_F(ClipboardFiles, ThreadedWithPacing) {
-  // Real threads and the real pacer: 3 MB arrive intact when pasted.
-  WriteFile(src.path() / "f.bin", Pattern(3'000'000, 6));
+TEST(ClipboardSync, ThreadedWithPacing) {
+  // Real threads and the real pacer: a 3 MB image arrives intact when pasted.
   auto ca = std::make_shared<FakeClipboard>(), cb = std::make_shared<FakeClipboard>();
-  ClipboardSync::Options oa = Opts(sa.path()), ob = Opts(sb.path());
-  oa.pacer = ob.pacer = TransferPacer::Options{};
-  oa.poll_ms = ob.poll_ms = 10;
-  oa.on_status = ob.on_status = nullptr;
+  ClipboardSync::Options o;
+  o.poll_ms = 10;
   ClipboardSync* pa = nullptr;
   ClipboardSync* pb = nullptr;
   ClipboardSync a(ca, [&](uint32_t type, std::string_view p) {
     pb->OnMessage(type, reinterpret_cast<const uint8_t*>(p.data()), p.size());
     return true;
-  }, oa);
+  }, o);
   ClipboardSync b(cb, [&](uint32_t type, std::string_view p) {
     pa->OnMessage(type, reinterpret_cast<const uint8_t*>(p.data()), p.size());
     return true;
-  }, ob);
+  }, o);
   pa = &a;
   pb = &b;
   a.Start();
   b.Start();
   ClipboardContent c;
-  c.files = {(src.path() / "f.bin").string()};
+  c.formats = {{std::string(kMimePng), Pattern(3'000'000, 6)}};
   ca->CopyContent(c);
   for (int i = 0; i < 300 && !cb->promise(); ++i) std::this_thread::sleep_for(10ms);
   ASSERT_TRUE(cb->promise());
   int pumps = 0;
-  auto got = cb->promise()->FetchFiles([&] { ++pumps; });
+  auto got = cb->promise()->FetchFormat(std::string(kMimePng), [&] { ++pumps; });
   ASSERT_TRUE(got);
-  EXPECT_EQ(ReadFile((*got)[0]), Pattern(3'000'000, 6));
+  EXPECT_TRUE(*got == Pattern(3'000'000, 6));
   EXPECT_GT(pumps, 0);  // the waiting side kept pumping
   a.Stop();
   b.Stop();

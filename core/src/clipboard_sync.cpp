@@ -1,16 +1,9 @@
 #include "rdmachine/clipboard_sync.h"
 
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <algorithm>
-#include <cerrno>
 #include <chrono>
-#include <cstring>
-#include <filesystem>
+#include <cstdio>
 #include <map>
-
-#include "rdmachine/clipboard_files.h"
 
 namespace rdm {
 
@@ -93,7 +86,6 @@ constexpr size_t kChunk = 128 * 1024;
 // What the peer may have queued here before the sync thread takes it: its
 // window is far smaller; more means a broken peer.
 constexpr size_t kMaxQueuedBytes = 64u << 20;
-constexpr uint64_t kStatusEveryUs = 200'000;
 constexpr uint64_t kCongestionEveryUs = 50'000;
 // Not a message type: a promise asking the sync thread to fetch.
 constexpr uint32_t kLocalFetchEvent = 0;
@@ -116,18 +108,6 @@ std::string Mib(uint64_t bytes) {
   return buf;
 }
 
-std::string FirstRootName(const ClipboardOffer& o) {
-  for (const auto& e : o.entries) {
-    if (e.path.find('/') == std::string::npos) return e.path;
-  }
-  return {};
-}
-
-const std::string kFilesKey = "files";
-std::string FormatKey(std::string_view mime) { return "format:" + std::string(mime); }
-bool IsFormatKey(const std::string& key) { return key.rfind("format:", 0) == 0; }
-std::string MimeOf(const std::string& key) { return key.substr(7); }
-
 }  // namespace
 
 // ---- promises ------------------------------------------------------------
@@ -138,49 +118,35 @@ struct ClipboardPromise::Hub {
     bool done = false;
     bool ok = false;
     std::string data;
-    std::vector<std::string> files;
     uint64_t progress_us = 0;  // last sign of life (steady clock)
   };
   std::mutex mu;
   std::condition_variable cv;
   ClipboardSync* sync = nullptr;  // null once the sync has stopped
   uint64_t announce = 0;          // the peer's current announcement; promises of others are void
-  std::map<std::string, Result> results;
+  std::map<std::string, Result> results;  // by MIME type
 };
 
-ClipboardPromise::ClipboardPromise(std::shared_ptr<Hub> hub, uint64_t announce, std::vector<std::string> formats,
-                                   size_t files)
-    : hub_(std::move(hub)), announce_(announce), formats_(std::move(formats)), files_(files) {}
+ClipboardPromise::ClipboardPromise(std::shared_ptr<Hub> hub, uint64_t announce, std::vector<std::string> formats)
+    : hub_(std::move(hub)), announce_(announce), formats_(std::move(formats)) {}
 
 std::optional<std::string> ClipboardPromise::FetchFormat(const std::string& mime, const std::function<void()>& pump,
                                                          int stall_ms) {
-  return Fetch(FormatKey(mime), pump, stall_ms, nullptr);
-}
-
-std::optional<std::vector<std::string>> ClipboardPromise::FetchFiles(const std::function<void()>& pump, int stall_ms) {
-  std::vector<std::string> files;
-  if (!Fetch(kFilesKey, pump, stall_ms, &files)) return std::nullopt;
-  return files;
-}
-
-std::optional<std::string> ClipboardPromise::Fetch(const std::string& key, const std::function<void()>& pump,
-                                                   int stall_ms, std::vector<std::string>* files) {
   std::unique_lock lock(hub_->mu);
   if (hub_->announce != announce_ || !hub_->sync) return std::nullopt;
-  if (!hub_->results[key].requested) {
-    Hub::Result& r = hub_->results[key];
+  if (!hub_->results[mime].requested) {
+    Hub::Result& r = hub_->results[mime];
     r.requested = true;
     r.progress_us = SteadyUs();
     // Under the hub's lock, so the sync cannot go away meanwhile (it clears
     // hub->sync under this lock before it stops).
-    hub_->sync->PostLocalFetch(announce_, key);
+    hub_->sync->PostLocalFetch(announce_, mime);
   }
   while (true) {
     if (hub_->announce != announce_ || !hub_->sync) return std::nullopt;  // replaced, or the session ended
-    Hub::Result& r = hub_->results[key];
+    Hub::Result& r = hub_->results[mime];
     if (r.done) {
       if (!r.ok) return std::nullopt;
-      if (files) *files = r.files;
       return r.data;
     }
     if (SteadyUs() - r.progress_us > static_cast<uint64_t>(stall_ms) * 1000) {
@@ -200,37 +166,22 @@ std::optional<std::string> ClipboardPromise::Fetch(const std::string& key, const
 // ---- transfers -----------------------------------------------------------
 
 struct ClipboardSync::Outgoing {
-  ClipboardOffer offer;
-  std::vector<std::string> format_data;  // one per offer.formats
-  std::vector<std::string> sources;      // one per file item
-  std::vector<uint64_t> sizes;           // items
-  size_t item = 0;
-  uint64_t offset = 0;  // in `item`
-  int fd = -1;          // the file item being read
-  uint64_t sent = 0, acked = 0, total = 0;
+  uint64_t id = 0;
+  std::string data;
+  uint64_t sent = 0, acked = 0;
   std::deque<std::pair<uint64_t, uint64_t>> marks;  // (sent up to, at)
   TransferPacer pacer;
   uint64_t congestion_seen = 0;
   uint64_t congestion_checked_us = 0;
-  uint64_t reported_us = 0;
 
   explicit Outgoing(const TransferPacer::Options& o) : pacer(o) {}
-  ~Outgoing() {
-    if (fd >= 0) close(fd);
-  }
 };
 
 struct ClipboardSync::Incoming {
-  ClipboardOffer offer;
-  std::vector<uint64_t> sizes;
-  std::vector<size_t> entry_of;  // per item: its index in offer.entries, or SIZE_MAX for formats
-  std::vector<std::string> format_data;
-  std::unique_ptr<StagingDir> dir;
-  size_t item = 0;
-  uint64_t offset = 0;
-  bool file_open = false;
-  uint64_t written = 0, total = 0;
-  uint64_t reported_us = 0;
+  uint64_t id = 0;
+  std::string mime;
+  uint64_t size = 0;
+  std::string data;
 };
 
 ClipboardSync::ClipboardSync(std::shared_ptr<Clipboard> clipboard, SendFn send, Options options)
@@ -256,10 +207,6 @@ void ClipboardSync::Log(const std::string& line) {
   if (options_.log) options_.log("clipboard: " + line);
 }
 
-void ClipboardSync::Report(const ClipboardTransferStatus& s) {
-  if (options_.on_status) options_.on_status(s);
-}
-
 void ClipboardSync::Start() {
   if (options_.mode == ClipboardMode::kOff || !clipboard_ || thread_.joinable()) return;
   Begin();  // here, so a copy made right after Start() counts as a change
@@ -283,9 +230,6 @@ void ClipboardSync::Stop() {
   }
   wake_.notify_all();
   if (thread_.joinable()) thread_.join();
-  // Nothing half-received stays on disk. (Without a thread, as in tests,
-  // the caller's thread owns these; Stop runs there too.)
-  if (incoming_ && incoming_->dir) incoming_->dir->Remove();
   incoming_.reset();
   outgoing_.reset();
 }
@@ -305,11 +249,11 @@ void ClipboardSync::OnMessage(uint32_t type, const uint8_t* payload, size_t n) {
   wake_.notify_all();
 }
 
-void ClipboardSync::PostLocalFetch(uint64_t announce, const std::string& key) {
+void ClipboardSync::PostLocalFetch(uint64_t announce, const std::string& mime) {
   {
     std::lock_guard lock(mu_);
     if (stop_) return;
-    events_.emplace_back(kLocalFetchEvent, std::to_string(announce) + "\n" + key);
+    events_.emplace_back(kLocalFetchEvent, std::to_string(announce) + "\n" + mime);
   }
   wake_.notify_all();
 }
@@ -317,15 +261,6 @@ void ClipboardSync::PostLocalFetch(uint64_t announce, const std::string& key) {
 void ClipboardSync::Begin() {
   seen_count_ = clipboard_->ChangeCount();
   send_pending_ = options_.send_on_start && CanSend(options_.mode);
-  if (!options_.staging_dir.empty()) {
-    // Files received in earlier sessions, except what is still on the
-    // clipboard (it may yet be pasted).
-    std::string keep;
-    if (std::optional<ClipboardContent> c = clipboard_->Read(); c && !c->files.empty()) {
-      keep = StagingDirOf(options_.staging_dir, c->files.front());
-    }
-    RemoveStagingDirs(options_.staging_dir, keep);
-  }
 }
 
 void ClipboardSync::PollOnce() { Step(/*check_clipboard=*/true); }
@@ -360,17 +295,13 @@ uint64_t ClipboardSync::Step(bool check_clipboard) {
 
   // The hello goes first: it tells the peer how to talk to this side.
   bool hello_now = false;
-  if (!hello_sent_) {
-    ClipboardHello h;
-    h.max_file_bytes = CanReceive(options_.mode) && !options_.staging_dir.empty() ? options_.max_file_bytes : 0;
-    if (send_(kClipboardHelloMessageType, EncodeClipboardHello(h))) {
-      hello_sent_ = true;
-      hello_sent_us_ = now;
-      hello_now = true;
-    }
+  if (!hello_sent_ && send_(kClipboardHelloMessageType, EncodeClipboardHello({}))) {
+    hello_sent_ = true;
+    hello_sent_us_ = now;
+    hello_now = true;
   }
 
-  if (overflow && incoming_) DropIncoming("error", true, ClipboardTransferStatus::State::kFailed, "the peer sent too much at once");
+  if (overflow && incoming_) DropIncoming("error", true, "the peer sent too much at once");
   for (auto& [type, payload] : events) Handle(type, payload, now);
 
   if (check_clipboard) {
@@ -384,7 +315,7 @@ uint64_t ClipboardSync::Step(bool check_clipboard) {
   }
 
   // Once connected (the hello went out), and once the peer has said whether
-  // it speaks version 2 (or has had time to).
+  // it speaks this version (or has had time to).
   const bool peer_new = peer_hello_ && peer_hello_->version >= kClipboardVersion;
   if (send_pending_ && hello_sent_ &&
       (peer_new || (!hello_now && now - hello_sent_us_ >= static_cast<uint64_t>(options_.hello_wait_ms) * 1000))) {
@@ -397,9 +328,8 @@ uint64_t ClipboardSync::Step(bool check_clipboard) {
     // Otherwise not connected after all: try again on the next round.
   }
 
-  now = Now();
-  ServeNextRequest(now);
-  return Pump(now);
+  ServeNextRequest();
+  return Pump(Now());
 }
 
 void ClipboardSync::Handle(uint32_t type, const std::string& payload, uint64_t now) {
@@ -490,16 +420,10 @@ bool ClipboardSync::Announce(const ClipboardContent& content) {
     return true;
   }
 
-  // What may be asked for: with files only their names as text (a file
-  // manager's copy also carries icons and such, which the files make
-  // pointless).
   ClipboardContent offered;
-  offered.files = content.files;
   for (const auto& f : content.formats) {
-    if (f.data.empty() || !KnownMime(f.mime) || offered.formats.size() >= 8) continue;
-    if (!content.files.empty() && f.mime != kMimeText) continue;
+    if (f.data.empty() || !KnownMime(f.mime) || offered.Find(f.mime)) continue;
     if (TextMime(f.mime) && !IsValidUtf8(f.data)) continue;
-    if (offered.Find(f.mime)) continue;
     offered.formats.push_back(f);
   }
   if (offered.empty()) {
@@ -509,10 +433,9 @@ bool ClipboardSync::Announce(const ClipboardContent& content) {
   ClipboardAnnounce a;
   a.id = ++next_id_;
   for (const auto& f : offered.formats) a.formats.push_back(f.mime);
-  a.files = offered.files.size();
   if (!send_(kClipboardAnnounceMessageType, EncodeClipboardAnnounce(a))) return false;
   // Whatever was being sent for the previous copy is no use any more.
-  if (outgoing_) DropOutgoing("superseded", true, ClipboardTransferStatus::State::kCancelled, "superseded");
+  if (outgoing_) DropOutgoing("superseded", true);
   requests_.clear();
   announced_id_ = a.id;
   announced_ = std::move(offered);
@@ -521,93 +444,39 @@ bool ClipboardSync::Announce(const ClipboardContent& content) {
 }
 
 void ClipboardSync::HandleRequest(const std::string& payload, uint64_t now) {
+  (void)now;
   auto r = DecodeClipboardRequest(payload);
   if (!r) return;
-  if (!CanSend(options_.mode)) {
-    ClipboardOffer o;
-    o.id = ++next_id_;
-    o.request = r->id;
-    o.skipped_reason = "gone";
-    send_(kClipboardOfferMessageType, EncodeClipboardOffer(o));
-    return;
-  }
   requests_.push_back(*r);
-  ServeNextRequest(now);
+  ServeNextRequest();
 }
 
 // Answers the peer's requests one at a time: each gets an offer, then its data.
-void ClipboardSync::ServeNextRequest(uint64_t now) {
+void ClipboardSync::ServeNextRequest() {
   while (!outgoing_ && !requests_.empty()) {
     const ClipboardRequest r = requests_.front();
     requests_.pop_front();
     auto out = std::make_unique<Outgoing>(options_.pacer);
-    ClipboardOffer& offer = out->offer;
+    ClipboardOffer offer;
     offer.id = ++next_id_;
     offer.request = r.id;
-    uint64_t limit = 0;
-    if (r.announce != announced_id_) {
-      offer.skipped_reason = "gone";  // copied over since
-    } else if (!r.format.empty()) {
-      const std::string* data = announced_.Find(r.format);
-      if (!data) {
-        offer.skipped_reason = "gone";
-      } else if (data->size() > options_.max_format_bytes) {
-        Log("not sending " + r.format + " of " + Mib(data->size()) + " (limit " + Mib(options_.max_format_bytes) + ")");
-        offer.skipped_reason = "too_large";
-        offer.skipped_bytes = data->size();
-        offer.skipped_limit = options_.max_format_bytes;
-      } else {
-        offer.formats.push_back({r.format, data->size()});
-        out->format_data.push_back(*data);
-      }
+    const std::string* data = CanSend(options_.mode) && r.announce == announced_id_ ? announced_.Find(r.format) : nullptr;
+    if (!data) {
+      offer.skipped = "gone";  // copied over since (or never shared)
+    } else if (data->size() > options_.max_format_bytes) {
+      Log("not sending " + r.format + " of " + Mib(data->size()) + " (limit " + Mib(options_.max_format_bytes) + ")");
+      offer.skipped = "too_large";
     } else {
-      limit = std::min(options_.max_file_bytes, peer_hello_ ? peer_hello_->max_file_bytes : 0);
-      FileListLimits fl;
-      fl.max_bytes = limit;
-      fl.max_entries = options_.max_file_entries;
-      std::string error;
-      if (announced_.files.empty() || !ListFiles(announced_.files, fl, &offer, &out->sources, &error)) {
-        if (!error.empty()) Log(error);
-        offer.skipped_reason = "gone";
-      } else if (!offer.skipped_reason.empty()) {
-        offer.skipped_limit = limit;
-      }
+      offer.format = r.format;
+      offer.size = data->size();
+      out->id = offer.id;
+      out->data = *data;
     }
     if (!send_(kClipboardOfferMessageType, EncodeClipboardOffer(offer))) {
       requests_.clear();  // not connected: the peer's promise gives up by itself
       return;
     }
-    if (offer.skipped_reason == "too_large" || offer.skipped_reason == "too_many" ||
-        offer.skipped_reason == "not_accepted") {
-      if (r.format.empty()) {
-        ClipboardTransferStatus s;
-        s.direction = ClipboardTransferStatus::Direction::kSending;
-        s.state = ClipboardTransferStatus::State::kSkipped;
-        s.files = offer.skipped_files;
-        s.detail = offer.skipped_reason;
-        s.skipped_bytes = offer.skipped_bytes;
-        s.limit_bytes = limit;
-        s.name = std::filesystem::path(announced_.files.front()).filename().string();
-        Log("files not sent (" + s.detail + "): " + std::to_string(s.files) + " files, " + Mib(s.skipped_bytes) +
-            " or more; limit " + Mib(limit));
-        Report(s);
-      }
-      continue;
-    }
-    if (!offer.skipped_reason.empty()) continue;
-    out->sizes = offer.ItemSizes();
-    out->total = offer.TotalBytes();
-    outgoing_ = std::move(out);
-    if (outgoing_->total == 0) {
-      // Only empty files and directories: the offer is all there is.
-      ReportOutgoing(ClipboardTransferStatus::State::kDone, "", now, true);
-      outgoing_.reset();
-      continue;
-    }
-    if (offer.FileCount() > 0) {
-      Log("sending " + std::to_string(offer.FileCount()) + " files, " + Mib(outgoing_->total));
-    }
-    ReportOutgoing(ClipboardTransferStatus::State::kRunning, "", now, true);
+    if (offer.skipped.empty()) outgoing_ = std::move(out);
   }
 }
 
@@ -621,58 +490,20 @@ uint64_t ClipboardSync::Pump(uint64_t now) {
     if (o.congestion_seen != 0 && c > o.congestion_seen) o.pacer.OnCongestion(now);
     o.congestion_seen = std::max<uint64_t>(c, 1);
   }
-  std::string buf;
-  while (o.item < o.sizes.size()) {
-    const uint64_t remaining = o.sizes[o.item] - o.offset;
-    if (remaining == 0) {
-      if (o.fd >= 0) {
-        close(o.fd);
-        o.fd = -1;
-      }
-      ++o.item;
-      o.offset = 0;
-      continue;
-    }
-    const size_t n = static_cast<size_t>(std::min<uint64_t>(kChunk, remaining));
+  while (o.sent < o.data.size()) {
+    const size_t n = static_cast<size_t>(std::min<uint64_t>(kChunk, o.data.size() - o.sent));
     if (!o.pacer.CanSend(now, n, o.sent - o.acked)) {
       if (o.sent - o.acked + n > o.pacer.Window()) return idle;  // waits for acknowledgements
       return o.pacer.NextSendUs(now, n);
     }
-    std::string_view bytes;
-    const size_t formats = o.offer.formats.size();
-    if (o.item < formats) {
-      bytes = std::string_view(o.format_data[o.item]).substr(o.offset, n);
-    } else {
-      const std::string& src = o.sources[o.item - formats];
-      if (o.fd < 0) {
-        o.fd = open(src.c_str(), O_RDONLY | O_CLOEXEC);
-        if (o.fd < 0) {
-          DropOutgoing("error", true, ClipboardTransferStatus::State::kFailed,
-                       "cannot read " + src + ": " + std::strerror(errno));
-          return idle;
-        }
-      }
-      buf.resize(n);
-      size_t got = 0;
-      while (got < n) {
-        const ssize_t r = pread(o.fd, buf.data() + got, n - got, static_cast<off_t>(o.offset + got));
-        if (r < 0 && errno == EINTR) continue;
-        if (r <= 0) break;
-        got += static_cast<size_t>(r);
-      }
-      if (got < n) {
-        DropOutgoing("error", true, ClipboardTransferStatus::State::kFailed, src + " changed while it was being copied");
-        return idle;
-      }
-      bytes = buf;
-    }
-    if (!send_(kClipboardDataMessageType, EncodeClipboardData({o.offer.id, static_cast<uint32_t>(o.item), o.offset}, bytes))) {
-      DropOutgoing("", false, ClipboardTransferStatus::State::kFailed, "the connection is gone");
+    const std::string_view bytes = std::string_view(o.data).substr(o.sent, n);
+    if (!send_(kClipboardDataMessageType, EncodeClipboardData({o.id, o.sent}, bytes))) {
+      Log("sending stopped: the connection is gone");
+      outgoing_.reset();
       return idle;
     }
     o.pacer.OnSent(now, n);
     o.sent += n;
-    o.offset += n;
     o.marks.emplace_back(o.sent, now);
     now = Now();
   }
@@ -681,7 +512,7 @@ uint64_t ClipboardSync::Pump(uint64_t now) {
 
 void ClipboardSync::HandleAck(const std::string& payload, uint64_t now) {
   auto a = DecodeClipboardAck(payload);
-  if (!a || !outgoing_ || a->id != outgoing_->offer.id) return;  // a cancelled offer's, late
+  if (!a || !outgoing_ || a->id != outgoing_->id) return;  // a cancelled offer's, late
   Outgoing& o = *outgoing_;
   if (a->bytes > o.sent || a->bytes < o.acked) return;
   uint64_t at = 0;
@@ -691,39 +522,15 @@ void ClipboardSync::HandleAck(const std::string& payload, uint64_t now) {
   }
   if (at != 0) o.pacer.OnAck(now, now - at);
   o.acked = a->bytes;
-  if (o.acked == o.total) {
-    if (o.offer.FileCount() > 0) Log("sent " + std::to_string(o.offer.FileCount()) + " files, " + Mib(o.total));
-    ReportOutgoing(ClipboardTransferStatus::State::kDone, "", now, true);
+  if (o.acked == o.data.size()) {
     outgoing_.reset();
-    ServeNextRequest(now);
-    return;
+    ServeNextRequest();
   }
-  ReportOutgoing(ClipboardTransferStatus::State::kRunning, "", now, false);
 }
 
-void ClipboardSync::ReportOutgoing(ClipboardTransferStatus::State state, const std::string& detail, uint64_t now,
-                                   bool force) {
-  if (!outgoing_ || outgoing_->offer.entries.empty()) return;  // only copies with files are shown
-  Outgoing& o = *outgoing_;
-  if (!force && now - o.reported_us < kStatusEveryUs) return;
-  o.reported_us = now;
-  ClipboardTransferStatus s;
-  s.direction = ClipboardTransferStatus::Direction::kSending;
-  s.state = state;
-  s.bytes_done = o.acked;
-  s.bytes_total = o.total;
-  s.files = o.offer.FileCount();
-  s.name = FirstRootName(o.offer);
-  s.detail = detail;
-  Report(s);
-}
-
-void ClipboardSync::DropOutgoing(const std::string& reason, bool tell_peer, ClipboardTransferStatus::State state,
-                                 const std::string& detail) {
+void ClipboardSync::DropOutgoing(const std::string& reason, bool tell_peer) {
   if (!outgoing_) return;
-  if (tell_peer) send_(kClipboardCancelMessageType, EncodeClipboardCancel({outgoing_->offer.id, true, reason}));
-  if (state == ClipboardTransferStatus::State::kFailed) Log("sending failed: " + detail);
-  if (reason != "superseded") ReportOutgoing(state, detail, Now(), true);
+  if (tell_peer) send_(kClipboardCancelMessageType, EncodeClipboardCancel({outgoing_->id, true, reason}));
   outgoing_.reset();
 }
 
@@ -735,20 +542,17 @@ void ClipboardSync::HandleAnnounce(const std::string& payload) {
   if (!CanReceive(options_.mode)) return;  // nothing of the peer's is pasted here
   DropPromise();
   // The peer copied something newer than what this side was sending it.
-  if (outgoing_) DropOutgoing("superseded", true, ClipboardTransferStatus::State::kCancelled, "superseded");
+  if (outgoing_) DropOutgoing("superseded", true);
   requests_.clear();
   announced_id_ = 0;
 
   std::vector<std::string> formats;
   for (const auto& f : a->formats) {
-    if (KnownMime(f)) formats.push_back(f);
+    if (KnownMime(f) && std::find(formats.begin(), formats.end(), f) == formats.end()) formats.push_back(f);
   }
-  const bool take_files = !options_.staging_dir.empty() && options_.max_file_bytes > 0;
-  const size_t files = take_files ? static_cast<size_t>(a->files) : 0;
-  if (formats.empty() && files == 0) return;  // nothing that could be pasted here
+  if (formats.empty()) return;  // nothing that could be pasted here
   peer_announce_ = *a;
   peer_announce_->formats = formats;
-  peer_announce_->files = files;
   {
     std::lock_guard lock(hub_->mu);
     hub_->announce = a->id;
@@ -756,7 +560,7 @@ void ClipboardSync::HandleAnnounce(const std::string& payload) {
   }
   eager_ = options_.fetch_on_announce;
   if (!eager_) {
-    auto promise = std::make_shared<ClipboardPromise>(hub_, a->id, formats, files);
+    auto promise = std::make_shared<ClipboardPromise>(hub_, a->id, formats);
     if (std::optional<int64_t> written = clipboard_->WritePromise(promise)) {
       seen_count_ = *written;
       send_pending_ = false;
@@ -767,8 +571,7 @@ void ClipboardSync::HandleAnnounce(const std::string& payload) {
   }
   // Everything, now.
   eager_content_ = {};
-  for (const auto& f : formats) LocalFetch(a->id, FormatKey(f));
-  if (files > 0) LocalFetch(a->id, kFilesKey);
+  for (const auto& f : formats) LocalFetch(a->id, f);
 }
 
 void ClipboardSync::DropPromise() {
@@ -777,7 +580,7 @@ void ClipboardSync::DropPromise() {
   eager_ = false;
   eager_content_ = {};
   pending_requests_.clear();
-  if (incoming_) DropIncoming("superseded", true, ClipboardTransferStatus::State::kCancelled, "superseded");
+  if (incoming_) DropIncoming("superseded", true, "");
   peer_announce_.reset();
   {
     std::lock_guard lock(hub_->mu);
@@ -787,51 +590,42 @@ void ClipboardSync::DropPromise() {
   hub_->cv.notify_all();
 }
 
-void ClipboardSync::LocalFetch(uint64_t announce, const std::string& key) {
+void ClipboardSync::LocalFetch(uint64_t announce, const std::string& mime) {
   if (!peer_announce_ || peer_announce_->id != announce) return;  // the promise is void already
-  for (const auto& [id, k] : pending_requests_) {
-    if (k == key) return;  // asked already
+  for (const auto& [id, m] : pending_requests_) {
+    if (m == mime) return;  // asked already
   }
-  if (incoming_ && incoming_key_ == key) return;
-  ClipboardRequest r;
-  r.announce = announce;
-  r.id = ++next_id_;
-  if (IsFormatKey(key)) r.format = MimeOf(key);
+  if (incoming_ && incoming_->mime == mime) return;
+  ClipboardRequest r{announce, ++next_id_, mime};
   if (!send_(kClipboardRequestMessageType, EncodeClipboardRequest(r))) {
-    FinishFetch(key, false, {}, {}, "not connected");
+    FinishFetch(mime, false, {}, "not connected");
     return;
   }
-  pending_requests_.emplace_back(r.id, key);
+  pending_requests_.emplace_back(r.id, mime);
 }
 
-void ClipboardSync::FinishFetch(const std::string& key, bool ok, std::string data, std::vector<std::string> files,
-                                const std::string& why) {
-  if (!ok && !why.empty()) Log("cannot paste the peer's " + (IsFormatKey(key) ? MimeOf(key) : std::string("files")) + ": " + why);
+void ClipboardSync::FinishFetch(const std::string& mime, bool ok, std::string data, const std::string& why) {
+  if (!ok && !why.empty()) Log("cannot paste the peer's " + mime + ": " + why);
   if (eager_) {
-    if (ok && IsFormatKey(key)) eager_content_.formats.push_back({MimeOf(key), data});
-    if (ok && !IsFormatKey(key)) eager_content_.files = files;
+    if (ok) eager_content_.formats.push_back({mime, data});
     if (pending_requests_.empty() && !incoming_) {
       eager_ = false;
-      if (!eager_content_.empty()) {
-        // In the order announced, as a promise would offer them.
-        ClipboardContent c;
-        for (const auto& m : peer_announce_ ? peer_announce_->formats : std::vector<std::string>{}) {
-          if (const std::string* d = eager_content_.Find(m)) c.formats.push_back({m, *d});
-        }
-        c.files = std::move(eager_content_.files);
-        eager_content_ = {};
-        WriteToClipboard(c);
+      // In the order announced, as a promise would offer them.
+      ClipboardContent c;
+      for (const auto& m : peer_announce_ ? peer_announce_->formats : std::vector<std::string>{}) {
+        if (const std::string* d = eager_content_.Find(m)) c.formats.push_back({m, *d});
       }
+      eager_content_ = {};
+      if (!c.empty()) WriteToClipboard(c);
     }
   }
   {
     std::lock_guard lock(hub_->mu);
     if (peer_announce_ && hub_->announce == peer_announce_->id) {
-      auto& r = hub_->results[key];
+      auto& r = hub_->results[mime];
       r.done = true;
       r.ok = ok;
       r.data = std::move(data);
-      r.files = std::move(files);
     }
   }
   hub_->cv.notify_all();
@@ -840,7 +634,7 @@ void ClipboardSync::FinishFetch(const std::string& key, bool ok, std::string dat
 void ClipboardSync::HandleOffer(const std::string& payload) {
   std::optional<ClipboardOffer> offer = DecodeClipboardOffer(payload);
   if (!offer) {
-    Log("ignored a malformed or unsafe offer from the peer");
+    Log("ignored a malformed offer from the peer");
     return;
   }
   auto refuse = [&](const std::string& reason) {
@@ -853,204 +647,65 @@ void ClipboardSync::HandleOffer(const std::string& payload) {
     refuse("refused");
     return;
   }
-  const std::string key = it->second;
+  const std::string mime = it->second;
   pending_requests_.erase(it);
-  if (incoming_) DropIncoming("superseded", true, ClipboardTransferStatus::State::kCancelled, "superseded");
-
-  if (!offer->skipped_reason.empty()) {
-    if (!IsFormatKey(key) && offer->skipped_reason != "gone") {
-      ClipboardTransferStatus s;
-      s.direction = ClipboardTransferStatus::Direction::kReceiving;
-      s.state = ClipboardTransferStatus::State::kSkipped;
-      s.files = offer->skipped_files;
-      s.detail = offer->skipped_reason;
-      s.skipped_bytes = offer->skipped_bytes;
-      s.limit_bytes = offer->skipped_limit;
-      Report(s);
-    }
-    FinishFetch(key, false, {}, {}, offer->skipped_reason);
+  if (incoming_) DropIncoming("superseded", true, "");
+  if (!offer->skipped.empty()) {
+    FinishFetch(mime, false, {}, offer->skipped);
     return;
   }
-  // What was asked, and no more than this side takes.
-  uint64_t format_bytes = 0;
-  for (const auto& f : offer->formats) format_bytes += f.size;
-  const bool as_asked = IsFormatKey(key)
-                            ? offer->entries.empty() && offer->formats.size() == 1 && offer->formats[0].mime == MimeOf(key)
-                            : offer->formats.empty();
-  if (!as_asked) {
+  if (offer->format != mime) {
     refuse("error");
-    FinishFetch(key, false, {}, {}, "the peer sent something else");
+    FinishFetch(mime, false, {}, "the peer sent something else");
     return;
   }
-  if (format_bytes > options_.max_format_bytes) {
+  if (offer->size > options_.max_format_bytes) {
     refuse("too_large");
-    FinishFetch(key, false, {}, {}, Mib(format_bytes) + " is over the limit of " + Mib(options_.max_format_bytes));
+    FinishFetch(mime, false, {}, Mib(offer->size) + " is over the limit of " + Mib(options_.max_format_bytes));
     return;
   }
-  if (!offer->entries.empty() &&
-      (options_.staging_dir.empty() || offer->FileBytes() > options_.max_file_bytes ||
-       offer->entries.size() > options_.max_file_entries * 10)) {
-    refuse("too_large");
-    FinishFetch(key, false, {}, {}, Mib(offer->FileBytes()) + " of files is over the limit of " + Mib(options_.max_file_bytes));
-    return;
-  }
-
-  auto in = std::make_unique<Incoming>();
-  in->offer = *offer;
-  in->sizes = offer->ItemSizes();
-  in->total = offer->TotalBytes();
-  in->format_data.resize(offer->formats.size());
-  for (size_t i = 0; i < offer->formats.size(); ++i) {
-    in->entry_of.push_back(SIZE_MAX);
-    in->format_data[i].reserve(static_cast<size_t>(offer->formats[i].size));
-  }
-  for (size_t i = 0; i < offer->entries.size(); ++i) {
-    if (offer->entries[i].kind == OfferEntry::Kind::kFile) in->entry_of.push_back(i);
-  }
-  if (!offer->entries.empty()) {
-    std::string error;
-    in->dir = StagingDir::Create(options_.staging_dir, *offer, &error);
-    if (!in->dir) {
-      refuse("error");
-      ClipboardTransferStatus s;
-      s.direction = ClipboardTransferStatus::Direction::kReceiving;
-      s.state = ClipboardTransferStatus::State::kFailed;
-      s.files = offer->FileCount();
-      s.name = FirstRootName(*offer);
-      s.detail = error;
-      Report(s);
-      FinishFetch(key, false, {}, {}, error);
-      return;
-    }
-    Log("receiving " + std::to_string(offer->FileCount()) + " files, " + Mib(in->total));
-  }
-  incoming_ = std::move(in);
-  incoming_key_ = key;
-  ReportIncoming(ClipboardTransferStatus::State::kRunning, "", Now(), true);
-  AdvanceIncoming();
-}
-
-// Past items with no bytes (empty files are created here); completes the
-// offer after the last item.
-void ClipboardSync::AdvanceIncoming() {
-  while (incoming_ && incoming_->item < incoming_->sizes.size() && incoming_->sizes[incoming_->item] == 0) {
-    Incoming& in = *incoming_;
-    const size_t entry = in.entry_of[in.item];
-    if (entry != SIZE_MAX) {
-      std::string error;
-      if (!in.dir->Open(entry, &error) || !in.dir->Close(&error)) {
-        DropIncoming("error", true, ClipboardTransferStatus::State::kFailed, error);
-        return;
-      }
-    }
-    ++in.item;
-    in.offset = 0;
-  }
-  if (incoming_ && incoming_->item == incoming_->sizes.size()) CompleteIncoming();
+  incoming_ = std::make_unique<Incoming>();
+  incoming_->id = offer->id;
+  incoming_->mime = mime;
+  incoming_->size = offer->size;
+  incoming_->data.reserve(static_cast<size_t>(offer->size));
+  if (offer->size == 0) CompleteIncoming();
 }
 
 void ClipboardSync::HandleData(const std::string& payload) {
   std::string_view bytes;
   auto h = DecodeClipboardData(payload, &bytes);
-  if (!h || !incoming_ || h->id != incoming_->offer.id) return;  // a cancelled offer's, late
+  if (!h || !incoming_ || h->id != incoming_->id) return;  // a cancelled offer's, late
   Incoming& in = *incoming_;
-  if (h->item != in.item || h->offset != in.offset || in.item >= in.sizes.size() ||
-      bytes.size() > in.sizes[in.item] - in.offset || bytes.empty()) {
-    DropIncoming("error", true, ClipboardTransferStatus::State::kFailed, "the peer sent data out of order");
+  if (h->offset != in.data.size() || bytes.empty() || bytes.size() > in.size - in.data.size()) {
+    DropIncoming("error", true, "the peer sent data out of order");
     return;
   }
-  const size_t entry = in.entry_of[in.item];
-  std::string error;
-  if (entry == SIZE_MAX) {
-    in.format_data[in.item].append(bytes);
-  } else {
-    if (!in.file_open) {
-      if (!in.dir->Open(entry, &error)) {
-        DropIncoming("error", true, ClipboardTransferStatus::State::kFailed, error);
-        return;
-      }
-      in.file_open = true;
-    }
-    if (!in.dir->Append(bytes, &error)) {
-      DropIncoming("error", true, ClipboardTransferStatus::State::kFailed, error);
-      return;
-    }
-  }
-  in.offset += bytes.size();
-  in.written += bytes.size();
-  if (in.offset == in.sizes[in.item]) {
-    if (in.file_open) {
-      in.file_open = false;
-      if (!in.dir->Close(&error)) {
-        DropIncoming("error", true, ClipboardTransferStatus::State::kFailed, error);
-        return;
-      }
-    }
-    ++in.item;
-    in.offset = 0;
-  }
+  in.data.append(bytes);
   {
     // A paste waiting for this is still getting somewhere.
     std::lock_guard lock(hub_->mu);
-    if (auto r = hub_->results.find(incoming_key_); r != hub_->results.end()) r->second.progress_us = SteadyUs();
+    if (auto r = hub_->results.find(in.mime); r != hub_->results.end()) r->second.progress_us = SteadyUs();
   }
-  // Written (to memory or disk) before it is acknowledged: a slow disk
-  // slows the sender down.
-  send_(kClipboardAckMessageType, EncodeClipboardAck({in.offer.id, in.written}));
-  ReportIncoming(ClipboardTransferStatus::State::kRunning, "", Now(), false);
-  AdvanceIncoming();
+  send_(kClipboardAckMessageType, EncodeClipboardAck({in.id, in.data.size()}));
+  if (in.data.size() == in.size) CompleteIncoming();
 }
 
 void ClipboardSync::CompleteIncoming() {
-  ReportIncoming(ClipboardTransferStatus::State::kDone, "", Now(), true);
   std::unique_ptr<Incoming> in = std::move(incoming_);
-  const std::string key = std::move(incoming_key_);
-  incoming_key_.clear();
-  if (IsFormatKey(key)) {
-    std::string data = std::move(in->format_data[0]);
-    if (TextMime(MimeOf(key)) && !IsValidUtf8(data)) {
-      FinishFetch(key, false, {}, {}, "not valid UTF-8");
-      return;
-    }
-    FinishFetch(key, true, std::move(data), {}, "");
+  if (TextMime(in->mime) && !IsValidUtf8(in->data)) {
+    FinishFetch(in->mime, false, {}, "not valid UTF-8");
     return;
   }
-  in->dir->Finish();
-  std::vector<std::string> paths = in->dir->RootPaths();
-  // Files fetched for earlier pastes are no longer on the clipboard.
-  RemoveStagingDirs(options_.staging_dir, in->dir->path());
-  Log("received " + std::to_string(in->offer.FileCount()) + " files, " + Mib(in->total));
-  FinishFetch(key, true, {}, std::move(paths), "");
+  FinishFetch(in->mime, true, std::move(in->data), "");
 }
 
-void ClipboardSync::ReportIncoming(ClipboardTransferStatus::State state, const std::string& detail, uint64_t now,
-                                   bool force) {
-  if (!incoming_ || incoming_->offer.entries.empty()) return;  // only copies with files are shown
-  Incoming& in = *incoming_;
-  if (!force && now - in.reported_us < kStatusEveryUs) return;
-  in.reported_us = now;
-  ClipboardTransferStatus s;
-  s.direction = ClipboardTransferStatus::Direction::kReceiving;
-  s.state = state;
-  s.bytes_done = in.written;
-  s.bytes_total = in.total;
-  s.files = in.offer.FileCount();
-  s.name = FirstRootName(in.offer);
-  s.detail = detail;
-  Report(s);
-}
-
-void ClipboardSync::DropIncoming(const std::string& reason, bool tell_peer, ClipboardTransferStatus::State state,
-                                 const std::string& detail) {
+void ClipboardSync::DropIncoming(const std::string& reason, bool tell_peer, const std::string& why) {
   if (!incoming_) return;
-  if (tell_peer) send_(kClipboardCancelMessageType, EncodeClipboardCancel({incoming_->offer.id, false, reason}));
-  if (state == ClipboardTransferStatus::State::kFailed) Log("receiving failed: " + detail);
-  if (reason != "superseded") ReportIncoming(state, detail, Now(), true);
-  if (incoming_->dir) incoming_->dir->Remove();
+  if (tell_peer) send_(kClipboardCancelMessageType, EncodeClipboardCancel({incoming_->id, false, reason}));
+  const std::string mime = incoming_->mime;
   incoming_.reset();
-  const std::string key = std::move(incoming_key_);
-  incoming_key_.clear();
-  FinishFetch(key, false, {}, {}, reason == "superseded" ? "" : detail);
+  FinishFetch(mime, false, {}, why);
 }
 
 void ClipboardSync::HandleCancel(const std::string& payload) {
@@ -1058,16 +713,10 @@ void ClipboardSync::HandleCancel(const std::string& payload) {
   if (!c) return;
   if (c->from_sender) {
     // The peer gave up its own offer: ours to receive.
-    if (incoming_ && incoming_->offer.id == c->id) {
-      DropIncoming(c->reason, false,
-                   c->reason == "error" ? ClipboardTransferStatus::State::kFailed : ClipboardTransferStatus::State::kCancelled,
-                   c->reason == "error" ? "the other side could not read the files" : c->reason);
-    }
-  } else if (outgoing_ && outgoing_->offer.id == c->id) {
-    Log("the peer refused the copy (" + c->reason + ")");
-    DropOutgoing(c->reason == "superseded" ? "superseded" : c->reason, false,
-                 c->reason == "error" ? ClipboardTransferStatus::State::kFailed : ClipboardTransferStatus::State::kCancelled,
-                 c->reason == "error" ? "the other side could not save the files" : c->reason);
+    if (incoming_ && incoming_->id == c->id) DropIncoming(c->reason, false, c->reason == "superseded" ? "" : c->reason);
+  } else if (outgoing_ && outgoing_->id == c->id) {
+    if (c->reason != "superseded") Log("the peer refused the paste (" + c->reason + ")");
+    DropOutgoing(c->reason, false);
   }
 }
 

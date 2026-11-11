@@ -268,12 +268,9 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     // Older clients cannot ask at paste time; they get this computer's text
     // as before.
     so.push_text_to_older_peers = true;
-    so.max_file_bytes = options_.clipboard_file_limit;
-    so.staging_dir = options_.clipboard_staging_dir;
-    so.on_status = options_.on_clipboard_status;
     so.log = options_.log;
-    // File data yields to the picture: it slows down when frames are skipped
-    // for congestion.
+    // A large paste yields to the picture: it slows down when frames are
+    // skipped for congestion.
     so.congestion_events = [this]() -> uint64_t {
       rda_host* h = clipboard_host_.load();
       if (!h) return 0;

@@ -14,7 +14,6 @@ add_library(rdm_core STATIC
   src/control_client.cpp
   src/clipboard_sync.cpp
   src/clipboard_wire.cpp
-  src/clipboard_files.cpp
   src/transfer_pacer.cpp
   src/input_source_sync.cpp
   src/desktop.cpp

@@ -34,16 +34,9 @@ class RemoteSession {
     // to viewer.on_message.
     std::shared_ptr<Clipboard> clipboard;
     ClipboardMode clipboard_mode = ClipboardMode::kBoth;
-    // Copied files: at most this much file data per copy, either way (0 =
-    // no files); files from the server are put in clipboard_staging_dir
-    // (empty = none are taken).
-    uint64_t clipboard_file_limit = kDefaultClipboardFileLimit;
-    std::string clipboard_staging_dir;
     // Fetch what the server copies right away instead of when it is pasted
     // (a process with no main run loop, such as the command-line client).
     bool clipboard_fetch_on_announce = false;
-    // Progress of copies with files, for a display (the clipboard's thread).
-    std::function<void(const ClipboardTransferStatus&)> on_clipboard_status;
     std::function<void(const std::string&)> log;  // may be empty
     int udp_wait_ms = 4000;    // then fall back to TCP; 0 = no fallback
     // The session ended from the other side or the network: "server_closed",

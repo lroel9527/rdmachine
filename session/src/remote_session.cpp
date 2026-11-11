@@ -123,9 +123,6 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     ClipboardSync::Options so;
     so.mode = s->options_.clipboard_mode;
     so.fetch_on_announce = s->options_.clipboard_fetch_on_announce;
-    so.max_file_bytes = s->options_.clipboard_file_limit;
-    so.staging_dir = s->options_.clipboard_staging_dir;
-    so.on_status = s->options_.on_clipboard_status;
     so.log = s->options_.log;
     RemoteSession* raw = s.get();
     s->clipboard_ = std::make_unique<ClipboardSync>(

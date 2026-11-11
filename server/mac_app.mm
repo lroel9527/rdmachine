@@ -82,7 +82,6 @@ void StopApp() {
   NSButton* _pairing;
   NSButton* _viewOnly;
   NSPopUpButton* _clipboard;
-  NSTextField* _fileLimit;
   NSTextField* _fps;
   NSTextField* _bitrate;
   NSTextField* _note;
@@ -110,7 +109,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 }
 
 - (void)build {
-  _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 330)
+  _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 300)
                                         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                           backing:NSBackingStoreBuffered
                                             defer:YES];
@@ -123,7 +122,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _viewOnly = [NSButton checkboxWithTitle:@"只看不控（不接受对方的键盘和鼠标）" target:nil action:nil];
   _clipboard = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   for (NSString* t : kClipboardTitles) [_clipboard addItemWithTitle:t];
-  _fileLimit = NumberField(0, 1 << 20);
   _fps = NumberField(0, 240);
   _bitrate = NumberField(0, 1000000);
   _note = [NSTextField wrappingLabelWithString:@""];
@@ -135,7 +133,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     @[ [NSTextField labelWithString:@"登录："], _pairing ],
     @[ [NSTextField labelWithString:@"控制："], _viewOnly ],
     @[ [NSTextField labelWithString:@"剪贴板："], _clipboard ],
-    @[ [NSTextField labelWithString:@"复制文件上限："], WithHint(_fileLimit, @"MB，每次复制；更大的不传，0 = 不传文件") ],
     @[ [NSTextField labelWithString:@"帧率上限："], WithHint(_fps, @"fps，0 = 默认（60）") ],
     @[ [NSTextField labelWithString:@"码率上限："], WithHint(_bitrate, @"kbps，0 = 默认（8000）") ],
   ]];
@@ -166,7 +163,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   for (size_t i = 0; i < 4; ++i) {
     if (kClipboardModes[i] == s.clipboard_mode) [_clipboard selectItemAtIndex:static_cast<NSInteger>(i)];
   }
-  _fileLimit.integerValue = s.clipboard_file_limit_mb;
   _fps.integerValue = s.fps;
   _bitrate.integerValue = s.bitrate_kbps;
   _note.stringValue = overrides.length
@@ -188,7 +184,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   s.offer_pairing_codes = _pairing.state == NSControlStateValueOn;
   s.view_only = _viewOnly.state == NSControlStateValueOn;
   s.clipboard_mode = kClipboardModes[std::clamp<NSInteger>(_clipboard.indexOfSelectedItem, 0, 3)];
-  s.clipboard_file_limit_mb = static_cast<int32_t>(std::clamp<NSInteger>(_fileLimit.integerValue, 0, 1 << 20));
   s.fps = static_cast<int32_t>(std::clamp<NSInteger>(_fps.integerValue, 0, 240));
   s.bitrate_kbps = static_cast<int32_t>(std::clamp<NSInteger>(_bitrate.integerValue, 0, 1000000));
   if (self.onSave) self.onSave(s);

@@ -3,7 +3,6 @@
 // peer (an installed server shares it) and lose what the user copied.
 #import <AppKit/AppKit.h>
 #include <gtest/gtest.h>
-#include <sys/xattr.h>
 
 #include <filesystem>
 #include <fstream>
@@ -102,55 +101,25 @@ TEST_F(MacClipboardTest, RichTextAndImagesBothWays) {
   EXPECT_EQ(back.size.width, 4);
 }
 
-TEST_F(MacClipboardTest, FilesAreReadAsPathsWithTheirNames) {
+TEST_F(MacClipboardTest, CopiedFilesAreReadAsTheirNamesOnly) {
   std::ofstream(dir_ / "a.txt") << "a";
   fs::create_directories(dir_ / "folder");
   [pb_ clearContents];
-  // As Finder copies: one item per file, each with its file URL and name.
+  // As Finder copies: one item per file, each with its file URL, its name
+  // and an icon.
   NSMutableArray* items = [NSMutableArray array];
   for (NSString* name : @[ @"a.txt", @"folder" ]) {
     NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
     NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:(dir_ / name.UTF8String).c_str()]];
     [item setString:url.absoluteString forType:NSPasteboardTypeFileURL];
     [item setString:name forType:NSPasteboardTypeString];
+    [item setData:[NSData dataWithBytes:"II*\0" length:4] forType:NSPasteboardTypeTIFF];
     [items addObject:item];
   }
   ASSERT_TRUE([pb_ writeObjects:items]);
   auto c = clipboard_->Read();
   ASSERT_TRUE(c);
-  ASSERT_EQ(c->files.size(), 2u);
-  EXPECT_EQ(fs::canonical(c->files[0]), fs::canonical(dir_ / "a.txt"));
-  EXPECT_EQ(fs::canonical(c->files[1]), fs::canonical(dir_ / "folder"));
-  EXPECT_EQ(Text(*c), "a.txt\nfolder");  // every item's name; nothing but text with files
-  EXPECT_EQ(c->formats.size(), 1u);
-}
-
-TEST_F(MacClipboardTest, ReceivedFilesArePastableAndMarkedDownloaded) {
-  std::ofstream(dir_ / "got.txt") << "x";
-  fs::create_directories(dir_ / "dir" / "sub");
-  std::ofstream(dir_ / "dir" / "sub" / "inner.sh") << "echo";
-  ClipboardContent c;
-  c.formats = {{std::string(kMimeText), "got.txt"}};
-  c.files = {fs::canonical(dir_ / "got.txt").string(), fs::canonical(dir_ / "dir").string()};
-  const std::optional<int64_t> count = clipboard_->Write(c);
-  ASSERT_TRUE(count);
-  EXPECT_EQ(clipboard_->ChangeCount(), *count);
-  EXPECT_EQ(clipboard_->Read(), c);
-  // What Finder reads to paste.
-  NSArray<NSURL*>* urls = [pb_ readObjectsForClasses:@[ NSURL.class ]
-                                             options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
-  ASSERT_EQ(urls.count, 2u);
-  for (const auto& p : {dir_ / "got.txt", dir_ / "dir", dir_ / "dir" / "sub" / "inner.sh"}) {
-    char buf[128];
-    const ssize_t n = getxattr(p.c_str(), "com.apple.quarantine", buf, sizeof buf, 0, XATTR_NOFOLLOW);
-    ASSERT_GT(n, 0) << p;
-    EXPECT_NE(std::string(buf, static_cast<size_t>(n)).find("RDMachine"), std::string::npos);
-  }
-}
-
-TEST_F(MacClipboardTest, StagingIsInTheUsersCaches) {
-  const std::string d = ClipboardStagingDir();
-  EXPECT_NE(d.find("/Library/Caches/RDMachine/Clipboard"), std::string::npos) << d;
+  EXPECT_EQ(*c, ClipboardContent::Text("a.txt\nfolder"));  // every item's name; no icon
 }
 
 // ---- the peer's copy, promised on the pasteboard and fetched when read ----
@@ -166,7 +135,6 @@ class MacPromiseTest : public MacClipboardTest {
     ClipboardSync::Options o;
     o.poll_ms = 10;
     ClipboardSync::Options ob = o;
-    ob.staging_dir = (dir_ / "staging").string();
     copier_ = std::make_unique<ClipboardSync>(fake_, [this](uint32_t t, std::string_view p) {
       paster_->OnMessage(t, reinterpret_cast<const uint8_t*>(p.data()), p.size());
       return true;
@@ -233,32 +201,6 @@ TEST_F(MacPromiseTest, ImagesPasteAsPngAndTiff) {
   NSImage* back = [[NSImage alloc] initWithData:tiff];
   EXPECT_EQ(back.size.width, 5);
   EXPECT_EQ([pb_ dataForType:NSPasteboardTypePNG].length, png.length);
-}
-
-TEST_F(MacPromiseTest, FilesArriveWhenPasted) {
-  fs::create_directories(dir_ / "src" / "folder");
-  std::ofstream(dir_ / "src" / "folder" / "inner.txt") << "inside";
-  std::ofstream(dir_ / "src" / "top.txt") << "top";
-  ClipboardContent c;
-  c.formats = {{std::string(kMimeText), "folder\ntop.txt"}};
-  c.files = {(dir_ / "src" / "folder").string(), (dir_ / "src" / "top.txt").string()};
-  const NSInteger before = pb_.changeCount;
-  fake_->CopyContent(c);
-  ASSERT_TRUE(WaitForChange(before));
-  EXPECT_FALSE(fs::exists(dir_ / "staging") && !fs::is_empty(dir_ / "staging"));  // nothing yet
-  // What Finder reads to paste.
-  NSArray<NSURL*>* urls = [pb_ readObjectsForClasses:@[ NSURL.class ]
-                                             options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
-  ASSERT_EQ(urls.count, 2u);
-  const fs::path folder = urls[0].path.UTF8String, top = urls[1].path.UTF8String;
-  EXPECT_EQ(folder.filename(), "folder");
-  EXPECT_EQ(top.filename(), "top.txt");
-  EXPECT_EQ(fs::canonical(folder.parent_path().parent_path()), fs::canonical(dir_ / "staging"));
-  std::ifstream in(folder / "inner.txt");
-  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), "inside");
-  char buf[128];
-  EXPECT_GT(getxattr(top.c_str(), "com.apple.quarantine", buf, sizeof buf, 0, XATTR_NOFOLLOW), 0);
-  EXPECT_EQ(std::string([pb_ stringForType:NSPasteboardTypeString].UTF8String), "folder\ntop.txt");
 }
 
 TEST_F(MacPromiseTest, APromiseFromAStoppedSessionGivesNothing) {

@@ -5,13 +5,9 @@
 // pbcopy use it without a run loop.
 #import <AppKit/AppKit.h>
 
-#include <sys/xattr.h>
-
 #include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
-#include <filesystem>
 
 #include "rdmachine/session/system_clipboard.h"
 
@@ -35,22 +31,6 @@ NSString* NS(const std::string& s) {
   return [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSUTF8StringEncoding];
 }
 
-// As a browser marks a download, so opening a received app or script asks
-// first (Gatekeeper). Applied to everything inside a received folder too.
-void MarkDownloaded(const std::string& path) {
-  char value[64];
-  snprintf(value, sizeof value, "0081;%08lx;RDMachine;", static_cast<unsigned long>(time(nullptr)));
-  auto mark = [&](const std::filesystem::path& p) {
-    setxattr(p.c_str(), "com.apple.quarantine", value, strlen(value), 0, XATTR_NOFOLLOW);
-  };
-  mark(path);
-  std::error_code ec;
-  if (!std::filesystem::is_directory(std::filesystem::symlink_status(path, ec))) return;
-  for (std::filesystem::recursive_directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
-    mark(it->path());
-  }
-}
-
 NSPasteboardType TypeOf(const std::string& mime) {
   if (mime == kMimeText) return NSPasteboardTypeString;
   if (mime == kMimeRtf) return NSPasteboardTypeRTF;
@@ -67,18 +47,16 @@ NSPasteboardType TypeOf(const std::string& mime) {
 // the application (the client's remote window, the server's menu) stays
 // responsive.
 @interface RDMPromiseProvider : NSObject <NSPasteboardItemDataProvider>
-- (instancetype)initWithPromise:(std::shared_ptr<rdm::ClipboardPromise>)promise file:(size_t)index;
+- (instancetype)initWithPromise:(std::shared_ptr<rdm::ClipboardPromise>)promise;
 @end
 
 @implementation RDMPromiseProvider {
   std::shared_ptr<rdm::ClipboardPromise> _promise;
-  size_t _index;  // which file this item stands for
 }
 
-- (instancetype)initWithPromise:(std::shared_ptr<rdm::ClipboardPromise>)promise file:(size_t)index {
+- (instancetype)initWithPromise:(std::shared_ptr<rdm::ClipboardPromise>)promise {
   if (!(self = [super init])) return nil;
   _promise = std::move(promise);
-  _index = index;
   return self;
 }
 
@@ -87,15 +65,6 @@ NSPasteboardType TypeOf(const std::string& mime) {
   // from another thread) there is no run loop of ours to keep going.
   std::function<void()> pump;
   if (NSThread.isMainThread) pump = [] { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false); };
-  if ([type isEqualToString:NSPasteboardTypeFileURL]) {
-    auto files = _promise->FetchFiles(pump);
-    if (!files || _index >= files->size()) return;
-    const std::string& path = (*files)[_index];
-    rdm::MarkDownloaded(path);
-    NSURL* url = [NSURL fileURLWithPath:rdm::NS(path)];
-    [item setString:url.absoluteString forType:type];
-    return;
-  }
   if ([type isEqualToString:NSPasteboardTypeTIFF]) {
     // For applications that only read TIFF.
     auto png = _promise->FetchFormat(std::string(rdm::kMimePng), pump);
@@ -136,18 +105,14 @@ class MacClipboard : public Clipboard {
       NSArray<NSPasteboardType>* types = pb.types;
       if ([types containsObject:kConcealedType] || [types containsObject:kTransientType]) return std::nullopt;
       ClipboardContent c;
-      NSArray<NSURL*>* urls = [pb readObjectsForClasses:@[ NSURL.class ]
-                                                options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
-      for (NSURL* url in urls) {
-        // Finder puts file reference URLs (file:///.file/id=...).
-        NSString* path = url.filePathURL.path;
-        if (path.length > 0) c.files.push_back(Utf8(path));
-      }
       if (NSString* s = [pb stringForType:NSPasteboardTypeString]) {
         c.formats.push_back({std::string(kMimeText), Utf8(s)});
       }
-      // With files only their names: Finder adds icons and such.
-      if (!c.files.empty()) return c;
+      // Files copied in Finder: only their names (the text above). The
+      // files themselves are not shared, nor Finder's icons of them.
+      if ([pb canReadObjectForClasses:@[ NSURL.class ] options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}]) {
+        return c;
+      }
       if (NSData* rtf = [pb dataForType:NSPasteboardTypeRTF]) c.formats.push_back({std::string(kMimeRtf), Bytes(rtf)});
       if (NSString* html = [pb stringForType:NSPasteboardTypeHTML]) {
         c.formats.push_back({std::string(kMimeHtml), Utf8(html)});
@@ -171,16 +136,6 @@ class MacClipboard : public Clipboard {
       // clearContents takes ownership and returns the new change count;
       // the writes after it do not change it again.
       const NSInteger count = [pb clearContents];
-      if (!content.files.empty()) {
-        NSMutableArray<NSURL*>* urls = [NSMutableArray array];
-        for (const auto& f : content.files) {
-          MarkDownloaded(f);
-          NSString* path = NS(f);
-          if (path) [urls addObject:[NSURL fileURLWithPath:path]];
-        }
-        if (![pb writeObjects:urls]) return std::nullopt;
-      }
-      // The formats go on the first item (Finder puts the names there too).
       for (const auto& f : content.formats) {
         BOOL ok = YES;
         if (f.mime == kMimeText) {
@@ -208,25 +163,14 @@ class MacClipboard : public Clipboard {
         if (NSPasteboardType t = TypeOf(mime)) [formats addObject:t];
         if (mime == kMimePng) [formats addObject:NSPasteboardTypeTIFF];
       }
-      NSMutableArray<NSPasteboardItem*>* items = [NSMutableArray array];
-      NSMutableArray* providers = [NSMutableArray array];
-      // As Finder copies: one item per file; the formats (the names) on the first.
-      const size_t n = std::max<size_t>(1, promise->files());
-      for (size_t i = 0; i < n; ++i) {
-        NSMutableArray<NSPasteboardType>* types = [NSMutableArray array];
-        if (promise->files() > 0) [types addObject:NSPasteboardTypeFileURL];
-        if (i == 0) [types addObjectsFromArray:formats];
-        if (types.count == 0) continue;
-        RDMPromiseProvider* p = [[RDMPromiseProvider alloc] initWithPromise:promise file:i];
-        NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
-        if (![item setDataProvider:p forTypes:types]) return std::nullopt;
-        [items addObject:item];
-        [providers addObject:p];
-      }
-      if (items.count == 0) return std::nullopt;
+      if (formats.count == 0) return std::nullopt;
+      RDMPromiseProvider* provider = [[RDMPromiseProvider alloc] initWithPromise:promise];
+      NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
+      if (![item setDataProvider:provider forTypes:formats]) return std::nullopt;
+      NSArray<NSPasteboardItem*>* items = @[ item ];
       const NSInteger count = [pb clearContents];
       if (![pb writeObjects:items]) return std::nullopt;
-      providers_ = providers;  // kept until the next promise
+      provider_ = provider;  // kept until the next promise
       promise_count_ = static_cast<int64_t>(count);
       return static_cast<int64_t>(count);
     }
@@ -240,21 +184,13 @@ class MacClipboard : public Clipboard {
 
   const std::string name_;
   std::atomic<int64_t> promise_count_{-1};  // the change count of our promise on the pasteboard
-  NSArray* providers_ = nil;
+  RDMPromiseProvider* provider_ = nil;
 };
 
 }  // namespace
 
 std::shared_ptr<Clipboard> SystemClipboard(const std::string& pasteboard_name) {
   return std::make_shared<MacClipboard>(pasteboard_name);
-}
-
-std::string ClipboardStagingDir() {
-  @autoreleasepool {
-    NSURL* caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
-    if (!caches) return {};
-    return Utf8([caches URLByAppendingPathComponent:@"RDMachine/Clipboard" isDirectory:YES].path);
-  }
 }
 
 }  // namespace rdm

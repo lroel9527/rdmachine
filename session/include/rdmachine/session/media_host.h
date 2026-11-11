@@ -38,13 +38,6 @@ struct MediaHostOptions {
   // sessions never take the client's clipboard.
   std::shared_ptr<Clipboard> clipboard;
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
-  // Copied files: at most this much file data per copy, either way (0 = no
-  // files); files from the client are put in clipboard_staging_dir (empty =
-  // none are taken).
-  uint64_t clipboard_file_limit = kDefaultClipboardFileLimit;
-  std::string clipboard_staging_dir;
-  // Progress of copies with files (the clipboard's thread).
-  std::function<void(const ClipboardTransferStatus&)> on_clipboard_status;
   // Builds the desktop a client asks for (docs/protocol.md, "请求桌面").
   // Empty = requests are not honoured: the display is shared as it is.
   VirtualDesktopFactory virtual_desktop;
