@@ -5,6 +5,8 @@
 #   dist/RDMachine Server.app    the server (rdmachine-server), a menu bar app
 #   dist/rdmachine-server.sh     starts the server app from Terminal
 #   dist/rdmachine-connect       command-line test client
+#   dist/rdmachine-service       runs the server as a service: login window,
+#                                start at login, restart by launchd (sudo)
 #
 #   packaging/macos/package.sh [--build-dir DIR] [--out DIR] [--identity NAME]
 #                              [--keychain PATH] [--build] [--zip] [--dmg]
@@ -106,6 +108,7 @@ make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Inf
 ditto "$bin/rdmachine-connect" "$out/rdmachine-connect"
 codesign "${sign_args[@]}" --identifier org.rdmachine.connect "$out/rdmachine-connect"
 install -m 755 "$pkg/rdmachine-server.sh" "$out/rdmachine-server.sh"
+install -m 755 "$pkg/rdmachine-service" "$out/rdmachine-service"
 
 echo
 for app in "$out/RDMachine.app" "$out/RDMachine Server.app"; do
@@ -119,7 +122,7 @@ if [ "$do_zip" = 1 ]; then
   zip="$out/rdmachine-$version-macos.zip"
   stage=$(mktemp -d)
   mkdir "$stage/rdmachine-$version"
-  for f in "RDMachine.app" "RDMachine Server.app" rdmachine-server.sh rdmachine-connect; do
+  for f in "RDMachine.app" "RDMachine Server.app" rdmachine-server.sh rdmachine-connect rdmachine-service; do
     ditto "$out/$f" "$stage/rdmachine-$version/$f"
   done
   ditto -c -k --sequesterRsrc --keepParent "$stage/rdmachine-$version" "$zip"
@@ -138,6 +141,7 @@ if [ "$do_dmg" = 1 ]; then
   mkdir "$stage/Command Line Tools"
   ditto "$out/rdmachine-server.sh" "$stage/Command Line Tools/rdmachine-server.sh"
   ditto "$out/rdmachine-connect" "$stage/Command Line Tools/rdmachine-connect"
+  ditto "$out/rdmachine-service" "$stage/Command Line Tools/rdmachine-service"
   hdiutil create -quiet -volname "RDMachine $version" -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg"
   rm -rf "$stage"
   codesign "${sign_args[@]}" "$dmg"

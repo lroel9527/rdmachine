@@ -185,7 +185,34 @@ class MediaE2EDesktop : public MediaE2E {
   std::shared_ptr<FakeDesktops> desktops_ = std::make_shared<FakeDesktops>();
 };
 
+// A server in the login window session (inject_input stays off, so nothing
+// is ever typed into the real screen here).
+class MediaE2ELoginWindow : public MediaE2E {
+ protected:
+  void Configure(MediaHostOptions& mo) override {
+    mo.login_window = true;
+    mo.login_screen = [] { return LoginScreenState{true, true}; };
+  }
+};
+
 }  // namespace
+
+TEST_F(MediaE2ELoginWindow, TheSessionSaysItIsAtTheLoginWindow) {
+  Frames frames;
+  ConnectResult r;
+  auto s = RemoteSession::Start(Options(&frames), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_TRUE(s->session().login_window);
+  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
+}
+
+TEST_F(MediaE2E, AnOrdinarySessionIsNotAtTheLoginWindow) {
+  Frames frames;
+  ConnectResult r;
+  auto s = RemoteSession::Start(Options(&frames), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_FALSE(s->session().login_window);
+}
 
 TEST_F(MediaE2EDesktop, BuildsTheDesktopTheClientAsksFor) {
   Frames frames;

@@ -1091,6 +1091,22 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSProgressIndicator* _spinner;
   RemoteWindowController* _remote;
   std::unique_ptr<rdm::KnownHosts> _knownHosts;
+  // Login window hand-off (docs/protocol.md, "登录窗口"): the last password
+  // login, kept in memory only while its session shows the server's login
+  // window, so that once the user has logged in there the client connects
+  // again by itself and reaches the new desktop. Wiped as soon as that is
+  // done, given up, or the session was not at a login window.
+  std::string _reloginTarget, _reloginUser, _reloginPassword;
+  BOOL _remoteAtLoginWindow;  // the current session shows the login window
+  BOOL _relogging;            // connecting again after the hand-off
+  std::chrono::steady_clock::time_point _reloginUntil;
+}
+
+// Overwrites a secret before it is freed (a plain fill may be optimized away).
+static void WipeString(std::string& s) {
+  volatile char* p = s.data();
+  for (size_t i = 0; i < s.size(); ++i) p[i] = 0;
+  s.clear();
 }
 
 static NSTextField* Label(NSString* text, NSRect frame) {
@@ -1394,6 +1410,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     opts.control.auth.username = _user.stringValue.UTF8String;
     opts.control.auth.password = _password.stringValue.UTF8String;
   }
+  [self forgetRelogin];
+  if (opts.control.auth.method == rdm::AuthMethod::kPassword) {
+    _reloginTarget = target.UTF8String;
+    _reloginUser = opts.control.auth.username;
+    _reloginPassword = opts.control.auth.password;
+  }
   _password.stringValue = @"";
   _code.stringValue = @"";
 
@@ -1458,6 +1480,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [self setBusy:NO];
   if (!session) {
     _remote = nil;
+    if (_relogging && !changed && [self retryRelogin:result]) return;
+    _relogging = NO;
+    [self forgetRelogin];
     if (changed) {
       [self alert:@"The server's identity has changed"
              text:[NSString stringWithFormat:@"The fingerprint is not the one remembered for this server, so "
@@ -1470,6 +1495,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     return;
   }
   if (remote != _remote) return;  // superseded (cannot happen today); session closes here
+  _remoteAtLoginWindow = result.session.login_window;
+  if (_relogging) NSLog(@"rdmachine: reached the desktop after logging in at the login window");
+  _relogging = NO;
+  if (!_remoteAtLoginWindow) [self forgetRelogin];  // nothing to come back for
   [remote attachSession:std::move(session)];
   remote.window.title = [NSString stringWithFormat:@"%@ (%@)", NS(result.server.server_name), remote.window.title];
   __weak AppDelegate* weakSelf = self;
@@ -1480,6 +1509,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       AppDelegate* me = weakSelf;
       if (!me) return;
       me->_remote = nil;
+      if (!me->_relogging) [me forgetRelogin];  // closed by the user
       [me->_connectWindow makeKeyAndOrderFront:nil];
     });
   };
@@ -1490,8 +1520,52 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   ReleaseSecureInput();
 }
 
+- (void)forgetRelogin {
+  WipeString(_reloginTarget);
+  WipeString(_reloginUser);
+  WipeString(_reloginPassword);
+  _remoteAtLoginWindow = NO;
+}
+
+// After a login window session ends because the user logged in there: the
+// server in the new user session takes a moment to start (and the old one to
+// let go of the port), so keep trying for a while.
+- (void)relogin {
+  if (!_relogging || _remote) return;
+  _host.stringValue = NS(_reloginTarget);
+  _user.stringValue = NS(_reloginUser);
+  _usePairing.state = NSControlStateValueOff;
+  [self pairingToggled:nil];
+  _password.stringValue = NS(_reloginPassword);
+  [self connect:nil];
+}
+
+// Whether a failed attempt is worth repeating (and schedules it).
+- (BOOL)retryRelogin:(const rdm::ConnectResult&)result {
+  const std::string& e = result.error;
+  const bool transient = e == "connect_failed" || e == "connection_closed" || e == "timeout" || e == "busy" ||
+                         e == "not_console_user" || e == "internal" || e == "capture_denied" || e == "no_display";
+  if (!transient || std::chrono::steady_clock::now() > _reloginUntil) return NO;
+  NSLog(@"rdmachine: desktop not reachable yet (%s), trying again", e.c_str());
+  [self setBusy:YES];
+  [self performSelector:@selector(relogin) withObject:nil afterDelay:2.0];
+  return YES;
+}
+
 - (void)sessionEnded:(RemoteWindowController*)remote reason:(NSString*)reason {
   if (!remote || remote != _remote) return;
+  if (_remoteAtLoginWindow && !_reloginPassword.empty() &&
+      ([reason isEqualToString:@"server_shutdown"] || [reason isEqualToString:@"connection_lost"] ||
+       [reason isEqualToString:@"media_lost"])) {
+    // The login window went away: most likely the user logged in there.
+    // Connect again to the server of the new session, without asking.
+    _relogging = YES;
+    _reloginUntil = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    [remote.window close];
+    [self setBusy:YES];
+    [self performSelector:@selector(relogin) withObject:nil afterDelay:3.0];
+    return;
+  }
   [remote.window close];  // ends the session and brings back the connect window
   NSString* text = [reason isEqualToString:@"server_shutdown"] ? @"The server was stopped."
                    : [reason isEqualToString:@"media_lost"]    ? @"The picture connection was lost."

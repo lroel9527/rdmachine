@@ -127,6 +127,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `auth_token` | base64，32 字节 | 一次性令牌，客户端放进 rdaccel viewer 的 `auth_token`；服务端在 `on_auth` 里用常数时间比较核对，用一次就作废，30 秒内没用也作废 |
 | `displays` | 数组 | 可选的显示器：`index`、`name`、`width`、`height`（像素）、`scale`（每点像素数） |
 | `desktop` | 对象，可选 | 为这次请求建好的桌面（`width`、`height`、`scale`，尺寸可能被调整过）。没有这个字段：客户端没请求，或者服务端建不了，画面是服务端自己的显示器，客户端按比例缩放显示 |
+| `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后这条连接会断开，客户端应该自己重新连接，见下文“登录窗口和锁屏”。没有这个字段等于 `false` |
 
 客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
@@ -176,6 +177,16 @@ rdmachine 的客户端和服务端之间有两条连接：
 - 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `text_mode` 和这条消息（画面照常，只是不省），旧客户端不发。
 
 实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/main.mm`（`toggleTextMode:`、`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。
+
+## 登录窗口和锁屏
+
+被控 Mac 上有两份同一个服务端（`packaging/macos/rdmachine-service install` 装的两个 LaunchAgent）：用户会话里的那份（菜单栏应用）和登录窗口会话里的那份（`rdmachine-server --login-window`，没人登录时运行）。同一时刻只有其中一份在监听 4100，两份用同一个 TLS 身份（安装时从用户的配置目录复制到 `/Library/Application Support/rdmachine`），客户端看到的指纹一样。
+
+- **锁屏**：用户会话里的服务端照常工作，画面就是锁屏。用账号密码登录时，如果会话开始时屏幕锁着，服务端等画面连上后替用户把密码填进锁屏并回车。用配对码登录时不填（没有密码），用户在远程画面里自己输。
+- **登录窗口**：登录窗口里的服务端接受这台 Mac 上任何账号的密码（PAM），`session_ready.login_window` 为 `true`，并在画面连上后把密码填进登录窗口（登录窗口设成“姓名和密码”时先填账号、Tab，再填密码），回车登录。不提供配对码（没有人能看到）。
+- **交接**：用户在登录窗口登录后，登录窗口会话结束，那份服务端退出，连接断开（`bye`/连接丢失）；用户会话里的服务端随登录启动。客户端如果刚才的会话是 `login_window`，就用同一组账号密码自动重新连接（每 2 秒一次，最多 90 秒），连上的就是新登录用户的桌面。这组账号密码只在内存里保存到重新连上或放弃为止，之后清零；不是登录窗口的会话连上后立刻清零。
+- 填写用的按键：ASCII 按美式键盘的物理键发送（密码框接收按键比接收字符可靠），其他字符按字符发送；先轻按一下 Shift 唤醒显示器，1.5 秒后开始填。服务端不保存密码，用完清零，日志里只写“为某用户填了登录”。
+- 实现：`core/include/rdmachine/login_keys.h`（按键）、`session/include/rdmachine/session/login_screen.h`（锁屏状态、登录窗口设置）、`MediaHost` 的 `login_window` / `type_login`。
 
 ## 剪贴板
 
@@ -270,7 +281,7 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 
 ## 以后会加的
 
-- 登录窗口和锁屏时的连接（下一步先做）：服务端拆成 LaunchDaemon + 用户 / 登录窗口会话里的 agent。要加的消息：会话换到另一个图形会话时（登录、锁屏、切换用户），服务端在同一条控制连接上发新的端口、密钥和令牌；连到登录窗口时，客户端把用户输入的账号密码交给服务端，由服务端填进登录窗口（见[决定](decisions.md)的“从登录窗口登录”）。
+- 登录窗口和锁屏时的连接：已做，见上文“登录窗口和锁屏”。
 - 保持登录：`enroll_key`（登录后上传公钥）、`auth` 的 `key` 方式（对服务端随机数签名）、撤销。见[决定](decisions.md)的“保持登录”。
 - 被控端审批弹窗（NoMachine 的 0/1/2 三档）、双因素认证：以后。
 - 切换显示器、单独的文件传输窗口（大文件、选目录，类似 NoMachine 的 Transfer a file）：以后逐步加消息类型。断线后自动重连不做（见[决定](decisions.md)的“下一步范围”）。

@@ -18,6 +18,7 @@
 #include "rdmachine/clipboard_sync.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
+#include "rdmachine/session/login_screen.h"
 #include "rdmachine/session/virtual_desktop.h"
 
 namespace rdm {
@@ -41,6 +42,18 @@ struct MediaHostOptions {
   // Builds the desktop a client asks for (docs/protocol.md, "请求桌面").
   // Empty = requests are not honoured: the display is shared as it is.
   VirtualDesktopFactory virtual_desktop;
+  // The server runs in the login window session (docs/decisions.md, "登录
+  // 窗口和锁屏"): any account on this computer may log in with its password
+  // (there is no logged-in user to match), and sessions say so to the
+  // client (session_ready.login_window).
+  bool login_window = false;
+  // After a password login, type that password into the login window, or
+  // into the lock screen when it is up, so the remote user gets straight to
+  // the desktop. The password is kept in memory only between the login and
+  // the start of the session, and wiped once typed.
+  bool type_login = true;
+  // Where the lock screen stands. Empty = QueryLoginScreen().
+  std::function<LoginScreenState()> login_screen;
   int32_t fps = 0;           // 0 = rdaccel's default
   int64_t bitrate_bps = 0;   // 0 = rdaccel's default
   std::function<void(const std::string&)> log;  // may be empty
@@ -100,6 +113,11 @@ class MediaHost : public ServerDelegate {
   // and start around it, which no rdaccel callback may do.
   void DesktopLoop();
   void StopDesktopLoop();
+  // Types the login of a password session into the login window or the lock
+  // screen, once the viewer is connected (its own thread; see type_login).
+  void TypeLogin(std::string username, std::string password, bool type_name, bool at_login_window);
+  void StopTypeLogin();
+  void Inject(const rda_input_event& ev);
   void Log(const std::string& line);
 
   const MediaHostOptions options_;
@@ -122,6 +140,18 @@ class MediaHost : public ServerDelegate {
   std::condition_variable desktop_cv_;
   std::optional<DesktopSpec> desktop_wanted_;  // the latest request not yet acted on
   bool desktop_stop_ = false;
+  // The last password login, until StartSession takes it (see type_login).
+  struct PendingLogin {
+    std::string username, password;
+    std::chrono::steady_clock::time_point at{};
+  };
+  std::mutex login_mu_;
+  PendingLogin pending_login_;
+  std::thread type_thread_;
+  std::mutex type_mu_;
+  std::condition_variable type_cv_;
+  bool type_stop_ = false;
+  std::mutex inject_mu_;  // the client's input and TypeLogin take turns
   std::thread stats_thread_;
   std::mutex stats_mu_;
   std::condition_variable stats_cv_;

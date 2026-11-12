@@ -451,6 +451,16 @@ void RunHeadlessApp() {
   }
 }
 
+bool AnotherInstanceRunning() {
+  NSString* bundle_id = NSBundle.mainBundle.bundleIdentifier;
+  if (bundle_id.length == 0) return false;  // not run from the app bundle
+  const pid_t self = NSProcessInfo.processInfo.processIdentifier;
+  for (NSRunningApplication* app in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle_id]) {
+    if (app.processIdentifier != self && !app.terminated) return true;
+  }
+  return false;
+}
+
 void ShowStartupError(const std::string& message) {
   @autoreleasepool {
     [NSApplication sharedApplication];

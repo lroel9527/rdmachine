@@ -67,6 +67,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.udp_port = s.port;
   mo.tcp_port = static_cast<uint16_t>(s.port + 1);
   mo.pam_service = options_.pam_service;
+  mo.login_window = options_.login_window;
   mo.inject_input = !s.view_only;
   mo.clipboard = SystemClipboard();
   mo.clipboard_mode = s.clipboard_mode;
@@ -79,7 +80,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   ControlServerOptions co;
   co.bind_address = options_.bind_address;
   co.port = s.port;
-  co.offer_pairing_codes = s.offer_pairing_codes;
+  co.offer_pairing_codes = s.offer_pairing_codes && !options_.login_window;
   auto server = std::make_unique<ControlServer>(*media, identity_, co);
   if (!server->Start(error)) return false;
   media_ = std::move(media);
@@ -87,7 +88,9 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   saved_ = saved;
   code_.clear();
   Log("listening on port " + std::to_string(server_->port()) + (s.view_only ? " (view only)" : "") +
-      ", clipboard " + ClipboardModeName(s.clipboard_mode) + (s.offer_pairing_codes ? "" : ", no pairing codes"));
+      ", clipboard " + ClipboardModeName(s.clipboard_mode) +
+      (s.offer_pairing_codes && !options_.login_window ? "" : ", no pairing codes") +
+      (options_.login_window ? ", login window" : ""));
   return true;
 }
 

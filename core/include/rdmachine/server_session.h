@@ -22,6 +22,7 @@ struct SessionGrant {
   uint16_t port = 0;
   std::vector<DisplayInfo> displays;
   std::optional<DesktopSpec> desktop;  // built for request.desktop
+  bool login_window = false;           // the picture is the login window
 };
 
 // Who a session is for, as the control connection saw it (for status

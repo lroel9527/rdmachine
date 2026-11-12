@@ -25,6 +25,11 @@ void RunMenuBarApp(ServerRuntime& runtime, const MenuBarAppInfo& info);
 // bare run loop the new display's size and scale stay unknown to it.
 void RunHeadlessApp();
 
+// Whether another copy of this application already runs in this login
+// session (started by the LaunchAgent and again as a login item or from the
+// Finder, say): the second one should leave instead of failing on the port.
+bool AnotherInstanceRunning();
+
 // A modal alert for a server that could not start (no menu bar icon yet).
 void ShowStartupError(const std::string& message);
 

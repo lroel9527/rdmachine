@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "rdmachine/login_keys.h"
 #include "rdmachine/session/live_stats.h"
 #include "rdmachine/picture_mode.h"
 #include "rdmachine/session/system_auth.h"
@@ -19,6 +20,15 @@ static_assert(kClipboardHelloMessageType == RDA_MSG_USER_FIRST + 5 && kClipboard
               "application message types");
 
 namespace {
+
+// Overwrites a secret before it is freed (a plain fill may be optimized away).
+void Wipe(std::string& s) {
+  volatile char* p = s.data();
+  for (size_t i = 0; i < s.size(); ++i) p[i] = 0;
+  s.clear();
+}
+
+constexpr auto kPendingLoginLifetime = std::chrono::seconds(60);
 
 InputSourceState FromRda(const rda_input_source_info& i) {
   return InputSourceState{i.id, i.name, i.language, i.input_method != 0, i.ascii_capable != 0};
@@ -37,17 +47,26 @@ void MediaHost::Log(const std::string& line) {
 std::string MediaHost::ServerName() { return options_.server_name; }
 
 bool MediaHost::CheckPassword(const std::string& username, const std::string& password, std::string* error) {
-  if (options_.check_password) return options_.check_password(username, password, error);
-  // M0 shares the desktop of the user the server runs as (decision D5).
-  if (username != CurrentUserName()) {
+  bool ok = false;
+  if (options_.check_password) {
+    ok = options_.check_password(username, password, error);
+  } else if (!options_.login_window && username != CurrentUserName()) {
+    // M0 shares the desktop of the user the server runs as (decision D5). At
+    // the login window no one is logged in yet: any account may log in.
     *error = "not_console_user";
     Log("login refused: " + username + " is not the logged-in user");
     return false;
+  } else {
+    std::string detail;
+    const std::string service = options_.pam_service.empty() ? DefaultPamService() : options_.pam_service;
+    ok = CheckSystemPassword(service, username, password, error, &detail);
+    Log("password login for " + username + ": " + (ok ? "ok" : *error + " (" + detail + ")"));
   }
-  std::string detail;
-  const std::string service = options_.pam_service.empty() ? DefaultPamService() : options_.pam_service;
-  const bool ok = CheckSystemPassword(service, username, password, error, &detail);
-  Log("password login for " + username + ": " + (ok ? "ok" : *error + " (" + detail + ")"));
+  if (ok && options_.type_login) {
+    std::lock_guard lock(login_mu_);
+    Wipe(pending_login_.password);
+    pending_login_ = PendingLogin{username, password, Clock::now()};
+  }
   return ok;
 }
 
@@ -81,7 +100,15 @@ void MediaHost::OnInput(void* user, const rda_input_event* ev) {
   // injector_ is set before the host exists and cleared after it is
   // destroyed (no callback runs after rda_host_destroy), so no lock here.
   auto* self = static_cast<MediaHost*>(user);
-  if (self->injector_) rda_injector_inject(self->injector_, ev);
+  if (self->injector_) {
+    std::lock_guard lock(self->inject_mu_);
+    rda_injector_inject(self->injector_, ev);
+  }
+}
+
+void MediaHost::Inject(const rda_input_event& ev) {
+  std::lock_guard lock(inject_mu_);
+  if (injector_) rda_injector_inject(injector_, &ev);
 }
 
 void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
@@ -185,8 +212,20 @@ void MediaHost::OnError(void* user, rda_status status, const char* message) {
 
 std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& request, const SessionSecrets& secrets,
                                                     const SessionOrigin& origin, std::string* error) {
+  // The password of this login, if it was one (see type_login).
+  PendingLogin login;
+  {
+    std::lock_guard l(login_mu_);
+    if (origin.method == AuthMethod::kPassword && !pending_login_.password.empty() &&
+        pending_login_.username == origin.username && Clock::now() - pending_login_.at < kPendingLoginLifetime) {
+      login = pending_login_;
+    }
+    Wipe(pending_login_.password);
+    pending_login_ = PendingLogin{};
+  }
   std::lock_guard lock(mu_);
   if (host_) {
+    Wipe(login.password);
     *error = "busy";
     return std::nullopt;
   }
@@ -235,6 +274,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     return std::nullopt;
   }
   SessionGrant grant;
+  grant.login_window = options_.login_window;
   if (desktop) grant.desktop = desktop->spec();
   for (const rda_display_info& d : infos) {
     // rdaccel reports pixels; the scale is not exposed yet (M0 reports 1).
@@ -378,8 +418,21 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     clipboard_->Start();
   }
   Log("session started on display " + std::to_string(display_index) + (view_only ? " (view only)" : "") +
-      (request.text_mode ? " (text mode)" : "") + ", media " + (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
+      (request.text_mode ? " (text mode)" : "") + (options_.login_window ? " (login window)" : "") + ", media " +
+      (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
+  if (!login.password.empty()) {
+    const LoginScreenState ls = options_.login_screen ? options_.login_screen() : QueryLoginScreen();
+    if (injector && (options_.login_window || ls.screen_locked)) {
+      {
+        std::lock_guard t(type_mu_);
+        type_stop_ = false;
+      }
+      type_thread_ = std::thread(&MediaHost::TypeLogin, this, login.username, login.password,
+                                 options_.login_window && ls.asks_for_name, options_.login_window);
+    }
+    Wipe(login.password);
+  }
   return grant;
 }
 
@@ -478,8 +531,79 @@ void MediaHost::DesktopLoop() {
   }
 }
 
+void MediaHost::StopTypeLogin() {
+  {
+    std::lock_guard t(type_mu_);
+    type_stop_ = true;
+  }
+  type_cv_.notify_all();
+  if (type_thread_.joinable()) type_thread_.join();
+}
+
+void MediaHost::TypeLogin(std::string username, std::string password, bool type_name, bool at_login_window) {
+  const char* where = at_login_window ? "login window" : "lock screen";
+  // Waits up to `d`; false when the session is ending.
+  auto wait = [this](std::chrono::milliseconds d) {
+    std::unique_lock t(type_mu_);
+    return !type_cv_.wait_for(t, d, [this] { return type_stop_; });
+  };
+  auto key = [this](uint32_t usage, bool down, uint32_t mods) {
+    rda_input_event ev;
+    rda_input_event_default(&ev);
+    ev.kind = down ? RDA_INPUT_KEY_DOWN : RDA_INPUT_KEY_UP;
+    ev.code = usage;
+    ev.modifiers = mods;
+    Inject(ev);
+  };
+  // The viewer first, so the remote user sees it happen (and could stop it
+  // by closing the window).
+  bool connected = false;
+  for (int i = 0; i < 100 && !connected; ++i) {
+    if (!wait(std::chrono::milliseconds(100))) break;
+    connected = media_connected_;
+  }
+  bool typed = false;
+  if (connected) {
+    // A Shift tap wakes a display that is off (the injector also declares
+    // user activity) and brings up the password field; give it time.
+    key(kHidLeftShift, true, RDA_MOD_SHIFT);
+    key(kHidLeftShift, false, 0);
+    if (wait(std::chrono::milliseconds(1500))) {
+      std::vector<LoginKey> keys = LoginKeystrokes(username, password, type_name);
+      typed = true;
+      for (const LoginKey& k : keys) {
+        if (!wait(std::chrono::milliseconds(25))) {
+          typed = false;
+          break;
+        }
+        if (k.kind == LoginKey::Kind::kText) {
+          rda_input_event ev;
+          rda_input_event_default(&ev);
+          ev.kind = RDA_INPUT_TEXT;
+          ev.code = k.code;
+          Inject(ev);
+        } else if (k.shift) {
+          key(kHidLeftShift, true, RDA_MOD_SHIFT);
+          key(k.code, true, RDA_MOD_SHIFT);
+          key(k.code, false, RDA_MOD_SHIFT);
+          key(kHidLeftShift, false, 0);
+        } else {
+          key(k.code, true, 0);
+          key(k.code, false, 0);
+        }
+      }
+      for (LoginKey& k : keys) k.code = 0;
+    }
+  }
+  Wipe(password);
+  Log(typed ? std::string("typed the login of ") + username + " into the " + where
+            : std::string("did not type the login into the ") + where +
+                  (connected ? " (the session ended)" : " (the viewer did not connect)"));
+}
+
 void MediaHost::EndSession() {
   // Not under mu_: the stats and desktop threads take mu_ for their work.
+  StopTypeLogin();  // it injects through injector_, destroyed below
   StopStats();
   StopDesktopLoop();
   rda_host* host;

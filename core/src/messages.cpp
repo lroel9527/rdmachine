@@ -176,6 +176,7 @@ json ToJson(const SessionReady& m) {
             {"auth_token", Base64Encode(m.auth_token)},
             {"displays", displays}};
   if (m.desktop) j["desktop"] = ToJson(*m.desktop);
+  if (m.login_window) j["login_window"] = true;
   return j;
 }
 json ToJson(const Ping& m) { return {{"id", m.id}}; }
@@ -263,7 +264,7 @@ ParseResult ParseSessionReady(const json& j, Reader& r) {
   std::string transport;
   int64_t port = 0;
   if (!r.Str("transport", &transport) || !r.Int("port", &port, true, 1, 65535) || !r.Bytes("key", &m.key) ||
-      !r.Bytes("auth_token", &m.auth_token))
+      !r.Bytes("auth_token", &m.auth_token) || !r.Bool("login_window", &m.login_window, false))
     return Bad(r.error);
   auto t = TransportFrom(transport);
   if (!t) return Bad("transport: unknown");

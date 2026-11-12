@@ -3,7 +3,7 @@
 //   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
 //                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--headless]
-//                    [--fingerprint] [--version]
+//                    [--fingerprint] [--version] [--login-window]
 //
 // On macOS it puts an icon in the menu bar: connection status, pairing codes,
 // the fingerprint, disconnect, settings and a floating statistics panel for
@@ -31,6 +31,7 @@
 // view-only).
 #include <pthread.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -98,7 +99,7 @@ int Usage() {
                "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
                "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
-               "                        [--headless] [--fingerprint] [--version]\n");
+               "                        [--headless] [--fingerprint] [--version] [--login-window]\n");
   return 2;
 }
 
@@ -129,7 +130,7 @@ int main(int argc, char** argv) {
   rdm::ServerRuntime::Options ropts;
   rdm::SettingsOverrides& ov = ropts.overrides;
   std::string config_dir = rdm::DefaultConfigDir();
-  bool print_fingerprint = false, issue_code = false, headless = false;
+  bool print_fingerprint = false, issue_code = false, headless = false, config_dir_given = false;
   std::string v;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
@@ -153,6 +154,7 @@ int main(int argc, char** argv) {
       ropts.pam_service = v;
     } else if (Flag(a, "--config-dir", &v)) {
       config_dir = v;
+      config_dir_given = true;
     } else if (Flag(a, "--fps", &v)) {
       ov.fps = std::atoi(v.c_str());
     } else if (Flag(a, "--bitrate-kbps", &v)) {
@@ -165,12 +167,25 @@ int main(int argc, char** argv) {
       headless = true;
     } else if (Flag(a, "--fingerprint", nullptr)) {
       print_fingerprint = true;
+    } else if (Flag(a, "--login-window", nullptr)) {
+      // The login window session (LaunchAgent, LimitLoadToSessionType
+      // LoginWindow; packaging/macos/install-login-window.sh): no menu bar,
+      // the system-wide configuration, any account may log in.
+      ropts.login_window = true;
+      headless = true;
+      if (!config_dir_given) config_dir = rdm::SystemConfigDir();
     } else {
       return Usage();
     }
   }
-  if (issue_code && ov.offer_pairing_codes == false) return Usage();
+  if (issue_code && (ov.offer_pairing_codes == false || ropts.login_window)) return Usage();
 
+#if defined(__APPLE__)
+  if (!headless && rdm::AnotherInstanceRunning()) {
+    Log("rdmachine-server already runs in this session; leaving it to that one");
+    return 0;  // a clean exit: a LaunchAgent with KeepAlive SuccessfulExit=false does not restart it
+  }
+#endif
   std::string error;
   auto identity = rdm::LoadOrCreateServerIdentity(config_dir, HostName(), &error);
   if (!identity) {
@@ -192,12 +207,23 @@ int main(int argc, char** argv) {
   ropts.server_name = HostName();
   ropts.log = &Log;
   rdm::ServerRuntime runtime(ropts, *identity);
-  if (!runtime.Start(&error)) {
+  // Started by launchd (rdmachine-service): right after a login the login
+  // window's copy may still hold the port for a moment, so keep trying for a
+  // while, and never stop at a dialog no one may be there to answer.
+  const char* service = std::getenv("XPC_SERVICE_NAME");
+  const bool by_launchd = service && std::strncmp(service, "org.rdmachine.", 14) == 0;
+  bool started = runtime.Start(&error);
+  for (int i = 0; !started && by_launchd && i < 30; ++i) {
+    if (i == 0) Log("cannot start yet (" + error + "); trying again for 30 seconds");
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    started = runtime.Start(&error);
+  }
+  if (!started) {
     std::fprintf(stderr, "rdmachine-server: %s\n", error.c_str());
 #if defined(__APPLE__)
-    if (!headless) rdm::ShowStartupError(error);
+    if (!headless && !by_launchd) rdm::ShowStartupError(error);
 #endif
-    return 1;
+    return 1;  // launchd starts it again (KeepAlive: SuccessfulExit = false)
   }
   Log("rdmachine-server " + std::string(rdm::VersionString()) + " on port " + std::to_string(runtime.port()) + " as " +
       rdm::CurrentUserName());
@@ -210,6 +236,25 @@ int main(int argc, char** argv) {
       while (std::getline(std::cin, line)) Log("pairing code: " + runtime.IssuePairingCode());
     }).detach();
   }
+#if defined(__APPLE__)
+  if (ropts.login_window) {
+    // The login window's server gives way once someone has logged in: the
+    // server of that user's session starts with the login and needs the
+    // port. launchd usually ends this session's agents by itself; this makes
+    // sure. A clean exit, so KeepAlive does not start it again.
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        struct stat st {};
+        if (stat("/dev/console", &st) == 0 && st.st_uid != 0) {
+          Log("a user logged in at the login window; leaving it to the server of that session");
+          kill(getpid(), SIGTERM);
+          return;
+        }
+      }
+    }).detach();
+  }
+#endif
 
 #if defined(__APPLE__)
   if (!headless) {

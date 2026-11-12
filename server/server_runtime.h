@@ -38,6 +38,9 @@ class ServerRuntime {
     std::string server_name;
     std::string bind_address;  // empty = all interfaces
     std::string pam_service;   // empty = the platform default
+    // Runs in the login window session (--login-window): any account may
+    // log in, no pairing codes (no one to show them to).
+    bool login_window = false;
     SettingsOverrides overrides;
     std::function<void(const std::string&)> log;
   };

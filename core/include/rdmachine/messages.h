@@ -83,6 +83,10 @@ struct SessionReady {
   // Empty: none was asked for or the server cannot build one; the picture
   // is the server's own display and the client scales it.
   std::optional<DesktopSpec> desktop;
+  // The picture is this computer's login window (no one logged in yet):
+  // after the user logs in there, this connection ends and the client
+  // connects again to reach the new desktop (docs/protocol.md, "登录窗口").
+  bool login_window = false;
 };
 
 struct Ping {

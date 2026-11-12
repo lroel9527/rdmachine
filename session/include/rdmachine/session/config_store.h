@@ -11,6 +11,13 @@ namespace rdm {
 // on macOS and $XDG_CONFIG_HOME/rdmachine (~/.config/rdmachine) elsewhere.
 std::string DefaultConfigDir();
 
+// The system-wide configuration of a server that runs outside any user's
+// session (the login window; docs/decisions.md, "登录窗口和锁屏"):
+// /Library/Application Support/rdmachine on macOS, /etc/rdmachine elsewhere.
+// Root-owned; the installer copies the user's server identity there, so the
+// login window shows clients the same fingerprint.
+std::string SystemConfigDir();
+
 // Creates `dir` and its parents (new directories get mode 0700).
 bool MakeDirs(const std::string& dir, std::string* error);
 

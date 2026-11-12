@@ -1,0 +1,271 @@
+#!/bin/sh
+# rdmachine-service: runs the rdmachine server as a service of this Mac, like
+# NoMachine's nxserver --install / --status / --start / --stop / --restart /
+# --startmode (docs/decisions.md, "服务和自动启动").
+#
+#   sudo rdmachine-service install [--app "/Applications/RDMachine Server.app"]
+#   sudo rdmachine-service uninstall
+#        rdmachine-service status
+#   sudo rdmachine-service start | stop | restart
+#   sudo rdmachine-service startmode automatic | manual
+#
+# launchd is the watchdog. install adds two LaunchAgents of the same server
+# application, each started automatically and restarted by launchd when it
+# exits on an error (a deliberate Quit or stop stays stopped):
+#   org.rdmachine.server              every user's login session: the menu bar
+#                                     app, started at login
+#   org.rdmachine.server.loginwindow  the login window session, from startup
+#                                     until someone logs in: no menu bar; any
+#                                     account of this Mac logs in with its
+#                                     password, and the server types that
+#                                     password into the login window
+# install also copies the server identity (and settings) of the user running
+# sudo to /Library/Application Support/rdmachine, so the login window shows
+# clients the same fingerprint; run install again after changing the port or
+# making a new identity. The login window agent starts at the next logout or
+# startup; the session agent at once (if no server runs yet) and at every
+# login.
+#
+# startmode manual keeps the agents installed but starts nothing by itself:
+# start / stop work on the current login session (and the login window
+# agent, when it runs).
+set -eu
+
+APP="/Applications/RDMachine Server.app"
+AGENTS=/Library/LaunchAgents
+SESSION_LABEL=org.rdmachine.server
+LW_LABEL=org.rdmachine.server.loginwindow
+SESSION_PLIST="$AGENTS/$SESSION_LABEL.plist"
+LW_PLIST="$AGENTS/$LW_LABEL.plist"
+SYS_DIR="/Library/Application Support/rdmachine"
+LOG=/Library/Logs/rdmachine-loginwindow.log
+
+usage() {
+  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+need_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "rdmachine-service $1: run with sudo" >&2
+    exit 1
+  fi
+}
+
+console_user() { stat -f %Su /dev/console; }
+console_uid() { id -u "$(console_user)" 2>/dev/null || echo ""; }
+
+# The plists' RunAtLoad decides automatic or manual.
+startmode() {
+  if [ ! -f "$SESSION_PLIST" ]; then
+    echo "not installed"
+  elif [ "$(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' "$SESSION_PLIST" 2>/dev/null)" = "true" ]; then
+    echo automatic
+  else
+    echo manual
+  fi
+}
+
+write_plist() {  # path label session-type run-at-load log program-args...
+  path="$1"; label="$2"; session="$3"; at_load="$4"; log="$5"; shift 5
+  {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>org.rdmachine.server</string></array>
+  <key>LimitLoadToSessionType</key><array><string>$session</string></array>
+  <key>ProgramArguments</key><array>
+EOF
+    for a in "$@"; do
+      printf '    <string>%s</string>\n' "$a"
+    done
+    cat <<EOF
+  </array>
+  <key>RunAtLoad</key><$at_load/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
+EOF
+    if [ -n "$log" ]; then
+      printf '  <key>StandardOutPath</key><string>%s</string>\n' "$log"
+      printf '  <key>StandardErrorPath</key><string>%s</string>\n' "$log"
+    fi
+    cat <<EOF
+</dict>
+</plist>
+EOF
+  } > "$path"
+  chown root:wheel "$path"
+  chmod 644 "$path"
+  plutil -lint "$path" >/dev/null
+}
+
+write_plists() {  # true|false (RunAtLoad)
+  server="$APP/Contents/MacOS/rdmachine-server"
+  write_plist "$SESSION_PLIST" "$SESSION_LABEL" Aqua "$1" "" "$server"
+  write_plist "$LW_PLIST" "$LW_LABEL" LoginWindow "$1" "$LOG" "$server" --login-window
+}
+
+# The server app the installed plists point at.
+installed_app() {
+  s=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$SESSION_PLIST" 2>/dev/null || true)
+  [ -n "$s" ] && APP="${s%/Contents/MacOS/rdmachine-server}"
+}
+
+session_loaded() {
+  uid=$(console_uid)
+  [ -n "$uid" ] && launchctl print "gui/$uid/$SESSION_LABEL" >/dev/null 2>&1
+}
+
+do_install() {
+  need_root install
+  server="$APP/Contents/MacOS/rdmachine-server"
+  if [ ! -x "$server" ]; then
+    echo "not found: $server (install RDMachine Server.app first, or pass --app)" >&2
+    exit 1
+  fi
+  # The experiment that came before this command (tools/loginwindow-experiment).
+  rm -f "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
+
+  # The identity and settings of the user who ran sudo.
+  user="${SUDO_USER:-}"
+  if [ -z "$user" ] || [ "$user" = root ]; then user=$(console_user); fi
+  home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+  user_dir="$home/Library/Application Support/rdmachine"
+  mkdir -p "$SYS_DIR"
+  chown root:wheel "$SYS_DIR"
+  chmod 700 "$SYS_DIR"
+  if [ -f "$user_dir/server-cert.pem" ] && [ -f "$user_dir/server-key.pem" ]; then
+    for f in server-cert.pem server-key.pem server-settings.json; do
+      [ -f "$user_dir/$f" ] && install -o root -g wheel -m 600 "$user_dir/$f" "$SYS_DIR/$f"
+    done
+    echo "copied the server identity of $user: the login window shows the same fingerprint:"
+    "$server" --fingerprint --config-dir="$SYS_DIR" || true
+  else
+    echo "warning: $user has no server identity yet (start RDMachine Server once, then install again);" >&2
+    echo "         until then the login window makes its own, and clients see a different fingerprint" >&2
+  fi
+
+  mode=$(startmode)
+  [ "$mode" = "not installed" ] && mode=automatic
+  if [ "$mode" = automatic ]; then write_plists true; else write_plists false; fi
+  touch "$LOG"
+  chown root:wheel "$LOG"
+  chmod 600 "$LOG"
+
+  # The current login session: hand the server to launchd now, unless one
+  # runs already (a copy started by hand keeps serving; the agent takes over
+  # from the next login).
+  uid=$(console_uid)
+  if [ "$mode" = automatic ] && [ -n "$uid" ] && [ "$uid" != 0 ] && ! session_loaded; then
+    if pgrep -u "$uid" -f "$server" >/dev/null 2>&1; then
+      echo "a server already runs in $(console_user)'s session; the agent takes over at the next login"
+    else
+      launchctl bootstrap "gui/$uid" "$SESSION_PLIST" 2>/dev/null || true
+    fi
+  fi
+  echo "installed ($mode start): $SESSION_PLIST, $LW_PLIST"
+  echo "the login window accepts connections after the next logout or startup (log: $LOG)"
+  echo "keep RDMachine Server allowed under System Settings > General > Login Items & Extensions > Allow in the Background"
+}
+
+do_uninstall() {
+  need_root uninstall
+  uid=$(console_uid)
+  if [ -n "$uid" ]; then launchctl bootout "gui/$uid/$SESSION_LABEL" 2>/dev/null || true; fi
+  pkill -f 'rdmachine-server --login-window' 2>/dev/null || true
+  rm -f "$SESSION_PLIST" "$LW_PLIST" "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
+  rm -rf "$SYS_DIR"
+  echo "removed the agents and $SYS_DIR ($LOG is kept)"
+}
+
+do_status() {
+  echo "start mode:   $(startmode)"
+  if [ -f "$SESSION_PLIST" ]; then
+    installed_app
+    echo "server app:   $APP"
+  fi
+  procs=$(pgrep -fl 'Contents/MacOS/rdmachine-server' 2>/dev/null || true)
+  if [ -z "$procs" ]; then
+    echo "running:      no server"
+  else
+    echo "$procs" | while read -r pid rest; do
+      who=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
+      case "$rest" in
+        *--login-window*) echo "running:      pid $pid, login window ($who)" ;;
+        *) echo "running:      pid $pid, session of $who" ;;
+      esac
+    done
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '/rdmachine/ {print "listening:    " $9 " (pid " $2 ")"}' | sort -u
+  fi
+  echo "console:      $(console_user)"
+  [ -f "$LOG" ] && echo "login window log: $LOG"
+  return 0
+}
+
+do_start() {
+  need_root start
+  [ -f "$SESSION_PLIST" ] || { echo "not installed: sudo rdmachine-service install" >&2; exit 1; }
+  uid=$(console_uid)
+  if [ -z "$uid" ] || [ "$uid" = 0 ]; then
+    echo "no one is logged in: the login window agent starts with the login window"
+    exit 0
+  fi
+  if session_loaded; then
+    launchctl kickstart "gui/$uid/$SESSION_LABEL"
+  else
+    launchctl bootstrap "gui/$uid" "$SESSION_PLIST"
+    launchctl kickstart "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
+  fi
+  echo "started the server in $(console_user)'s session"
+}
+
+do_stop() {
+  need_root stop
+  uid=$(console_uid)
+  # SIGTERM: the server ends its session and exits cleanly, so launchd's
+  # KeepAlive (SuccessfulExit = false) does not start it again.
+  if [ -n "$uid" ] && [ "$uid" != 0 ] && session_loaded; then
+    launchctl kill TERM "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
+  fi
+  pkill -TERM -f 'Contents/MacOS/rdmachine-server' 2>/dev/null || true
+  echo "stopped"
+}
+
+do_startmode() {
+  need_root startmode
+  [ -f "$SESSION_PLIST" ] || { echo "not installed: sudo rdmachine-service install" >&2; exit 1; }
+  installed_app
+  case "${1:-}" in
+    automatic) write_plists true ;;
+    manual) write_plists false ;;
+    *) usage 2 ;;
+  esac
+  echo "start mode: $1 (from the next login or logout)"
+}
+
+cmd="${1:-status}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  install)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --app) APP="$2"; shift 2 ;;
+        *) usage 2 ;;
+      esac
+    done
+    do_install ;;
+  uninstall) do_uninstall ;;
+  status) do_status ;;
+  start) do_start ;;
+  stop) do_stop ;;
+  restart) do_stop; sleep 2; do_start ;;
+  startmode) do_startmode "${1:-}" ;;
+  -h|--help|help) usage 0 ;;
+  *) usage 2 ;;
+esac

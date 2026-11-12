@@ -24,6 +24,14 @@ std::string DefaultConfigDir() {
 #endif
 }
 
+std::string SystemConfigDir() {
+#if defined(__APPLE__)
+  return "/Library/Application Support/rdmachine";
+#else
+  return "/etc/rdmachine";
+#endif
+}
+
 bool MakeDirs(const std::string& dir, std::string* error) {
   if (dir.empty()) return true;
   struct stat st {};
