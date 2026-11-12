@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -113,6 +114,7 @@ class Daemon : public ServerDelegate {
   int64_t next_agent_id_ = 1;
   int64_t next_request_id_ = 1;
   std::map<int64_t, nlohmann::json> replies_;  // request id -> reply
+  std::set<int64_t> waiting_;                  // requests still waited for; other replies are dropped
   std::shared_ptr<Agent> session_agent_;       // where the running session is
   // The session's server was stopped on purpose (see CheckSession).
   struct Stopped {

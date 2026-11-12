@@ -120,16 +120,30 @@ bool MediaHost::session_running() {
 }
 
 MediaHostStatus MediaHost::Status() {
-  std::lock_guard lock(mu_);
+  // The menu bar asks on the main thread once a second. mu_ is held for
+  // seconds while a session starts or its desktop is rebuilt, and those
+  // steps need the main thread's event loop running (a new display's modes
+  // arrive through it): waiting here would stall both.
+  std::unique_lock lock(mu_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    std::lock_guard snap(snapshot_mu_);
+    return snapshot_;
+  }
   MediaHostStatus s = status_;
-  if (!host_) return s;
-  s.media_connected = media_connected_;
-  s.text_mode = text_mode_;
-  s.stats.struct_size = sizeof(s.stats);
-  if (rda_host_get_stats(host_, &s.stats) != RDA_OK) s.stats = rda_host_stats{};
-  char enc[64] = {};
-  rda_host_encoder_name(host_, enc, sizeof enc);
-  s.encoder = enc;
+  if (host_) {
+    s.media_connected = media_connected_;
+    s.text_mode = text_mode_;
+    s.stats.struct_size = sizeof(s.stats);
+    if (rda_host_get_stats(host_, &s.stats) != RDA_OK) s.stats = rda_host_stats{};
+    char enc[64] = {};
+    rda_host_encoder_name(host_, enc, sizeof enc);
+    s.encoder = enc;
+    std::lock_guard in(input_source_mu_);
+    s.client_input_source = client_input_source_;
+    s.input_source = input_source_;
+  }
+  std::lock_guard snap(snapshot_mu_);
+  snapshot_ = s;
   return s;
 }
 
@@ -188,8 +202,9 @@ void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, siz
   }
 }
 
-// Transport thread. The rdaccel input source calls run on the main thread,
-// which may be waiting for mu_ (Status()), so mu_ is not held across them.
+// Transport thread: never takes mu_. EndSession holds mu_ while rdaccel
+// waits for this thread to finish, so waiting for mu_ here would stop both
+// for good (and with them every later session of this server).
 void MediaHost::SyncInputSource(const InputSourceState& wanted) {
   std::string selected;
   if (!injector_) {
@@ -227,10 +242,9 @@ void MediaHost::SyncInputSource(const InputSourceState& wanted) {
           (available.empty() ? std::string(" (cannot list input sources: ") + rda_last_error() + ")" : ""));
     }
   }
-  std::lock_guard lock(mu_);
-  if (!host_) return;
-  status_.client_input_source = wanted.name.empty() ? wanted.id : wanted.name;
-  status_.input_source = selected;
+  std::lock_guard lock(input_source_mu_);
+  client_input_source_ = wanted.name.empty() ? wanted.id : wanted.name;
+  input_source_ = selected;
 }
 
 void MediaHost::OnState(void* user, rda_state state, rda_status reason) {
@@ -408,6 +422,11 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   cfg.on_error = &MediaHost::OnError;
   cfg.on_message = &MediaHost::OnMessage;
   tokens_.Add(secrets.auth_token, Clock::now());
+  {
+    std::lock_guard in(input_source_mu_);  // before the host exists: nothing of an earlier session's
+    client_input_source_.clear();
+    input_source_.clear();
+  }
   injector_ = injector;
   rda_host* host = nullptr;
   rda_status hs = rda_host_create(transport, &cfg, &host);  // takes the transport
@@ -520,7 +539,10 @@ void MediaHost::StatsLoop() {
           char enc[64] = {};
           rda_host_encoder_name(host_, enc, sizeof enc);
           r.encoder = enc;
-          r.input_source = status_.input_source;
+          {
+            std::lock_guard in(input_source_mu_);
+            r.input_source = input_source_;
+          }
           r.view_only = status_.view_only;
           r.text_mode = text_mode_;
           const std::string payload = EncodeSessionStats(r);
@@ -608,13 +630,19 @@ void MediaHost::TypeLogin(std::string username, std::string password, bool type_
     if (!wait(std::chrono::milliseconds(100))) break;
     connected = media_connected_;
   }
-  bool typed = false;
+  bool typed = false, unlocked = false;
   if (connected) {
     // A Shift tap wakes a display that is off (the injector also declares
     // user activity) and brings up the password field; give it time.
     key(kHidLeftShift, true, RDA_MOD_SHIFT);
     key(kHidLeftShift, false, 0);
-    if (wait(std::chrono::milliseconds(1500))) {
+    // Still what it was when the session started? Seconds have passed, and
+    // someone at this computer may have unlocked it meanwhile: the password
+    // would then go into whatever application is in front.
+    const bool waited = wait(std::chrono::milliseconds(1500));
+    unlocked = waited && !at_login_window &&
+               !(options_.login_screen ? options_.login_screen() : QueryLoginScreen()).screen_locked;
+    if (waited && !unlocked) {
       std::vector<LoginKey> keys = LoginKeystrokes(username, password, type_name);
       typed = true;
       for (const LoginKey& k : keys) {
@@ -644,7 +672,8 @@ void MediaHost::TypeLogin(std::string username, std::string password, bool type_
   Wipe(password);
   Log(typed ? std::string("typed the login of ") + username + " into the " + where
             : std::string("did not type the login into the ") + where +
-                  (connected ? " (the session ended)" : " (the viewer did not connect)"));
+                  (unlocked ? " (it was unlocked meanwhile)"
+                            : connected ? " (the session ended)" : " (the viewer did not connect)"));
 }
 
 void MediaHost::EndSession() {

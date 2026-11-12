@@ -8,7 +8,17 @@ launchctl bootout system/org.rdmachine.daemon 2>/dev/null && echo "$LOG_PREFIX s
 if [ "$uid" != 0 ]; then
   launchctl bootout "gui/$uid/org.rdmachine.server" 2>/dev/null && echo "$LOG_PREFIX stopped the session agent"
 fi
-# A server started by hand (standalone, 2.x) and the login window agent.
-pkill -TERM -f 'Contents/MacOS/rdmachine-server' 2>/dev/null && echo "$LOG_PREFIX stopped running servers"
+# The login window agent (running when the Mac is at its login window): not
+# a clean stop, so that launchd starts it again; postinstall restarts it once
+# more from the new app. A clean stop would leave the login window without a
+# picture until the next logout or restart.
+pkill -KILL -f 'rdmachine-server --login-window' 2>/dev/null && echo "$LOG_PREFIX restarted the login window agent"
+# A server started by hand (standalone, 2.x).
+pgrep -f 'Contents/MacOS/rdmachine-server' 2>/dev/null | while read -r pid; do
+  case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+    *--login-window*) ;;
+    *) kill -TERM "$pid" 2>/dev/null && echo "$LOG_PREFIX stopped a running server (pid $pid)" ;;
+  esac
+done
 sleep 1
 exit 0

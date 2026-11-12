@@ -319,7 +319,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     [self add:@"配对码登录已关闭" action:nullptr];
   }
   NSMenuItem* fp = [self add:@"复制本机指纹" action:@selector(copyFingerprint:)];
-  fp.toolTip = NS(_info.fingerprint);
+  fp.toolTip = [self fingerprint];
 
   [menu addItem:NSMenuItem.separatorItem];
   const bool capture = CGPreflightScreenCaptureAccess();
@@ -355,8 +355,19 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   if (!code.code.empty()) Copy(NS(code.code));
 }
 
+// As an agent the fingerprint is the daemon's, known once the link to it is
+// up, which may be after this app started (and again after the daemon made
+// a new identity).
+- (NSString*)fingerprint {
+  if (_runtime->agent_mode()) {
+    const std::string fp = _runtime->daemon_fingerprint();
+    if (!fp.empty()) return NS(fp);
+  }
+  return NS(_info.fingerprint);
+}
+
 - (void)copyFingerprint:(id)sender {
-  Copy(NS(_info.fingerprint));
+  Copy([self fingerprint]);
 }
 
 - (void)openScreenRecording:(id)sender {

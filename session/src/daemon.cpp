@@ -169,8 +169,11 @@ void Daemon::Handle(const std::shared_ptr<Agent>& agent, const json& m) {
   if (agent->kind.empty()) return;  // nothing before hello
   if (m.contains("reply_to") && m["reply_to"].is_number_integer()) {
     {
+      // Only what someone still waits for: an answer that comes after its
+      // request was given up would stay here for good.
       std::lock_guard lock(mu_);
-      replies_[m["reply_to"].get<int64_t>()] = m;
+      const int64_t id = m["reply_to"].get<int64_t>();
+      if (waiting_.count(id)) replies_[id] = m;
     }
     cv_.notify_all();
     return;
@@ -224,13 +227,19 @@ std::optional<json> Daemon::Request(const std::shared_ptr<Agent>& agent, json m,
   {
     std::lock_guard lock(mu_);
     id = next_request_id_++;
+    waiting_.insert(id);
   }
   m["id"] = id;
-  if (!agent->channel->Send(m)) return std::nullopt;
+  if (!agent->channel->Send(m)) {
+    std::lock_guard lock(mu_);
+    waiting_.erase(id);
+    return std::nullopt;
+  }
   std::unique_lock lock(mu_);
   const bool got = cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
     return stop_ || agent->gone || replies_.count(id) > 0;
   });
+  waiting_.erase(id);
   if (!got || !replies_.count(id)) {
     replies_.erase(id);
     return std::nullopt;
@@ -309,6 +318,17 @@ std::optional<SessionGrant> Daemon::StartSession(const SessionRequest& request, 
   if (!reply) {
     *error = "unavailable";
     Log("the agent did not answer start_session");
+    // It may still start that session once it gets to it; nobody here will
+    // use it, and it would hold the agent ("busy") for every later one. The
+    // agent takes its messages in order, so this ends exactly that session.
+    if (!agent->gone) {
+      int64_t id;
+      {
+        std::lock_guard lock(mu_);
+        id = next_request_id_++;
+      }
+      agent->channel->Send({{"type", "end_session"}, {"id", id}});
+    }
     return std::nullopt;
   }
   if (reply->value("type", "") != "session_started") {

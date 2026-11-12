@@ -210,3 +210,49 @@ TEST_F(MacPromiseTest, APromiseFromAStoppedSessionGivesNothing) {
   paster_->Stop();
   EXPECT_EQ([pb_ stringForType:NSPasteboardTypeString], nil);
 }
+
+// Both ends on this Mac's pasteboard code (two private pasteboards): a
+// screenshot copied on one pastes on the other.
+TEST_F(MacClipboardTest, AScreenshotCopiedOnOneSidePastesOnTheOther) {
+  NSPasteboard* other = [NSPasteboard pasteboardWithUniqueName];
+  auto copier_clip = SystemClipboard(other.name.UTF8String);
+  ClipboardSync::Options o;
+  o.poll_ms = 10;
+  std::unique_ptr<ClipboardSync> copier, paster;
+  copier = std::make_unique<ClipboardSync>(copier_clip, [&](uint32_t t, std::string_view p) {
+    paster->OnMessage(t, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+    return true;
+  }, o);
+  paster = std::make_unique<ClipboardSync>(clipboard_, [&](uint32_t t, std::string_view p) {
+    copier->OnMessage(t, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+    return true;
+  }, o);
+  copier->Start();
+  paster->Start();
+  usleep(100000);
+  // What screencapture -c puts on the clipboard: PNG and TIFF.
+  NSImage* img = [[NSImage alloc] initWithSize:NSMakeSize(6, 4)];
+  [img lockFocus];
+  [NSColor.greenColor setFill];
+  NSRectFill(NSMakeRect(0, 0, 6, 4));
+  [img unlockFocus];
+  NSData* tiff = img.TIFFRepresentation;
+  NSData* png = [[NSBitmapImageRep imageRepWithData:tiff] representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+  const NSInteger before = pb_.changeCount;
+  [other clearContents];
+  [other setData:png forType:NSPasteboardTypePNG];
+  [other setData:tiff forType:NSPasteboardTypeTIFF];
+  bool promised = false;
+  for (int i = 0; i < 300 && !promised; ++i) {
+    usleep(10000);
+    promised = pb_.changeCount != before;
+  }
+  ASSERT_TRUE(promised);
+  EXPECT_TRUE([pb_.types containsObject:NSPasteboardTypePNG]);
+  NSImage* pasted = [[NSImage alloc] initWithPasteboard:pb_];
+  ASSERT_TRUE(pasted);
+  EXPECT_EQ(pasted.size.width, 6);
+  paster->Stop();
+  copier->Stop();
+  [other releaseGlobally];
+}

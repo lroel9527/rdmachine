@@ -1,9 +1,16 @@
 #include "rdmachine/tls.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <unistd.h>
+
+#include <cerrno>
 
 #include <algorithm>
 #include <cctype>
@@ -109,6 +116,84 @@ void SetSendTimeout(int fd, int ms) {
 }
 
 constexpr int kSendTimeoutMs = 10000;
+
+// A TCP connection to host:port made within timeout_ms in all (every address
+// the name has is tried in turn), as a blocking socket; -1 with *error. The
+// operating system's own limit for a connection nobody answers is over a
+// minute, far too long for a client that tries again every few seconds.
+int ConnectTcp(const std::string& host, const std::string& port, int timeout_ms, std::string* error) {
+  // As mbedtls_net_connect does: writing to a connection the peer closed is
+  // an error to handle, not a signal that ends the process.
+  static const bool sigpipe_ignored = [] {
+    signal(SIGPIPE, SIG_IGN);
+    return true;
+  }();
+  (void)sigpipe_ignored;
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  addrinfo* list = nullptr;
+  const int gai = getaddrinfo(host.c_str(), port.c_str(), &hints, &list);
+  if (gai != 0 || !list) {
+    if (error) *error = "connect to " + host + ":" + port + ": " + (gai != 0 ? gai_strerror(gai) : "no address");
+    return -1;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(timeout_ms, 1));
+  std::string why = "timed out";
+  int fd = -1;
+  for (addrinfo* a = list; a && fd < 0; a = a->ai_next) {
+    const auto left =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    if (left <= 0) {
+      why = "timed out";
+      break;
+    }
+    const int s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if (s < 0) {
+      why = std::strerror(errno);
+      continue;
+    }
+    const int flags = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, flags | O_NONBLOCK);
+    int err = 0;
+    if (connect(s, a->ai_addr, a->ai_addrlen) != 0) {
+      err = errno;
+      if (err == EINPROGRESS || err == EINTR) {
+        pollfd pfd{s, POLLOUT, 0};
+        int pr;
+        do {
+          const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                                 std::chrono::steady_clock::now())
+                              .count();
+          pr = poll(&pfd, 1, static_cast<int>(std::max<long long>(ms, 0)));
+        } while (pr < 0 && errno == EINTR);
+        if (pr == 0) {
+          err = ETIMEDOUT;
+        } else if (pr < 0) {
+          err = errno;
+        } else {
+          socklen_t len = sizeof err;
+          if (getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len) != 0) err = errno;
+        }
+      }
+    }
+    if (err != 0) {
+      why = err == ETIMEDOUT ? "timed out" : std::strerror(err);
+      close(s);
+      continue;
+    }
+    fcntl(s, F_SETFL, flags & ~O_NONBLOCK);
+#if defined(SO_NOSIGPIPE)
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    fd = s;
+  }
+  freeaddrinfo(list);
+  if (fd < 0 && error) *error = "connect to " + host + ":" + port + ": " + why;
+  return fd;
+}
 
 }  // namespace
 
@@ -452,13 +537,10 @@ std::unique_ptr<TlsConnection> TlsConnect(const std::string& host, uint16_t port
 
   auto impl = std::make_unique<TlsConnection::Impl>();
   const std::string port_str = std::to_string(port);
-  // TODO: mbedtls_net_connect uses the OS connect timeout.
-  int ret = mbedtls_net_connect(&impl->net, host.c_str(), port_str.c_str(), MBEDTLS_NET_PROTO_TCP);
-  if (ret != 0) {
-    if (error) *error = MbedError(("connect to " + host + ":" + port_str).c_str(), ret);
-    return nullptr;
-  }
+  impl->net.fd = ConnectTcp(host, port_str, timeout_ms, error);
+  if (impl->net.fd < 0) return nullptr;
   SetSendTimeout(impl->net.fd, kSendTimeoutMs);
+  int ret;
   if ((ret = mbedtls_ssl_setup(&impl->ssl, &shared->conf)) != 0 ||
       (ret = mbedtls_ssl_set_hostname(&impl->ssl, host.c_str())) != 0) {
     if (error) *error = MbedError("TLS setup", ret);

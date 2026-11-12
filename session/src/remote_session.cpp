@@ -284,7 +284,11 @@ void RemoteSession::KeepAlive() {
           tcp_asked = false;
           moving_since = now;
         } else if (auto* ready = std::get_if<SessionReady>(&*r.message)) {
-          if (FollowMove(*ready)) {
+          const bool followed = FollowMove(*ready);
+          // That took seconds during which nothing was read here: the
+          // server's messages are waiting, it has not gone silent.
+          last_heard = Clock::now();
+          if (followed) {
             moving = false;
             media_down_since.reset();
           } else if (ready->transport == MediaTransport::kUdp && !tcp_asked) {
@@ -307,7 +311,9 @@ void RemoteSession::KeepAlive() {
         break;
     }
     if (!ended.empty() || stop_) break;
-    if (now - last_heard >= kSilenceLimit) {
+    if (last_heard > now) {
+      // Just back from following a move: judge the silence on the next round.
+    } else if (now - last_heard >= kSilenceLimit) {
       ended = "connection_lost";
     } else if (!stalled && now - last_heard >= kStallAfter) {
       stalled = true;

@@ -99,7 +99,9 @@ class MediaHost : public ServerDelegate {
 
   // Whether an rdaccel host is running (for tests and status).
   bool session_running();
-  // Thread-safe; cheap enough to poll a few times a second.
+  // Thread-safe; cheap enough to poll a few times a second. Never waits for
+  // a session that is starting, ending or rebuilding its desktop (seconds):
+  // it then returns the snapshot from before.
   MediaHostStatus Status();
 
  private:
@@ -138,6 +140,14 @@ class MediaHost : public ServerDelegate {
   std::atomic<rda_host*> mode_host_{nullptr};
   std::atomic<bool> text_mode_{false};
   MediaHostStatus status_;  // guarded by mu_; stats filled in by Status()
+  // What Status() last returned, for a caller that would otherwise wait.
+  std::mutex snapshot_mu_;
+  MediaHostStatus snapshot_;
+  // Input source sync, written on the transport thread: under a lock of its
+  // own, as that thread must not wait for mu_ (EndSession holds mu_ while it
+  // waits for that very thread to finish).
+  std::mutex input_source_mu_;
+  std::string client_input_source_, input_source_;
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_
   std::thread desktop_thread_;                // runs while desktop_ exists

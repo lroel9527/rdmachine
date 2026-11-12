@@ -24,7 +24,8 @@
 #
 # install copies the server identity (and settings) of the user running sudo
 # to /Library/Application Support/rdmachine, so clients see the fingerprint
-# they already trust. It starts the daemon at once and restarts the server in
+# they already trust; an identity that is already there stays (an update
+# never changes the fingerprint). It starts the daemon at once and restarts the server in
 # the current session as its agent (an open connection drops once).
 #
 # startmode manual keeps everything installed but starts nothing by itself;
@@ -154,6 +155,15 @@ start_session_agent() {
   fi
 }
 
+# A login window agent that is running (the Mac is at its login window, or
+# a second user's) starts again from the app as it is now. It is ended with
+# SIGKILL on purpose: launchd starts an agent again only after an exit that
+# was not clean, and this script cannot reach the login window's own launchd
+# domain to start it there.
+restart_login_window_agent() {
+  pkill -KILL -f 'rdmachine-server --login-window' 2>/dev/null || true
+}
+
 do_install() {
   need_root install
   server="$APP/Contents/MacOS/rdmachine-server"
@@ -171,7 +181,11 @@ do_install() {
   mkdir -p "$SYS_DIR"
   chown root:wheel "$SYS_DIR"
   chmod 700 "$SYS_DIR"
-  if [ -f "$user_dir/server-cert.pem" ] && [ -f "$user_dir/server-key.pem" ]; then
+  if [ -f "$SYS_DIR/server-cert.pem" ] && [ -f "$SYS_DIR/server-key.pem" ]; then
+    # An update, or installed before: the daemon's identity is the one
+    # clients trust by now, whatever the user's folder holds.
+    echo "keeping the server identity that is installed; clients see the same fingerprint:"
+  elif [ -f "$user_dir/server-cert.pem" ] && [ -f "$user_dir/server-key.pem" ]; then
     for f in server-cert.pem server-key.pem server-settings.json; do
       [ -f "$user_dir/$f" ] && install -o root -g wheel -m 600 "$user_dir/$f" "$SYS_DIR/$f"
     done
@@ -196,6 +210,7 @@ do_install() {
     start_daemon
     sleep 1
     start_session_agent
+    restart_login_window_agent
   fi
   echo "installed ($mode start): $DAEMON_PLIST, $SESSION_PLIST, $LW_PLIST"
   echo "logs: $DAEMON_LOG, $LW_LOG"
@@ -249,13 +264,23 @@ do_start() {
   echo "started"
 }
 
-do_stop() {
+do_stop() {  # "restart": the login window agent comes back by itself
   need_root stop
   # SIGTERM: a clean exit, so KeepAlive (SuccessfulExit = false) leaves it stopped.
   daemon_loaded && launchctl kill TERM "system/$DAEMON_LABEL" 2>/dev/null || true
   uid=$(console_uid)
   session_loaded && launchctl kill TERM "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
-  pkill -TERM -f 'Contents/MacOS/rdmachine-server' 2>/dev/null || true
+  if [ "${1:-}" = restart ]; then
+    restart_login_window_agent
+    pgrep -f 'Contents/MacOS/rdmachine-server' 2>/dev/null | while read -r pid; do
+      case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+        *--login-window*) ;;
+        *) kill -TERM "$pid" 2>/dev/null || true ;;
+      esac
+    done
+  else
+    pkill -TERM -f 'Contents/MacOS/rdmachine-server' 2>/dev/null || true
+  fi
   echo "stopped"
 }
 
@@ -286,7 +311,7 @@ case "$cmd" in
   status) do_status ;;
   start) do_start ;;
   stop) do_stop ;;
-  restart) do_stop; sleep 2; do_start ;;
+  restart) do_stop restart; sleep 2; do_start ;;
   startmode) do_startmode "${1:-}" ;;
   -h|--help|help) usage 0 ;;
   *) usage 2 ;;

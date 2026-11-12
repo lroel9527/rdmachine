@@ -289,7 +289,17 @@ NSMutableDictionary* LoginQuery(const std::string& key) {
   } mutableCopy];
 }
 
-void ForgetLogin(const std::string& key) { SecItemDelete((__bridge CFDictionaryRef)LoginQuery(key)); }
+// Whether a login is saved, by key (main thread): the list asks for every
+// row once a second, so the answer is kept until a login is saved or forgotten.
+NSMutableDictionary<NSString*, NSNumber*>* SavedLoginCache() {
+  static NSMutableDictionary<NSString*, NSNumber*>* cache = [NSMutableDictionary dictionary];
+  return cache;
+}
+
+void ForgetLogin(const std::string& key) {
+  SecItemDelete((__bridge CFDictionaryRef)LoginQuery(key));
+  [SavedLoginCache() removeObjectForKey:NS(key)];
+}
 
 void SaveLogin(const std::string& key, const std::string& user, const std::string& password) {
   ForgetLogin(key);
@@ -341,15 +351,24 @@ NSArray<NSDictionary*>* LoadMachines() {
 
 void SaveMachines(NSArray<NSDictionary*>* list) { [NSUserDefaults.standardUserDefaults setObject:list forKey:kMachinesKey]; }
 
+std::string MachineKey(NSString* target);
+bool HasSavedLogin(NSString* target);
+
 // After a connection worked: to the top of the list, added if new.
 void RememberMachine(NSString* target, NSString* user, NSString* name) {
   NSMutableArray* list = [LoadMachines() mutableCopy];
   NSIndexSet* same = [list indexesOfObjectsPassingTest:^BOOL(NSDictionary* m, NSUInteger, BOOL*) {
-    return [m[@"target"] caseInsensitiveCompare:target] == NSOrderedSame;
+    // "mini.local" and "mini.local:4100" are one computer (one saved login).
+    if ([m[@"target"] caseInsensitiveCompare:target] == NSOrderedSame) return YES;
+    const std::string a = MachineKey(m[@"target"]);
+    return !a.empty() && a == MachineKey(target);
   }];
   // What the user gave it (alias, group) stays across connections.
   NSDictionary* before = same.count ? list[same.firstIndex] : nil;
   [list removeObjectsAtIndexes:same];
+  // Connected with a pairing code this once: the account of the saved
+  // password stays with the computer.
+  if (user.length == 0 && [before[@"user"] length] && HasSavedLogin(target)) user = before[@"user"];
   NSMutableDictionary* m = [@{@"target" : target, @"user" : user ?: @"", @"name" : name.length ? name : target,
                               @"last" : NSDate.date} mutableCopy];
   if ([before[@"alias"] length]) m[@"alias"] = before[@"alias"];
@@ -376,12 +395,29 @@ std::string MachineKey(NSString* target) {
   return ParseTarget(target, &host, &port) ? rdm::KnownHosts::Key(host, port) : std::string();
 }
 
+// Without reading the password: only whether the item is there (no secret
+// in memory, and nothing for the keychain to ask permission for).
 bool HasSavedLogin(NSString* target) {
-  std::string user, password;
   const std::string key = MachineKey(target);
-  const bool has = !key.empty() && LoadLogin(key, &user, &password);
-  std::fill(password.begin(), password.end(), '\0');
+  if (key.empty()) return false;
+  NSString* k = NS(key);
+  if (NSNumber* known = SavedLoginCache()[k]) return known.boolValue;
+  NSMutableDictionary* q = LoginQuery(key);
+  q[(__bridge id)kSecReturnAttributes] = @YES;
+  q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+  CFTypeRef result = nullptr;
+  const bool has = SecItemCopyMatching((__bridge CFDictionaryRef)q, &result) == errSecSuccess && result;
+  if (result) CFRelease(result);
+  SavedLoginCache()[k] = @(has);
   return has;
+}
+
+// One clipboard for every session of this app: each session's sync then
+// knows a promise another session put there (the copy of another Mac) and
+// leaves it alone instead of reading it, which would fetch it at once.
+std::shared_ptr<rdm::Clipboard> SharedClipboard() {
+  static std::shared_ptr<rdm::Clipboard> clipboard = rdm::SystemClipboard();
+  return clipboard;
 }
 
 // Whether something accepts TCP connections at host:port within timeout_ms:
@@ -446,8 +482,12 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 // The server this window shows: the address as typed, and the name it gave.
 @property(nonatomic, copy) NSString* target;
 @property(nonatomic, copy) NSString* serverName;
-// Set while it is connecting again after a drop (for the list).
+// Set while it is connecting again after a drop (for the list), and until
+// when it keeps trying.
 @property(nonatomic, strong) NSDate* reconnectingSince;
+@property(nonatomic, strong) NSDate* reconnectUntil;
+// The window was closed: nothing connects into it any more.
+@property(nonatomic, readonly) BOOL closed;
 // A session is attached (the picture is live).
 - (BOOL)isLive;
 // "已连接 12 分钟 · UDP · 18 ms · 2880×1800", for the list.
@@ -458,7 +498,10 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 - (rdm::DesktopSpec)initialDesktop;
 - (rdm::DesktopSpec)viewDesktop;
 - (void)saveWindowMode;
-- (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session;
+- (void)enterFullScreen;
+// `activate`: bring the window to the front (a new connection); a reconnect
+// leaves the windows as the user has them.
+- (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session activate:(BOOL)activate;
 - (void)sessionMoved:(const rdm::SessionReady&)ready;
 // A message over the picture (interrupted, switching, reconnecting) with a
 // Disconnect button; hidden again when the picture is back.
@@ -472,7 +515,10 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 @property(nonatomic, copy) void (^onRetry)(void);
 - (void)endSession;
 - (void)send:(const rda_input_event&)ev;
-- (BOOL)streamPoint:(NSPoint)p x:(int32_t*)x y:(int32_t*)y;
+// The picture's pixel under a point of the view; NO outside the picture,
+// unless `clamp` (then the nearest pixel of it).
+- (BOOL)streamPoint:(NSPoint)p x:(int32_t*)x y:(int32_t*)y clamp:(BOOL)clamp;
+- (BOOL)buttonHeld;
 - (NSCursor*)remoteCursor;
 - (void)placeCursor;
 - (void)key:(NSEvent*)e;
@@ -535,7 +581,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 - (void)pointer:(NSEvent*)e kind:(rda_input_kind)kind {
   rda_input_event ev = Event(kind);
   const NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
-  if (![self.owner streamPoint:p x:&ev.x y:&ev.y]) return;
+  // A drag that leaves the picture (past the window's edge, into the bars
+  // beside it) goes on along its edge, and the button is let go there: the
+  // server must see the release, or it keeps dragging.
+  const BOOL dragging = kind != RDA_INPUT_MOUSE_DOWN && [self.owner buttonHeld];
+  if (![self.owner streamPoint:p x:&ev.x y:&ev.y clamp:dragging]) return;
   if (kind != RDA_INPUT_MOUSE_MOVE) {
     ev.code = ButtonOf(e);
     if (ev.code == 0) return;
@@ -560,7 +610,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 - (void)scrollWheel:(NSEvent*)e {
   rda_input_event ev = Event(RDA_INPUT_SCROLL);
   const NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
-  if (![self.owner streamPoint:p x:&ev.x y:&ev.y]) return;
+  if (![self.owner streamPoint:p x:&ev.x y:&ev.y clamp:NO]) return;
   const double per_line = e.hasPreciseScrollingDeltas ? 10.0 : 1.0;
   _scrollX += -e.scrollingDeltaX / per_line;  // AppKit: x > 0 is left
   _scrollY += e.scrollingDeltaY / per_line;
@@ -626,6 +676,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSButton* _statusRetry;
   NSDate* _statusDeadline;
   NSTimer* _statusTimer;
+  BOOL _enteringFullScreen;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -716,6 +767,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
             symbol:(NSString*)symbol
              until:(NSDate*)deadline
           canRetry:(BOOL)canRetry {
+  if (_closed) return;  // a late callback of a session that has ended
   if (!_statusView) {
     _statusDim = [[NSView alloc] initWithFrame:_view.bounds];
     _statusDim.wantsLayer = YES;
@@ -775,8 +827,14 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [_statusSpinner startAnimation:nil];
   [self updateStatusCountdown];
   [_statusTimer invalidate];
-  _statusTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(updateStatusCountdown)
-                                                userInfo:nil repeats:YES];
+  // Weak: a repeating timer with a target keeps the target, and with it the
+  // window and its last picture, alive for as long as it runs.
+  __weak RemoteWindowController* weakSelf = self;
+  _statusTimer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer* t) {
+    RemoteWindowController* me = weakSelf;
+    if (me) [me updateStatusCountdown];
+    else [t invalidate];
+  }];
   const NSSize b = _view.bounds.size;
   _statusDim.frame = _view.bounds;
   [_statusView setFrameOrigin:NSMakePoint(std::round((b.width - 420) / 2), std::round((b.height - 148) / 2))];
@@ -860,7 +918,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   }
 }
 
-- (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session {
+- (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session activate:(BOOL)activate {
+  if (_session) [self endSession];  // never two at once: monitors and observers are per session
   [self hideStatus];
   _session = std::move(session);
   _viewer = _session->viewer();
@@ -873,7 +932,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
     _window.contentMinSize = NSMakeSize(rdm::kMinDesktopPoints, rdm::kMinDesktopPoints);
     [self desktopNeedsUpdate];  // the window may not be the size that was asked for
   }
-  [_window makeKeyAndOrderFront:nil];
+  if (activate) [_window makeKeyAndOrderFront:nil];
   [_window makeFirstResponder:_view];
   // Input source sync: whatever switches it here (Caps Lock, ⌃Space, the
   // menu) posts this distributed notification.
@@ -953,11 +1012,14 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 }
 
 - (void)dealloc {
+  [_statusTimer invalidate];
   [self endSession];
 }
 
 - (void)windowWillClose:(NSNotification*)note {
+  _closed = YES;
   [self saveWindowMode];
+  [self hideStatus];  // and its timer
   [self endSession];
   if (self.onClose) self.onClose();
 }
@@ -988,7 +1050,22 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
          NSApplicationPresentationHideMenuBar;
 }
 
+- (void)enterFullScreen {
+  if (_window.styleMask & NSWindowStyleMaskFullScreen) return;
+  _enteringFullScreen = YES;  // from now: the first picture must not size the window
+  [_window toggleFullScreen:nil];
+}
+
+- (void)windowWillEnterFullScreen:(NSNotification*)note {
+  _enteringFullScreen = YES;
+}
+
+- (void)windowDidFailToEnterFullScreen:(NSWindow*)window {
+  _enteringFullScreen = NO;
+}
+
 - (void)windowDidEnterFullScreen:(NSNotification*)note {
+  _enteringFullScreen = NO;
   [self releaseHeld];
   [self desktopNeedsUpdate];
   CATextLayer* hint = [CATextLayer layer];
@@ -1183,6 +1260,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [self rebuildCursor];
   [self updatePictureFilter];
   if (!first || w <= 0 || h <= 0) return;
+  // Full screen, or on its way there: the screen decides the size.
+  if (_enteringFullScreen || (_window.styleMask & NSWindowStyleMaskFullScreen)) return;
   const NSRect screen = (_window.screen ?: NSScreen.mainScreen).visibleFrame;
   // One stream pixel per backing pixel; per point for a 1x desktop asked
   // for on a Retina screen (text mode).
@@ -1205,14 +1284,22 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   return YES;
 }
 
-- (BOOL)streamPoint:(NSPoint)p x:(int32_t*)x y:(int32_t*)y {
+- (BOOL)streamPoint:(NSPoint)p x:(int32_t*)x y:(int32_t*)y clamp:(BOOL)clamp {
   double s, ox, oy;
   if (![self fitScale:&s ox:&ox oy:&oy]) return NO;
-  const double sx = (p.x - ox) / s, sy = _streamH - (p.y - oy) / s;  // view origin is bottom left
-  if (sx < 0 || sy < 0 || sx >= _streamW || sy >= _streamH) return NO;
+  double sx = (p.x - ox) / s, sy = _streamH - (p.y - oy) / s;  // view origin is bottom left
+  if (sx < 0 || sy < 0 || sx >= _streamW || sy >= _streamH) {
+    if (!clamp) return NO;
+    sx = std::clamp(sx, 0.0, static_cast<double>(_streamW - 1));
+    sy = std::clamp(sy, 0.0, static_cast<double>(_streamH - 1));
+  }
   *x = static_cast<int32_t>(sx);
   *y = static_cast<int32_t>(sy);
   return YES;
+}
+
+- (BOOL)buttonHeld {
+  return !_heldButtons.empty();
 }
 
 - (void)send:(const rda_input_event&)ev {
@@ -1542,6 +1629,26 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @end
 
+// One connection being made. Several can be under way at once (a window
+// connecting again after a drop while the user connects to another
+// computer); each carries what it needs, nothing is read back from the form.
+@interface ConnectAttempt : NSObject {
+ @public
+  std::string key, user, password;  // remembered once it works (SaveLogin)
+}
+@property(nonatomic, strong) RemoteWindowController* remote;
+@property(nonatomic) BOOL reused;     // into a window that is already open (a reconnect)
+@property(nonatomic) BOOL automatic;  // with a saved login rather than from the form
+@property(nonatomic) BOOL cancelled;  // the user gave up on it: whatever comes back is dropped
+@property(nonatomic, copy) NSString* target;
+@end
+
+@implementation ConnectAttempt
+- (void)dealloc {
+  std::fill(password.begin(), password.end(), '\0');
+}
+@end
+
 @interface AppDelegate ()
 - (RemoteWindowController*)windowForTarget:(NSString*)target;
 - (RemoteWindowController*)frontRemote;
@@ -1586,19 +1693,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSButton* _connectButton;
   NSProgressIndicator* _spinner;
   // One window per connected computer (several at once are fine), and the
-  // connection being made (one at a time).
+  // connections being made.
   NSMutableArray<RemoteWindowController*>* _remotes;
-  RemoteWindowController* _connecting;
+  NSMutableArray<ConnectAttempt*>* _attempts;
   std::unique_ptr<rdm::KnownHosts> _knownHosts;
-  // The connection under way: started by the app (at launch, or again after
-  // a drop) rather than the Connect button, and the window it goes into
-  // when it reconnects into the same one.
-  BOOL _automatic;
-  RemoteWindowController* _reuseRemote;
-  // The login being tried, remembered once it works (SaveLogin).
-  std::string _pendingKey, _pendingUser, _pendingPassword;
-  NSString* _pendingTarget;
-  std::chrono::steady_clock::time_point _reconnectUntil;
 }
 
 static NSTextField* Label(NSString* text, NSRect frame) {
@@ -1679,6 +1777,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
   _remotes = [NSMutableArray array];
+  _attempts = [NSMutableArray array];
   _knownHosts = std::make_unique<rdm::KnownHosts>(rdm::DefaultConfigDir() + "/known_hosts");
   [self buildMenu];
   _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 280)
@@ -1840,8 +1939,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (void)windowWillClose:(NSNotification*)note {
-  // The form closed without connecting: back to the list.
-  if (note.object == _connectWindow && !_connecting && LoadMachines().count > 0) {
+  if (note.object != _connectWindow) return;
+  // The form closed without connecting (Cancel): a connection it started is
+  // given up, and it is back to the list.
+  for (ConnectAttempt* a in _attempts) {
+    if (!a.reused) a.cancelled = YES;
+  }
+  [self updateBusy];
+  if (LoadMachines().count > 0) {
     dispatch_async(dispatch_get_main_queue(), ^{
       [self showMachines];
     });
@@ -2070,7 +2175,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 - (void)noticeReconnect:(id)sender {
   NSString* target = _noticeTarget;
   [self hideNotice:nil];
-  if (target.length == 0 || _connecting) return;
+  if (target.length == 0 || [self connectingTo:target]) return;
   if (RemoteWindowController* open = [self windowForTarget:target]) {
     [open.window makeKeyAndOrderFront:nil];
     return;
@@ -2257,7 +2362,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
 - (void)connectSelected:(id)sender {
   NSDictionary* m = [self chosenMachine];
-  if (!m || _connecting) return;
+  if (!m || [self connectingTo:m[@"target"]]) return;
   if (RemoteWindowController* open = [self windowForTarget:m[@"target"]]) {
     [_machinesWindow orderOut:nil];
     [open.window makeKeyAndOrderFront:nil];  // already connected: no second session to the same Mac
@@ -2290,7 +2395,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   std::string error;
   if (!key.empty()) _knownHosts->Forget(key, &error);
   NSMutableArray* list = [LoadMachines() mutableCopy];
-  [list removeObject:m];
+  [list filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary* x, NSDictionary*) {
+          return ![x[@"target"] isEqual:m[@"target"]];
+        }]];
   SaveMachines(list);
   [self reloadMachines];
   if (_machines.count == 0) [self showMachines];  // the form
@@ -2332,18 +2439,29 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   if ([a runModal] != NSAlertFirstButtonReturn) return;
   NSString* newTarget = [target.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
   NSString* newUser = [user.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-  if (MachineKey(newTarget).empty()) return;
-  // The saved password follows the computer to its new address or account.
+  const std::string old_key = MachineKey(m[@"target"]), new_key = MachineKey(newTarget);
+  if (new_key.empty()) return;
+  // The entry as it is now: a connection made while the dialog was open may
+  // have rewritten it (its time).
+  NSMutableArray* list = [LoadMachines() mutableCopy];
+  const NSUInteger i = [list indexOfObjectPassingTest:^BOOL(NSDictionary* x, NSUInteger, BOOL*) {
+    return [x[@"target"] isEqual:m[@"target"]];
+  }];
+  if (i == NSNotFound) return;
+  m = list[i];
+  // The saved password follows the computer to its new address. It goes only
+  // when the account was changed here to another one than it is for.
   std::string old_user, password;
-  const std::string old_key = MachineKey(m[@"target"]);
   if (LoadLogin(old_key, &old_user, &password)) {
-    ForgetLogin(old_key);
-    if ([newUser isEqualToString:NS(old_user)]) SaveLogin(MachineKey(newTarget), old_user, password);
+    const BOOL userEdited = ![newUser isEqualToString:m[@"user"] ?: @""];
+    if (userEdited && ![newUser isEqualToString:NS(old_user)]) {
+      ForgetLogin(old_key);
+    } else if (new_key != old_key) {
+      ForgetLogin(old_key);
+      SaveLogin(new_key, old_user, password);
+    }
     std::fill(password.begin(), password.end(), '\0');
   }
-  NSMutableArray* list = [LoadMachines() mutableCopy];
-  const NSUInteger i = [list indexOfObject:m];
-  if (i == NSNotFound) return;
   NSMutableDictionary* edited = [m mutableCopy];
   edited[@"target"] = newTarget;
   edited[@"user"] = newUser;
@@ -2360,41 +2478,56 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 // Connects to `target` with the login remembered for it, into `remote` (a
-// reconnect) or a new window. NO if there is no remembered login.
+// reconnect) or a new window. NO if there is no remembered login. The form
+// is not touched: the user may be filling it in for another computer.
 - (BOOL)connectWithSavedLoginTo:(NSString*)target remote:(RemoteWindowController*)remote {
-  std::string host, user, password;
+  std::string host;
   uint16_t port = 0;
-  if (!target || !ParseTarget(target, &host, &port) || !LoadLogin(rdm::KnownHosts::Key(host, port), &user, &password)) {
+  rdm::Auth auth;
+  if (!target || !ParseTarget(target, &host, &port) ||
+      !LoadLogin(rdm::KnownHosts::Key(host, port), &auth.username, &auth.password)) {
     return NO;
   }
-  _host.stringValue = target;
-  _user.stringValue = NS(user);
-  _authMode.selectedSegment = 0;
-  _code.hidden = YES;
-  _password.hidden = NO;
-  _user.hidden = NO;
-  _userLabel.hidden = NO;
-  _secretLabel.stringValue = @"密码";
-  _password.stringValue = NS(password);
-  std::fill(password.begin(), password.end(), '\0');
-  _automatic = YES;
-  _reuseRemote = remote;
-  [self connect:nil];
-  return YES;
+  const BOOL started = [self startConnectTo:target auth:auth remote:remote automatic:YES];
+  std::fill(auth.password.begin(), auth.password.end(), '\0');
+  return started;
 }
 
 // After a drop: the same window, the same server, until it works or a
 // minute has passed.
 - (void)reconnect:(RemoteWindowController*)remote {
-  if (![_remotes containsObject:remote] || !remote.window.visible) return;  // closed meanwhile
-  if (_connecting) {  // another connection is being made: wait for it
-    [self performSelector:@selector(reconnect:) withObject:remote afterDelay:1.0];
-    return;
-  }
+  // Closed meanwhile, or connected again already (an attempt that was under
+  // way when "立即重试" was pressed).
+  if (remote.closed || ![_remotes containsObject:remote] || remote.isLive) return;
+  if ([self attemptForRemote:remote]) return;  // one is under way: when it fails, the next is scheduled
   if (![self connectWithSavedLoginTo:remote.target remote:remote]) {
     [remote.window close];
     [self alert:@"连接已断开" text:@"连接断了，而且没有保存的密码可以用来重新连接。"];
   }
+}
+
+- (ConnectAttempt*)attemptForRemote:(RemoteWindowController*)remote {
+  for (ConnectAttempt* a in _attempts) {
+    if (a.remote == remote && !a.cancelled) return a;
+  }
+  return nil;
+}
+
+// A connection to `target` is being made (not counting ones given up).
+- (BOOL)connectingTo:(NSString*)target {
+  const std::string key = MachineKey(target);
+  for (ConnectAttempt* a in _attempts) {
+    if (!a.cancelled && !key.empty() && a->key == key) return YES;
+  }
+  return NO;
+}
+
+// The form and the list are busy while a connection the user started is
+// under way; a window reconnecting by itself does not block them.
+- (void)updateBusy {
+  BOOL busy = NO;
+  for (ConnectAttempt* a in _attempts) busy = busy || (!a.reused && !a.cancelled);
+  [self setBusy:busy];
 }
 
 - (void)connectToAnother:(id)sender {
@@ -2652,40 +2785,59 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   return yes;
 }
 
+// The form's Connect button (and the command line's pairing code).
 - (void)connect:(id)sender {
-  if (sender) {
-    _automatic = NO;  // the Connect button
-    _reuseRemote = nil;
-  }
-  if (_connecting) return;
   NSString* target = [_host.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-  std::string host;
-  uint16_t port = 0;
-  if (!ParseTarget(target, &host, &port)) return;
-
+  rdm::Auth auth;
+  if ([self usingPairing]) {
+    auth.method = rdm::AuthMethod::kPairingCode;
+    auth.code = _code.stringValue.UTF8String;
+  } else {
+    auth.username = _user.stringValue.UTF8String;
+    auth.password = _password.stringValue.UTF8String;
+  }
+  if (![self startConnectTo:target auth:auth remote:nil automatic:NO]) return;
   NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
   [defaults setObject:target forKey:@"lastHost"];
   [defaults setObject:_user.stringValue forKey:@"lastUser"];
+  _password.stringValue = @"";
+  _code.stringValue = @"";
+  std::fill(auth.password.begin(), auth.password.end(), '\0');
+}
+
+// Starts a connection to `target` in the background; connectFinished: gets
+// the outcome. Into `reuse` (a window connecting again) or a new window. NO
+// when nothing was started: no usable address, or the form's own connection
+// is still under way.
+- (BOOL)startConnectTo:(NSString*)target
+                  auth:(const rdm::Auth&)auth
+                remote:(RemoteWindowController*)reuse
+             automatic:(BOOL)automatic {
+  std::string host;
+  uint16_t port = 0;
+  if (!target || !ParseTarget(target, &host, &port)) return NO;
+  if (!reuse) {
+    // One session per computer: a second one would take the first one over.
+    if (RemoteWindowController* open = [self windowForTarget:target]) {
+      [open.window makeKeyAndOrderFront:nil];
+      return YES;
+    }
+    if ([self connectingTo:target]) return YES;
+  }
 
   rdm::RemoteSession::Options opts;
   opts.control.host = host;
   opts.control.port = port;
   opts.control.client_name = NSHost.currentHost.localizedName.UTF8String ?: "Mac";
-  if ([self usingPairing]) {
-    opts.control.auth.method = rdm::AuthMethod::kPairingCode;
-    opts.control.auth.code = _code.stringValue.UTF8String;
-  } else {
-    opts.control.auth.username = _user.stringValue.UTF8String;
-    opts.control.auth.password = _password.stringValue.UTF8String;
-  }
+  opts.control.auth = auth;
+  ConnectAttempt* attempt = [[ConnectAttempt alloc] init];
+  attempt->key = rdm::KnownHosts::Key(host, port);
+  attempt->user = auth.username;
   // Remembered once it works (connectFinished); nothing for pairing codes.
-  std::fill(_pendingPassword.begin(), _pendingPassword.end(), '\0');
-  _pendingKey = rdm::KnownHosts::Key(host, port);
-  _pendingUser = opts.control.auth.username;
-  _pendingPassword = opts.control.auth.method == rdm::AuthMethod::kPassword ? opts.control.auth.password : std::string();
-  _pendingTarget = target;
-  _password.stringValue = @"";
-  _code.stringValue = @"";
+  attempt->password = auth.method == rdm::AuthMethod::kPassword ? auth.password : std::string();
+  attempt.target = target;
+  attempt.reused = reuse != nil;
+  attempt.automatic = automatic;
 
   auto changed = std::make_shared<bool>(false);
   __weak AppDelegate* weakSelf = self;
@@ -2707,10 +2859,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // The window exists before the session starts: pictures may arrive while
   // Start() is still waiting for the connection to settle.
   // A reconnect goes into the window that is already there.
-  RemoteWindowController* remote = _reuseRemote ?: [[RemoteWindowController alloc] initWithTitle:hostName];
+  RemoteWindowController* remote = reuse ?: [[RemoteWindowController alloc] initWithTitle:hostName];
+  attempt.remote = remote;
   // Ask for a desktop made for this window: its pixels, its HiDPI scale. A
   // server that cannot build one shares its display as it is.
-  opts.control.request.desktop = _reuseRemote ? [remote viewDesktop] : [remote initialDesktop];
+  opts.control.request.desktop = reuse ? [remote viewDesktop] : [remote initialDesktop];
   opts.control.request.text_mode = TextMode();
   rda_viewer_config_default(&opts.viewer);
   opts.viewer.user = (__bridge void*)remote;
@@ -2722,7 +2875,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // other; they only cross when they are pasted (both ways for now; a
   // setting comes with the preferences window). Copied files only as their
   // names.
-  opts.clipboard = rdm::SystemClipboard();
+  opts.clipboard = SharedClipboard();
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
   opts.on_moving = [weakRemote](const std::string& reason) {
@@ -2769,56 +2922,69 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     });
   };
 
-  [self setBusy:YES];
-  _connecting = remote;
+  [_attempts addObject:attempt];
+  [self updateBusy];
   // Blocks copy what they capture, so the move-only pieces travel in
-  // shared holders.
+  // shared holders. The background block holds the attempt (and through it
+  // the window) only weakly: _attempts keeps it, so its last release, and
+  // the window's, happen on the main thread.
   auto boxed = std::make_shared<rdm::RemoteSession::Options>(std::move(opts));
   auto holder = std::make_shared<std::unique_ptr<rdm::RemoteSession>>();
   auto result = std::make_shared<rdm::ConnectResult>();
+  __weak ConnectAttempt* weakAttempt = attempt;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     *holder = rdm::RemoteSession::Start(std::move(*boxed), result.get());
     dispatch_async(dispatch_get_main_queue(), ^{
       AppDelegate* me = weakSelf;
-      if (me) [me connectFinished:remote session:std::move(*holder) result:*result changed:*changed];
+      ConnectAttempt* a = weakAttempt;
+      if (me && a) {
+        [me connectFinished:a session:std::move(*holder) result:*result changed:*changed];
+      } else {
+        holder->reset();  // on the main thread, like every other session's end
+      }
     });
   });
+  return YES;
 }
 
-- (void)connectFinished:(RemoteWindowController*)remote
+- (void)connectFinished:(ConnectAttempt*)attempt
                 session:(std::unique_ptr<rdm::RemoteSession>)session
                  result:(const rdm::ConnectResult&)result
                 changed:(bool)changed {
-  [self setBusy:NO];
-  const BOOL automatic = _automatic;
-  RemoteWindowController* reused = _reuseRemote;
-  _automatic = NO;
-  _reuseRemote = nil;
-  _connecting = nil;
+  [_attempts removeObject:attempt];
+  [self updateBusy];
+  RemoteWindowController* remote = attempt.remote;
+  const BOOL reused = attempt.reused;
+  // Given up (Cancel on the form): nothing is shown or saved; a session that
+  // did start ends here.
+  if (attempt.cancelled) return;
+  const BOOL windowGone = reused && (remote.closed || ![_remotes containsObject:remote]);
   if (!session) {
-    std::fill(_pendingPassword.begin(), _pendingPassword.end(), '\0');
-    _pendingPassword.clear();
-    if (reused && reused == remote) {
-      // Reconnecting: keep trying while the window is open and the minute
-      // has not passed.
+    if (reused) {
+      if (windowGone) return;  // the user closed it while it was trying: nothing to report
+      // Reconnecting: keep trying while the window is open (minimized or
+      // behind others counts) and the minute has not passed.
       const std::string& e = result.error;
       const bool transient = e == "connect_failed" || e == "connection_closed" || e == "timeout" ||
                              e == "media_failed" || e == "unavailable" || e == "busy" || e == "internal";
-      if (transient && remote.window.visible && std::chrono::steady_clock::now() < _reconnectUntil) {
+      if (transient && remote.reconnectUntil.timeIntervalSinceNow > 0) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reconnect:) object:remote];
         [self performSelector:@selector(reconnect:) withObject:remote afterDelay:3.0];
         return;
       }
-      [remote.window close];  // brings back the connect window
+      [remote.window close];  // brings back the list
       [self alert:[NSString stringWithFormat:@"没能重新连上 %@", remote.serverName ?: remote.target]
              text:DescribeError(result)
            target:remote.target];
       return;
     }
-    if (automatic && result.error == "bad_credentials") {
+    if (attempt.automatic && result.error == "bad_credentials") {
       // The password changed on that Mac: ask for the new one once.
-      ForgetLogin(_pendingKey);
-      _host.stringValue = _pendingTarget ?: @"";
-      _user.stringValue = NS(_pendingUser);
+      ForgetLogin(attempt->key);
+      _host.stringValue = attempt.target ?: @"";
+      _user.stringValue = NS(attempt->user);
+      _password.stringValue = @"";
+      [self setUsingPairing:NO];
       [self showConnectWindow];
       [_connectWindow makeFirstResponder:_password];
       [self alert:@"保存的密码不能用了"
@@ -2836,20 +3002,23 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     }
     return;
   }
-  if (reused && ![_remotes containsObject:remote]) return;  // closed meanwhile; the session closes here
+  if (windowGone) return;  // closed meanwhile; the session closes here
+  // Connected: nothing may connect into this window again by itself (a
+  // retry that was waiting would take this very session over).
+  [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reconnect:) object:remote];
   if (!reused) [_remotes addObject:remote];
-  if (!_pendingPassword.empty()) SaveLogin(_pendingKey, _pendingUser, _pendingPassword);
-  std::fill(_pendingPassword.begin(), _pendingPassword.end(), '\0');
-  _pendingPassword.clear();
-  remote.target = _pendingTarget;
+  if (!attempt->password.empty()) SaveLogin(attempt->key, attempt->user, attempt->password);
+  remote.target = attempt.target;
   remote.serverName = NS(result.server.server_name);
-  RememberMachine(remote.target, NS(_pendingUser), remote.serverName);
-  [remote attachSession:std::move(session)];
+  RememberMachine(remote.target, NS(attempt->user), remote.serverName);
+  // A reconnect leaves the windows as they are: the user may be typing in
+  // another one, or filling in the form.
+  [remote attachSession:std::move(session) activate:!reused];
   remote.reconnectingSince = nil;
+  remote.reconnectUntil = nil;
   remote.window.title = [NSString stringWithFormat:@"%@（%@）", remote.serverName, remote.target];
-  if (!reused && [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey] &&
-      !(remote.window.styleMask & NSWindowStyleMaskFullScreen)) {
-    [remote.window toggleFullScreen:nil];  // as it was left last time
+  if (!reused && [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey]) {
+    [remote enterFullScreen];  // as it was left last time
   }
   __weak AppDelegate* weakSelf = self;
   __weak RemoteWindowController* weakClosing = remote;
@@ -2863,11 +3032,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       if (me->_remotes.count == 0) [me showMachines];  // the last one closed: back to the list
     });
   };
-  // The password field must not stay the hidden window's first responder:
-  // it is what turns secure input on.
-  [_connectWindow makeFirstResponder:nil];
-  [_connectWindow orderOut:nil];
-  [_machinesWindow orderOut:nil];
+  if (!reused) {
+    // The password field must not stay the hidden window's first responder:
+    // it is what turns secure input on.
+    [_connectWindow makeFirstResponder:nil];
+    [_connectWindow orderOut:nil];
+    [_machinesWindow orderOut:nil];
+  }
   ReleaseSecureInput();
 }
 
@@ -2902,7 +3073,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       [NSObject cancelPreviousPerformRequestsWithTarget:me selector:@selector(reconnect:) object:r];
       [me reconnect:r];
     };
-    _reconnectUntil = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    remote.reconnectUntil = [NSDate dateWithTimeIntervalSinceNow:60];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reconnect:) object:remote];
     [self performSelector:@selector(reconnect:) withObject:remote afterDelay:1.0];
     return;
   }

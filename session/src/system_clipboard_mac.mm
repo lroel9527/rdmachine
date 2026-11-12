@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <cstring>
 
 #include "rdmachine/session/system_clipboard.h"
@@ -170,7 +171,11 @@ class MacClipboard : public Clipboard {
       NSArray<NSPasteboardItem*>* items = @[ item ];
       const NSInteger count = [pb clearContents];
       if (![pb writeObjects:items]) return std::nullopt;
-      provider_ = provider;  // kept until the next promise
+      {
+        // One clipboard may serve several sessions, each on its own thread.
+        std::lock_guard lock(provider_mu_);
+        provider_ = provider;  // kept until the next promise
+      }
       promise_count_ = static_cast<int64_t>(count);
       return static_cast<int64_t>(count);
     }
@@ -184,6 +189,7 @@ class MacClipboard : public Clipboard {
 
   const std::string name_;
   std::atomic<int64_t> promise_count_{-1};  // the change count of our promise on the pasteboard
+  std::mutex provider_mu_;
   RDMPromiseProvider* provider_ = nil;
 };
 

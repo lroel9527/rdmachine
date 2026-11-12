@@ -137,6 +137,18 @@ void AgentHost::Handle(AgentChannel& channel, const json& m) {
       volatile char* p = pass.data();
       for (size_t i = 0; i < pass.size(); ++i) p[i] = 0;
     }
+    // The daemon decides what runs: a session it no longer counts on (it
+    // gave up waiting for the answer) must not keep this agent busy.
+    bool stale;
+    {
+      std::lock_guard lock(mu_);
+      stale = in_session_;
+      in_session_ = false;
+    }
+    if (stale) {
+      Log("ending a session the daemon no longer uses");
+      media_.EndSession();
+    }
     std::string error;
     auto grant = media_.StartSession(*request, *secrets, origin, &error);
     std::fill(secrets->key.begin(), secrets->key.end(), 0);
@@ -181,10 +193,11 @@ std::optional<json> AgentHost::Ask(json m, const std::string& reply_type, int ti
   reply_.reset();
   reply_type_ = reply_type;
   reply_id_ = id;
-  AgentChannel* ch = channel_;
-  lock.unlock();
-  if (!ch->Send(m)) return std::nullopt;
-  lock.lock();
+  // Sent under the lock: Run() takes it before the channel goes away.
+  if (!channel_->Send(m)) {
+    reply_type_.clear();
+    return std::nullopt;
+  }
   cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return reply_.has_value() || stop_ || !channel_; });
   reply_type_.clear();
   auto out = std::move(reply_);
