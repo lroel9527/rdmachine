@@ -92,6 +92,11 @@ class MediaHost : public ServerDelegate {
                                            const SessionOrigin& origin, std::string* error) override;
   void EndSession() override;
 
+  // The password the next session's login was made with, when someone else
+  // checked it (the daemon): typed into the login window or lock screen as
+  // with type_login. Wiped after the next StartSession.
+  void ExpectLogin(const std::string& username, const std::string& password);
+
   // Whether an rdaccel host is running (for tests and status).
   bool session_running();
   // Thread-safe; cheap enough to poll a few times a second.

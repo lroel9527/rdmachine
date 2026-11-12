@@ -5,6 +5,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -43,6 +44,12 @@ class RemoteSession {
     // "connection_lost", "media_lost", or the server's bye reason. Runs on
     // the session's own thread: do not destroy the session from it.
     std::function<void(const std::string& reason)> on_ended;
+    // The server moved the session to another graphical session of that
+    // computer (docs/protocol.md, "会话迁移"): there is a new picture
+    // connection (the old one's frames stop), and what the application told
+    // the old one (desktop size, input source, picture mode) has to be said
+    // again. Runs on the session's own thread.
+    std::function<void(const SessionReady& session)> on_moved;
   };
 
   // Connects and waits until the picture's connection is up. On failure
@@ -51,14 +58,22 @@ class RemoteSession {
 
   ~RemoteSession();  // Close()
 
-  rda_viewer* viewer() const { return viewer_; }
-  const SessionReady& session() const { return session_; }
+  // Sends through the current picture connection (it changes when the
+  // session moves, so do not keep the viewer pointer). Thread-safe.
+  rda_status SendInput(const rda_input_event& ev);
+  rda_status SendMessage(uint32_t type, const uint8_t* payload, size_t n);
+  // The current viewer, for statistics and tests; may change on a move.
+  rda_viewer* viewer() const;
+  SessionReady session() const;
   // Sends bye and tears everything down. Not from on_ended or a viewer callback.
   void Close();
 
  private:
   RemoteSession() = default;
   void KeepAlive();
+  // A session_ready while the session runs: the session moved. Connects the
+  // new picture and swaps it in; false if it cannot.
+  bool FollowMove(const SessionReady& ready);
   // The viewer's callbacks go through these (user = this) so the session can
   // take the clipboard messages; the rest are passed on to options_.viewer.
   rda_viewer_config ViewerConfig();
@@ -71,6 +86,7 @@ class RemoteSession {
 
   Options options_;
   std::unique_ptr<ClientConnection> control_;
+  mutable std::mutex mu_;  // guards viewer_ and session_ once the session runs
   SessionReady session_;
   rda_viewer* viewer_ = nullptr;
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_

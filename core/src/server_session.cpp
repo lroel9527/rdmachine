@@ -28,12 +28,16 @@ ServerSession::ServerSession(ServerDelegate& delegate, ServerGuards guards, std:
                              std::function<Clock::time_point()> now)
     : delegate_(delegate), guards_(guards), peer_ip_(std::move(peer_ip)), now_(std::move(now)) {}
 
-ServerSession::~ServerSession() {
-  if (state_ == State::kInSession) delegate_.EndSession();
+ServerSession::~ServerSession() { EndStarted(); }
+
+void ServerSession::EndStarted() {
+  if (!started_) return;
+  started_ = false;
+  delegate_.EndSession();
 }
 
 ServerSession::Output ServerSession::Fail(const char* code, std::string message) {
-  if (state_ == State::kInSession) delegate_.EndSession();
+  EndStarted();
   state_ = State::kClosed;
   Output out;
   out.send.push_back(Error{code, std::move(message)});
@@ -59,10 +63,14 @@ ServerSession::Output ServerSession::Handle(const Message& in) {
             return OnAuth(m);
           },
           [&](const SessionRequest& m) -> Output {
+            if (state_ == State::kMoving) {
+              last_request_ = m;  // the moved session starts with this one
+              return {};
+            }
             if (state_ == State::kInSession) {
               // A new request replaces the running session, e.g. TCP after
               // UDP did not get through (docs/protocol.md).
-              delegate_.EndSession();
+              EndStarted();
               state_ = State::kExpectSessionRequest;
             }
             if (state_ != State::kExpectSessionRequest) return Fail("unexpected", "session_request not expected now");
@@ -77,12 +85,12 @@ ServerSession::Output ServerSession::Handle(const Message& in) {
             return {};
           },
           [&](const Bye&) -> Output {
-            if (state_ == State::kInSession) delegate_.EndSession();
+            EndStarted();
             state_ = State::kClosed;
             return {{}, true};
           },
           [&](const Error&) -> Output {
-            if (state_ == State::kInSession) delegate_.EndSession();
+            EndStarted();
             state_ = State::kClosed;
             return {{}, true};
           },
@@ -147,23 +155,25 @@ ServerSession::Output ServerSession::OnAuth(const Auth& m) {
   origin_.peer_ip = peer_ip_;
   origin_.method = m.method;
   origin_.username = m.method == AuthMethod::kPassword ? m.username : std::string();
+  origin_.account = m.method == AuthMethod::kPassword ? m.username : delegate_.PairingAccount();
   state_ = State::kExpectSessionRequest;
   AuthResult r;
   r.ok = true;
   return {{r}, false};
 }
 
-ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
-  if (m.display_index < 0) return Fail("no_display", "display_index must be >= 0");
+std::optional<SessionReady> ServerSession::TryStart(const SessionRequest& m, std::string* error) {
   SessionSecrets secrets;
-  if (!RandomBytes(secrets.key) || !RandomBytes(secrets.auth_token)) return Fail("internal", "random source failed");
-  std::string error;
-  std::optional<SessionGrant> grant = delegate_.StartSession(m, secrets, origin_, &error);
+  if (!RandomBytes(secrets.key) || !RandomBytes(secrets.auth_token)) {
+    *error = "internal";
+    return std::nullopt;
+  }
+  std::optional<SessionGrant> grant = delegate_.StartSession(m, secrets, origin_, error);
   if (!grant) {
     std::fill(secrets.key.begin(), secrets.key.end(), 0);
-    return Fail(error.empty() ? "internal" : error.c_str(), "could not start the session");
+    if (error->empty()) *error = "internal";
+    return std::nullopt;
   }
-  state_ = State::kInSession;
   SessionReady ready;
   ready.transport = grant->transport;
   ready.port = grant->port;
@@ -173,7 +183,52 @@ ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
   ready.desktop = grant->desktop;
   ready.login_window = grant->login_window;
   std::fill(secrets.key.begin(), secrets.key.end(), 0);
-  return {{ready}, false};
+  return ready;
+}
+
+ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
+  if (m.display_index < 0) return Fail("no_display", "display_index must be >= 0");
+  last_request_ = m;
+  std::string error;
+  std::optional<SessionReady> ready = TryStart(m, &error);
+  if (!ready) return Fail(error.c_str(), "could not start the session");
+  state_ = State::kInSession;
+  started_ = true;
+  return {{*ready}, false};
+}
+
+ServerSession::Output ServerSession::Tick() {
+  if (state_ != State::kInSession && state_ != State::kMoving) return {};
+  const auto now = now_();
+  if (state_ == State::kMoving && now < next_try_) return {};
+  const SessionCheck check = delegate_.CheckSession(origin_);
+  if (check.action == SessionCheck::Action::kEnd) {
+    // The client hears why first; the session ends when the connection
+    // closes right after (the destructor), so the picture does not drop
+    // before the reason arrives.
+    state_ = State::kClosed;
+    return {{Bye{check.reason.empty() ? "session_ended" : check.reason}}, true};
+  }
+  if (state_ == State::kInSession) {
+    if (check.action != SessionCheck::Action::kMove) return {};
+    // Likewise: session_moving goes out before the picture stops (next tick).
+    state_ = State::kMoving;
+    move_deadline_ = now + kMoveTimeout;
+    next_try_ = now;
+    return {{SessionMoving{check.reason}}, false};
+  }
+  // kMoving: end the old session, then start again where the picture is now.
+  EndStarted();
+  std::string error;
+  std::optional<SessionReady> ready = TryStart(last_request_, &error);
+  if (ready) {
+    state_ = State::kInSession;
+    started_ = true;
+    return {{*ready}, false};
+  }
+  if (now >= move_deadline_) return Fail(error.c_str(), "the session could not be moved");
+  next_try_ = now + std::chrono::seconds(1);
+  return {};
 }
 
 }  // namespace rdm

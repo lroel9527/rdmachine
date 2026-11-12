@@ -127,7 +127,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `auth_token` | base64，32 字节 | 一次性令牌，客户端放进 rdaccel viewer 的 `auth_token`；服务端在 `on_auth` 里用常数时间比较核对，用一次就作废，30 秒内没用也作废 |
 | `displays` | 数组 | 可选的显示器：`index`、`name`、`width`、`height`（像素）、`scale`（每点像素数） |
 | `desktop` | 对象，可选 | 为这次请求建好的桌面（`width`、`height`、`scale`，尺寸可能被调整过）。没有这个字段：客户端没请求，或者服务端建不了，画面是服务端自己的显示器，客户端按比例缩放显示 |
-| `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后这条连接会断开，客户端应该自己重新连接，见下文“登录窗口和锁屏”。没有这个字段等于 `false` |
+| `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后会话迁移到他的桌面，见下文“会话迁移”。没有这个字段等于 `false` |
 
 客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
@@ -137,7 +137,11 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ### bye（双向）
 
-`{"type":"bye","reason":"<原因>"}`，发完关闭。原因：`user_closed`（用户主动断开）、`server_shutdown`、`session_replaced`（同一用户从别处连进来）、`idle_timeout`。
+`{"type":"bye","reason":"<原因>"}`，发完关闭。原因：`user_closed`（用户主动断开）、`server_shutdown`、`session_replaced`（同一用户从别处连进来）、`idle_timeout`、`console_changed`（被控 Mac 上换了另一个人登录，见“会话迁移”）。
+
+### session_moving（服务端 → 客户端）
+
+`{"type":"session_moving","reason":"<原因>"}`，会话进行中才发：画面要换到被控 Mac 的另一个图形会话（有人在登录窗口登录、退出登录、切换用户）。旧的 rdaccel 连接随后断开，控制连接保持；之后同一条连接上会再来一条 `session_ready`（新的端口、密钥、令牌，`login_window` 表示新画面是不是登录窗口），客户端用它建新的画面连接，也可能是 `bye` / `error`（迁移失败）。原因：`user_logged_in`、`user_logged_out`、`user_switched`、`agent_restarted`。见下文“会话迁移”。
 
 ### error（双向）
 
@@ -178,15 +182,41 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/main.mm`（`toggleTextMode:`、`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。
 
-## 登录窗口和锁屏
+## 守护进程和 agent
 
-被控 Mac 上有两份同一个服务端（`packaging/macos/rdmachine-service install` 装的两个 LaunchAgent）：用户会话里的那份（菜单栏应用）和登录窗口会话里的那份（`rdmachine-server --login-window`，没人登录时运行）。同一时刻只有其中一份在监听 4100，两份用同一个 TLS 身份（安装时从用户的配置目录复制到 `/Library/Application Support/rdmachine`），客户端看到的指纹一样。
+装成服务（`rdmachine-service install`）以后，被控 Mac 上的服务端分成三份同一个程序（`RDMachine Server.app` 里的 `rdmachine-server`）：
 
-- **锁屏**：用户会话里的服务端照常工作，画面就是锁屏。用账号密码登录时，如果会话开始时屏幕锁着，服务端等画面连上后替用户把密码填进锁屏并回车。用配对码登录时不填（没有密码），用户在远程画面里自己输。
-- **登录窗口**：登录窗口里的服务端接受这台 Mac 上任何账号的密码（PAM），`session_ready.login_window` 为 `true`，并在画面连上后把密码填进登录窗口（登录窗口设成“姓名和密码”时先填账号、Tab，再填密码），回车登录。不提供配对码（没有人能看到）。
-- **交接**：用户在登录窗口登录后，登录窗口会话结束，那份服务端退出，连接断开（`bye`/连接丢失）；用户会话里的服务端随登录启动。客户端如果刚才的会话是 `login_window`，就用同一组账号密码自动重新连接（每 2 秒一次，最多 90 秒），连上的就是新登录用户的桌面。这组账号密码只在内存里保存到重新连上或放弃为止，之后清零；不是登录窗口的会话连上后立刻清零。
-- 填写用的按键：ASCII 按美式键盘的物理键发送（密码框接收按键比接收字符可靠），其他字符按字符发送；先轻按一下 Shift 唤醒显示器，1.5 秒后开始填。服务端不保存密码，用完清零，日志里只写“为某用户填了登录”。
-- 实现：`core/include/rdmachine/login_keys.h`（按键）、`session/include/rdmachine/session/login_screen.h`（锁屏状态、登录窗口设置）、`MediaHost` 的 `login_window` / `type_login`。
+- **守护进程**（`--daemon`，LaunchDaemon，root，开机就运行）：监听 TCP 4100，持有服务端身份（`/Library/Application Support/rdmachine`，安装时从用户的配置目录复制过来，客户端看到的指纹不变），负责登录（PAM）和配对码，按“谁占着控制台”把会话交给对应的 agent。
+- **登录窗口 agent**（`--login-window`，登录窗口会话里的 LaunchAgent，root）：没人登录时的画面。
+- **用户 agent**（菜单栏应用，用户会话里的 LaunchAgent）：那个用户的桌面；守护进程的套接字存在时自动成为 agent，否则像 3.0 之前那样自己监听（独立模式）。
+
+agent 负责画面：rdaccel 的采集、编码、注入和虚拟屏，画面的 UDP 4100 / TCP 4101 由正在服务的那个 agent 自己监听（同一时刻只有一个）。守护进程和 agent 之间是本机的 Unix 套接字 `/var/run/rdmachine/agent.sock`，帧格式同控制协议（4 字节长度 + JSON），不加密；守护进程只接受代码签名和自己相同的程序（macOS 上用对方的 audit token 核对指定要求），登录窗口 agent 必须是 root，用户 agent 是那个用户。消息（`core/include/rdmachine/agent_link.h`）：
+
+| 方向 | 消息 | 内容 |
+| --- | --- | --- |
+| agent → 守护进程 | `hello` | `kind`（`aqua` / `loginwindow`）、`version`（1） |
+| 守护进程 → agent | `welcome` | 服务端名、指纹、端口（给菜单栏显示） |
+| 守护进程 → agent | `start_session` | `id`、`request`（同 `session_request`）、`secrets`（密钥和令牌）、`origin`、可选 `login`（账号密码，见下文） |
+| agent → 守护进程 | `session_started` / `session_failed` | `reply_to`；`grant`（同 `session_ready`，不含密钥）或 `error` |
+| 守护进程 → agent | `end_session` | `id`；agent 停掉画面、放开端口后回 `session_ended` |
+| agent → 守护进程 | `issue_pairing_code` / `pairing_code_status` | 菜单栏要配对码；守护进程回 `pairing_code`（`code`、`remaining_ms`）。只接受当前控制台用户的 agent |
+| agent → 守护进程 | `disconnect` / `settings` | 菜单里的“断开当前连接”；端口和是否允许配对码改了（守护进程换端口重新监听）。同上，只接受控制台用户的 agent |
+
+**登录规则**：有人登录时只接受那个用户的密码（`not_console_user`）；在登录窗口时接受这台 Mac 上任何账号的密码。配对码只由当前控制台用户的菜单栏发出，登录窗口没有。守护进程找不到该接手的 agent 时（登录窗口或用户会话的 agent 还没起来）`session_request` 回 `error`（`unavailable`）。
+
+**替用户填写密码**：用账号密码登录后的第一个会话，如果在登录窗口或者用户会话正锁着屏，agent 等画面连上后轻按 Shift 唤醒显示器，1.5 秒后把密码填进去并回车（登录窗口设成“姓名和密码”时先填账号和 Tab）。ASCII 按美式键盘的物理键发，其他字符按字符发。密码只在守护进程和 agent 的内存里留到这次会话开始，填完清零，不写盘、不进日志；配对码登录不填。会话迁移到登录窗口（用户退出登录）时不填，免得刚退出又被登录回去。
+
+## 会话迁移
+
+控制台换了主人时，守护进程在控制连接上把会话搬过去，客户端不用重新登录：
+
+1. 守护进程每 250 毫秒看一次控制台（`/dev/console` 的主人）和正在服务的 agent。主人变了，或者那个 agent 没了（崩溃后 launchd 重启它）：
+   - 新主人是登录窗口，或者就是这次登录的账号（密码登录是用户名；配对码登录是用码时的控制台用户）：发 `session_moving`，下一轮结束旧 agent 的画面（等它放开端口），然后每秒尝试在新 agent 上开始，最多 60 秒；成功就发新的 `session_ready`，失败发 `error`。
+   - 新主人是别人：发 `bye`（`console_changed`），结束会话。
+2. 客户端收到 `session_moving` 后不把画面断开当成失败，等新的 `session_ready`（最多 75 秒），建新的 viewer 换上，再把窗口大小（请求桌面）、键盘语言、文字模式重新告诉服务端。新的 UDP 不通时在同一条连接上改要 TCP。
+3. 画面断开和原因（`bye`、`session_moving`）可能前后脚到：客户端在画面断开后等 1.5 秒，没有收到原因才算 `media_lost`。
+
+例子：从登录窗口连进来、输密码登录，服务端填好密码，用户会话起来后画面自动换成桌面；在远程退出登录，画面回到登录窗口（不会自动再登录）。
 
 ## 剪贴板
 
@@ -267,7 +297,7 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 | 错误码 | 出现在 | 含义 |
 | --- | --- | --- |
 | `bad_credentials` | `auth_result` | 账号密码或配对码不对 |
-| `not_console_user` | `auth_result` | M0：账号不是当前已登录图形会话的用户 |
+| `not_console_user` | `auth_result` | 账号不是当前已登录图形会话的用户（在登录窗口时任何账号都可以） |
 | `code_expired` | `auth_result` | 配对码过期或已作废 |
 | `rate_limited` | `auth_result` | 失败太多，看 `retry_after_ms` |
 | `method_unsupported` | `auth_result` | 服务端没开这种登录方式 |
@@ -277,11 +307,12 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 | `no_display` | `error` | 请求的显示器不存在 |
 | `capture_denied` | `error` | 服务端没有“屏幕录制”权限，无法开始会话 |
 | `busy` | `error` | 已有会话在进行（M0 一次只服务一个客户端） |
+| `unavailable` | `error` | 装成服务时：该接手的 agent（登录窗口或用户会话的）还没起来，过一会儿再连 |
 | `internal` | `error` | 服务端内部错误，详情看服务端日志 |
 
 ## 以后会加的
 
-- 登录窗口和锁屏时的连接：已做，见上文“登录窗口和锁屏”。
+- 登录窗口和锁屏时的连接、会话迁移：3.0 已做，见上文“守护进程和 agent”“会话迁移”。
 - 保持登录：`enroll_key`（登录后上传公钥）、`auth` 的 `key` 方式（对服务端随机数签名）、撤销。见[决定](decisions.md)的“保持登录”。
 - 被控端审批弹窗（NoMachine 的 0/1/2 三档）、双因素认证：以后。
 - 切换显示器、单独的文件传输窗口（大文件、选目录，类似 NoMachine 的 Transfer a file）：以后逐步加消息类型。断线后自动重连不做（见[决定](decisions.md)的“下一步范围”）。

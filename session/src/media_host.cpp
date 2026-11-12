@@ -70,6 +70,13 @@ bool MediaHost::CheckPassword(const std::string& username, const std::string& pa
   return ok;
 }
 
+void MediaHost::ExpectLogin(const std::string& username, const std::string& password) {
+  if (!options_.type_login || password.empty()) return;
+  std::lock_guard lock(login_mu_);
+  Wipe(pending_login_.password);
+  pending_login_ = PendingLogin{username, password, Clock::now()};
+}
+
 bool MediaHost::session_running() {
   std::lock_guard lock(mu_);
   return host_ != nullptr;

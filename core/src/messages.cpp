@@ -182,6 +182,7 @@ json ToJson(const SessionReady& m) {
 json ToJson(const Ping& m) { return {{"id", m.id}}; }
 json ToJson(const Pong& m) { return {{"id", m.id}}; }
 json ToJson(const Bye& m) { return {{"reason", m.reason}}; }
+json ToJson(const SessionMoving& m) { return {{"reason", m.reason}}; }
 json ToJson(const Error& m) { return {{"code", m.code}, {"message", m.message}}; }
 
 template <typename T>
@@ -306,6 +307,7 @@ const char* MessageType(const Message& m) {
     const char* operator()(const Pong&) { return "pong"; }
     const char* operator()(const Bye&) { return "bye"; }
     const char* operator()(const Error&) { return "error"; }
+    const char* operator()(const SessionMoving&) { return "session_moving"; }
   };
   return std::visit(V{}, m);
 }
@@ -339,6 +341,11 @@ ParseResult ParseMessage(std::string_view text) {
   if (type == "bye") {
     Bye m;
     if (!r.Str("reason", &m.reason)) return Bad(r.error);
+    return Ok(std::move(m));
+  }
+  if (type == "session_moving") {
+    SessionMoving m;
+    if (!r.Str("reason", &m.reason, false)) return Bad(r.error);
     return Ok(std::move(m));
   }
   if (type == "error") {

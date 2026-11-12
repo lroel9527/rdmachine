@@ -25,6 +25,11 @@ class FakeDelegate : public ServerDelegate {
       *error = "busy";
       return std::nullopt;
     }
+    if (refuse_starts > 0) {
+      --refuse_starts;
+      *error = "unavailable";
+      return std::nullopt;
+    }
     if (request.display_index > 0) {
       *error = "no_display";
       return std::nullopt;
@@ -45,6 +50,12 @@ class FakeDelegate : public ServerDelegate {
     busy = false;
     ++ends;
   }
+  SessionCheck CheckSession(const SessionOrigin&) override {
+    std::lock_guard lock(mu);
+    SessionCheck c = check;
+    if (c.action == SessionCheck::Action::kMove) check = {};  // one move per request
+    return c;
+  }
 
   std::mutex mu;
   bool busy = false;
@@ -52,6 +63,8 @@ class FakeDelegate : public ServerDelegate {
   SessionRequest last_request;
   SessionSecrets last_secrets;
   SessionOrigin last_origin;
+  SessionCheck check;    // what CheckSession answers next
+  int refuse_starts = 0;  // this many StartSession calls fail ("unavailable")
 };
 
 }  // namespace rdm::testing

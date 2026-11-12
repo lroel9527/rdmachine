@@ -279,7 +279,8 @@ int main(int argc, char** argv) {
   }
   std::printf("connected to %s (%s), media over %s port %u\n", result.server.server_name.c_str(), host.c_str(),
               session->session().transport == rdm::MediaTransport::kTcp ? "tcp" : "udp", session->session().port);
-  for (const auto& d : session->session().displays)
+  const rdm::SessionReady ready = session->session();
+  for (const auto& d : ready.displays)
     std::printf("  display %d: %s %dx%d\n", d.index, d.name.c_str(), d.width, d.height);
   if (session->session().desktop) {
     std::printf("  desktop built: %s\n", rdm::FormatDesktopSpec(*session->session().desktop).c_str());
@@ -294,7 +295,7 @@ int main(int argc, char** argv) {
   std::printf("received %d frame(s) of %dx%d\n", stats.frames.load(), stats.width.load(), stats.height.load());
   if (set_text_mode && stats.frames > 0) {
     const std::string payload = rdm::EncodePictureMode({*set_text_mode});
-    const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kPictureModeMessageType,
+    const rda_status st = session->SendMessage(rdm::kPictureModeMessageType,
                                                   reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
     std::printf("asked for text mode %s: %s\n", *set_text_mode ? "on" : "off", st == RDA_OK ? "sent" : rda_last_error());
     std::fflush(stdout);
@@ -303,7 +304,7 @@ int main(int argc, char** argv) {
   if (resize_desktop && stats.frames > 0) {
     const std::optional<rdm::DesktopSpec> planned = rdm::PlanDesktop(*resize_desktop);
     const std::string payload = rdm::EncodeDesktopSpec(*resize_desktop);
-    const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kDesktopRequestMessageType,
+    const rda_status st = session->SendMessage(rdm::kDesktopRequestMessageType,
                                                   reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
     std::printf("asked for desktop %s: %s\n", rdm::FormatDesktopSpec(*resize_desktop).c_str(),
                 st == RDA_OK ? "sent" : rda_last_error());
@@ -319,7 +320,7 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
   }
   if (!input_source_json.empty()) {
-    const rda_status st = rda_viewer_send_message(session->viewer(), rdm::kInputSourceMessageType,
+    const rda_status st = session->SendMessage(rdm::kInputSourceMessageType,
                                                   reinterpret_cast<const uint8_t*>(input_source_json.data()),
                                                   input_source_json.size());
     std::printf("sent input source: %s\n", st == RDA_OK ? "ok" : rda_last_error());
@@ -334,7 +335,7 @@ int main(int argc, char** argv) {
       ev.x = click_x;
       ev.y = click_y;
       if (kind != RDA_INPUT_MOUSE_MOVE) ev.code = RDA_BUTTON_LEFT;
-      rda_viewer_send_input(session->viewer(), &ev);
+      session->SendInput(ev);
     };
     send(RDA_INPUT_MOUSE_MOVE);
     if (!move_only) {

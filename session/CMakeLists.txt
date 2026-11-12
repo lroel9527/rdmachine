@@ -10,14 +10,16 @@ add_library(rdm_session STATIC
   src/system_auth.cpp
   src/media_host.cpp
   src/viewer.cpp
-  src/remote_session.cpp)
+  src/remote_session.cpp
+  src/daemon.cpp
+  src/agent_host.cpp)
 if(APPLE)
-  target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm)
-  set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm
+  target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm)
+  set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
     PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-  target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics")
+  target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security")
 else()
-  target_sources(rdm_session PRIVATE src/system_clipboard.cpp src/virtual_desktop.cpp src/login_screen.cpp)
+  target_sources(rdm_session PRIVATE src/system_clipboard.cpp src/virtual_desktop.cpp src/login_screen.cpp src/code_identity.cpp)
 endif()
 add_library(rdmachine::session ALIAS rdm_session)
 target_include_directories(rdm_session PUBLIC include)

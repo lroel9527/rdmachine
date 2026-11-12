@@ -19,7 +19,8 @@ add_library(rdm_core STATIC
   src/desktop.cpp
   src/picture_mode.cpp
   src/session_stats.cpp
-  src/login_keys.cpp)
+  src/login_keys.cpp
+  src/agent_link.cpp)
 add_library(rdmachine::core ALIAS rdm_core)
 target_include_directories(rdm_core PUBLIC include)
 target_link_libraries(rdm_core

@@ -1,7 +1,7 @@
 #!/bin/sh
 # rdmachine-service: runs the rdmachine server as a service of this Mac, like
 # NoMachine's nxserver --install / --status / --start / --stop / --restart /
-# --startmode (docs/decisions.md, "服务和自动启动").
+# --startmode (docs/decisions.md, "守护进程和 agent", "服务和自动启动").
 #
 #   sudo rdmachine-service install [--app "/Applications/RDMachine Server.app"]
 #   sudo rdmachine-service uninstall
@@ -9,39 +9,43 @@
 #   sudo rdmachine-service start | stop | restart
 #   sudo rdmachine-service startmode automatic | manual
 #
-# launchd is the watchdog. install adds two LaunchAgents of the same server
-# application, each started automatically and restarted by launchd when it
-# exits on an error (a deliberate Quit or stop stays stopped):
-#   org.rdmachine.server              every user's login session: the menu bar
-#                                     app, started at login
-#   org.rdmachine.server.loginwindow  the login window session, from startup
-#                                     until someone logs in: no menu bar; any
-#                                     account of this Mac logs in with its
-#                                     password, and the server types that
-#                                     password into the login window
-# install also copies the server identity (and settings) of the user running
-# sudo to /Library/Application Support/rdmachine, so the login window shows
-# clients the same fingerprint; run install again after changing the port or
-# making a new identity. The login window agent starts at the next logout or
-# startup; the session agent at once (if no server runs yet) and at every
-# login.
+# launchd is the watchdog: it starts the pieces below and starts them again
+# when they exit on an error (a deliberate stop or Quit stays stopped).
+#   org.rdmachine.daemon              LaunchDaemon, root, from startup: the
+#                                     control port, the server identity, the
+#                                     logins; hands each session to the agent
+#                                     of whoever owns the console, and moves it
+#                                     when that changes (login, logout, switch)
+#   org.rdmachine.server.loginwindow  LaunchAgent in the login window: shows
+#                                     the login window, types the password of
+#                                     a password login into it
+#   org.rdmachine.server              LaunchAgent in each user's session: the
+#                                     menu bar app, showing that user's desktop
 #
-# startmode manual keeps the agents installed but starts nothing by itself:
-# start / stop work on the current login session (and the login window
-# agent, when it runs).
+# install copies the server identity (and settings) of the user running sudo
+# to /Library/Application Support/rdmachine, so clients see the fingerprint
+# they already trust. It starts the daemon at once and restarts the server in
+# the current session as its agent (an open connection drops once).
+#
+# startmode manual keeps everything installed but starts nothing by itself;
+# start / stop then work on the daemon and the current session's agent.
 set -eu
 
 APP="/Applications/RDMachine Server.app"
 AGENTS=/Library/LaunchAgents
+DAEMONS=/Library/LaunchDaemons
+DAEMON_LABEL=org.rdmachine.daemon
 SESSION_LABEL=org.rdmachine.server
 LW_LABEL=org.rdmachine.server.loginwindow
+DAEMON_PLIST="$DAEMONS/$DAEMON_LABEL.plist"
 SESSION_PLIST="$AGENTS/$SESSION_LABEL.plist"
 LW_PLIST="$AGENTS/$LW_LABEL.plist"
 SYS_DIR="/Library/Application Support/rdmachine"
-LOG=/Library/Logs/rdmachine-loginwindow.log
+DAEMON_LOG=/Library/Logs/rdmachine-daemon.log
+LW_LOG=/Library/Logs/rdmachine-loginwindow.log
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -53,20 +57,19 @@ need_root() {
 }
 
 console_user() { stat -f %Su /dev/console; }
-console_uid() { id -u "$(console_user)" 2>/dev/null || echo ""; }
+console_uid() { stat -f %u /dev/console; }
 
-# The plists' RunAtLoad decides automatic or manual.
 startmode() {
-  if [ ! -f "$SESSION_PLIST" ]; then
+  if [ ! -f "$DAEMON_PLIST" ]; then
     echo "not installed"
-  elif [ "$(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' "$SESSION_PLIST" 2>/dev/null)" = "true" ]; then
+  elif [ "$(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' "$DAEMON_PLIST" 2>/dev/null)" = "true" ]; then
     echo automatic
   else
     echo manual
   fi
 }
 
-write_plist() {  # path label session-type run-at-load log program-args...
+write_plist() {  # path label session-type(or "") run-at-load log program-args...
   path="$1"; label="$2"; session="$3"; at_load="$4"; log="$5"; shift 5
   {
     cat <<EOF
@@ -76,9 +79,12 @@ write_plist() {  # path label session-type run-at-load log program-args...
 <dict>
   <key>Label</key><string>$label</string>
   <key>AssociatedBundleIdentifiers</key><array><string>org.rdmachine.server</string></array>
-  <key>LimitLoadToSessionType</key><array><string>$session</string></array>
-  <key>ProgramArguments</key><array>
 EOF
+    if [ -n "$session" ]; then
+      printf '  <key>LimitLoadToSessionType</key><array><string>%s</string></array>\n' "$session"
+      printf '  <key>ProcessType</key><string>Interactive</string>\n'
+    fi
+    printf '  <key>ProgramArguments</key><array>\n'
     for a in "$@"; do
       printf '    <string>%s</string>\n' "$a"
     done
@@ -87,7 +93,6 @@ EOF
   <key>RunAtLoad</key><$at_load/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>5</integer>
-  <key>ProcessType</key><string>Interactive</string>
 EOF
     if [ -n "$log" ]; then
       printf '  <key>StandardOutPath</key><string>%s</string>\n' "$log"
@@ -105,19 +110,48 @@ EOF
 
 write_plists() {  # true|false (RunAtLoad)
   server="$APP/Contents/MacOS/rdmachine-server"
+  write_plist "$DAEMON_PLIST" "$DAEMON_LABEL" "" "$1" "$DAEMON_LOG" "$server" --daemon
   write_plist "$SESSION_PLIST" "$SESSION_LABEL" Aqua "$1" "" "$server"
-  write_plist "$LW_PLIST" "$LW_LABEL" LoginWindow "$1" "$LOG" "$server" --login-window
+  write_plist "$LW_PLIST" "$LW_LABEL" LoginWindow "$1" "$LW_LOG" "$server" --login-window
+  for f in "$DAEMON_LOG" "$LW_LOG"; do
+    touch "$f"
+    chown root:wheel "$f"
+    chmod 600 "$f"
+  done
 }
 
-# The server app the installed plists point at.
 installed_app() {
-  s=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$SESSION_PLIST" 2>/dev/null || true)
+  s=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$DAEMON_PLIST" 2>/dev/null || true)
   [ -n "$s" ] && APP="${s%/Contents/MacOS/rdmachine-server}"
+  return 0
 }
 
+daemon_loaded() { launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1; }
 session_loaded() {
   uid=$(console_uid)
-  [ -n "$uid" ] && launchctl print "gui/$uid/$SESSION_LABEL" >/dev/null 2>&1
+  [ "$uid" != 0 ] && launchctl print "gui/$uid/$SESSION_LABEL" >/dev/null 2>&1
+}
+
+start_daemon() {
+  if daemon_loaded; then
+    launchctl kickstart "system/$DAEMON_LABEL" 2>/dev/null || true
+  else
+    launchctl bootstrap system "$DAEMON_PLIST"
+  fi
+}
+
+# The current session's server becomes the daemon's agent: a copy started by
+# hand (standalone, holding the port) gives way to the LaunchAgent.
+start_session_agent() {
+  uid=$(console_uid)
+  [ "$uid" = 0 ] && return 0
+  if session_loaded; then
+    launchctl kickstart -k "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
+  else
+    pkill -TERM -u "$uid" -f "$APP/Contents/MacOS/rdmachine-server" 2>/dev/null || true
+    sleep 1
+    launchctl bootstrap "gui/$uid" "$SESSION_PLIST" 2>/dev/null || launchctl kickstart "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
+  fi
 }
 
 do_install() {
@@ -127,10 +161,9 @@ do_install() {
     echo "not found: $server (install RDMachine Server.app first, or pass --app)" >&2
     exit 1
   fi
-  # The experiment that came before this command (tools/loginwindow-experiment).
+  # What 2.3.0 and the experiment before it installed.
   rm -f "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
 
-  # The identity and settings of the user who ran sudo.
   user="${SUDO_USER:-}"
   if [ -z "$user" ] || [ "$user" = root ]; then user=$(console_user); fi
   home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
@@ -142,61 +175,60 @@ do_install() {
     for f in server-cert.pem server-key.pem server-settings.json; do
       [ -f "$user_dir/$f" ] && install -o root -g wheel -m 600 "$user_dir/$f" "$SYS_DIR/$f"
     done
-    echo "copied the server identity of $user: the login window shows the same fingerprint:"
-    "$server" --fingerprint --config-dir="$SYS_DIR" || true
+    echo "copied the server identity of $user; clients see the same fingerprint:"
   else
-    echo "warning: $user has no server identity yet (start RDMachine Server once, then install again);" >&2
-    echo "         until then the login window makes its own, and clients see a different fingerprint" >&2
+    echo "note: $user has no server identity yet: the daemon makes a new one, and clients are asked to trust it:" >&2
   fi
+  "$server" --daemon --fingerprint --config-dir="$SYS_DIR" || true
 
   mode=$(startmode)
   [ "$mode" = "not installed" ] && mode=automatic
   if [ "$mode" = automatic ]; then write_plists true; else write_plists false; fi
-  touch "$LOG"
-  chown root:wheel "$LOG"
-  chmod 600 "$LOG"
 
-  # The current login session: hand the server to launchd now, unless one
-  # runs already (a copy started by hand keeps serving; the agent takes over
-  # from the next login).
-  uid=$(console_uid)
-  if [ "$mode" = automatic ] && [ -n "$uid" ] && [ "$uid" != 0 ] && ! session_loaded; then
-    if pgrep -u "$uid" -f "$server" >/dev/null 2>&1; then
-      echo "a server already runs in $(console_user)'s session; the agent takes over at the next login"
-    else
-      launchctl bootstrap "gui/$uid" "$SESSION_PLIST" 2>/dev/null || true
+  if [ "$mode" = automatic ]; then
+    # The standalone server lets go of the port first, then the daemon takes it.
+    uid=$(console_uid)
+    if [ "$uid" != 0 ] && ! session_loaded; then
+      pkill -TERM -u "$uid" -f "$server" 2>/dev/null || true
+      sleep 1
     fi
+    if daemon_loaded; then launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null || true; sleep 1; fi
+    start_daemon
+    sleep 1
+    start_session_agent
   fi
-  echo "installed ($mode start): $SESSION_PLIST, $LW_PLIST"
-  echo "the login window accepts connections after the next logout or startup (log: $LOG)"
+  echo "installed ($mode start): $DAEMON_PLIST, $SESSION_PLIST, $LW_PLIST"
+  echo "logs: $DAEMON_LOG, $LW_LOG"
   echo "keep RDMachine Server allowed under System Settings > General > Login Items & Extensions > Allow in the Background"
 }
 
 do_uninstall() {
   need_root uninstall
   uid=$(console_uid)
-  if [ -n "$uid" ]; then launchctl bootout "gui/$uid/$SESSION_LABEL" 2>/dev/null || true; fi
-  pkill -f 'rdmachine-server --login-window' 2>/dev/null || true
-  rm -f "$SESSION_PLIST" "$LW_PLIST" "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
+  [ "$uid" != 0 ] && launchctl bootout "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
+  launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null || true
+  pkill -TERM -f 'rdmachine-server --login-window' 2>/dev/null || true
+  rm -f "$DAEMON_PLIST" "$SESSION_PLIST" "$LW_PLIST" "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
   rm -rf "$SYS_DIR"
-  echo "removed the agents and $SYS_DIR ($LOG is kept)"
+  echo "removed the daemon, the agents and $SYS_DIR (logs kept); start RDMachine Server.app to serve without them"
 }
 
 do_status() {
   echo "start mode:   $(startmode)"
-  if [ -f "$SESSION_PLIST" ]; then
+  if [ -f "$DAEMON_PLIST" ]; then
     installed_app
     echo "server app:   $APP"
   fi
   procs=$(pgrep -fl 'Contents/MacOS/rdmachine-server' 2>/dev/null || true)
   if [ -z "$procs" ]; then
-    echo "running:      no server"
+    echo "running:      nothing"
   else
     echo "$procs" | while read -r pid rest; do
       who=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
       case "$rest" in
-        *--login-window*) echo "running:      pid $pid, login window ($who)" ;;
-        *) echo "running:      pid $pid, session of $who" ;;
+        *--daemon*) echo "running:      pid $pid, daemon ($who)" ;;
+        *--login-window*) echo "running:      pid $pid, login window agent ($who)" ;;
+        *) echo "running:      pid $pid, server of $who's session" ;;
       esac
     done
   fi
@@ -204,49 +236,39 @@ do_status() {
     lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '/rdmachine/ {print "listening:    " $9 " (pid " $2 ")"}' | sort -u
   fi
   echo "console:      $(console_user)"
-  [ -f "$LOG" ] && echo "login window log: $LOG"
   return 0
 }
 
 do_start() {
   need_root start
-  [ -f "$SESSION_PLIST" ] || { echo "not installed: sudo rdmachine-service install" >&2; exit 1; }
-  uid=$(console_uid)
-  if [ -z "$uid" ] || [ "$uid" = 0 ]; then
-    echo "no one is logged in: the login window agent starts with the login window"
-    exit 0
-  fi
-  if session_loaded; then
-    launchctl kickstart "gui/$uid/$SESSION_LABEL"
-  else
-    launchctl bootstrap "gui/$uid" "$SESSION_PLIST"
-    launchctl kickstart "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
-  fi
-  echo "started the server in $(console_user)'s session"
+  [ -f "$DAEMON_PLIST" ] || { echo "not installed: sudo rdmachine-service install" >&2; exit 1; }
+  installed_app
+  start_daemon
+  sleep 1
+  start_session_agent
+  echo "started"
 }
 
 do_stop() {
   need_root stop
+  # SIGTERM: a clean exit, so KeepAlive (SuccessfulExit = false) leaves it stopped.
+  daemon_loaded && launchctl kill TERM "system/$DAEMON_LABEL" 2>/dev/null || true
   uid=$(console_uid)
-  # SIGTERM: the server ends its session and exits cleanly, so launchd's
-  # KeepAlive (SuccessfulExit = false) does not start it again.
-  if [ -n "$uid" ] && [ "$uid" != 0 ] && session_loaded; then
-    launchctl kill TERM "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
-  fi
+  session_loaded && launchctl kill TERM "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
   pkill -TERM -f 'Contents/MacOS/rdmachine-server' 2>/dev/null || true
   echo "stopped"
 }
 
 do_startmode() {
   need_root startmode
-  [ -f "$SESSION_PLIST" ] || { echo "not installed: sudo rdmachine-service install" >&2; exit 1; }
+  [ -f "$DAEMON_PLIST" ] || { echo "not installed: sudo rdmachine-service install" >&2; exit 1; }
   installed_app
   case "${1:-}" in
     automatic) write_plists true ;;
     manual) write_plists false ;;
     *) usage 2 ;;
   esac
-  echo "start mode: $1 (from the next login or logout)"
+  echo "start mode: $1 (from the next startup or login)"
 }
 
 cmd="${1:-status}"

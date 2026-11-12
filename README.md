@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 Mac ↔ Mac（Intel 和 Apple Silicon，macOS 12.3+）。1.0.0 是第一个正式版本：服务端（菜单栏应用，也能在命令行跑）和 Mac 客户端已经在两台 Mac 之间实际使用，远程桌面按客户端窗口的像素和 HiDPI 缩放建出来。两边可以互相复制粘贴文本、富文本和图片。2.3.0 起可以连到登录窗口和锁屏（见下文“服务、登录窗口和锁屏”）。还没有的：公钥登录、声音、文件传输（以后做单独的传输窗口）（见[第一阶段的决定](docs/decisions.md)）；控制协议仍是 v0，两端要用同一个版本。
+第一阶段只支持 Mac ↔ Mac（Intel 和 Apple Silicon，macOS 12.3+）。1.0.0 是第一个正式版本：服务端（菜单栏应用，也能在命令行跑）和 Mac 客户端已经在两台 Mac 之间实际使用，远程桌面按客户端窗口的像素和 HiDPI 缩放建出来。两边可以互相复制粘贴文本、富文本和图片。3.0.0 起服务端可以装成服务：守护进程开机运行，连到登录窗口和锁屏，有人登录、退出时会话跟着换到新的桌面（见下文“服务、登录窗口和锁屏”）。还没有的：公钥登录、声音、文件传输（以后做单独的传输窗口）（见[第一阶段的决定](docs/decisions.md)）；控制协议仍是 v0，两端要用同一个版本。
 
 ## 文档
 
@@ -103,20 +103,25 @@ Mac 客户端也能从命令行带地址启动：`RDMachine.app/Contents/MacOS/r
 想让被控 Mac 开机、退出登录或锁屏时也能连，并在崩溃后自动重启，把服务端装成服务（参照 NoMachine 的 `nxserver --install`）。先把 `RDMachine Server.app` 拖进“应用程序”并打开一次（生成身份、授予权限），然后在被控 Mac 上：
 
 ```bash
-sudo "/Volumes/RDMachine 2.3.0/Command Line Tools/rdmachine-service" install
+sudo "/Volumes/RDMachine 3.0.0/Command Line Tools/rdmachine-service" install
 ```
 
-它装两个 LaunchAgent：用户会话里的菜单栏应用（登录时启动），和登录窗口里的服务端（没人登录时运行）；launchd 负责启动和崩溃重启。你的服务端身份会复制给登录窗口那份，所以客户端看到的指纹不变。之后：
+它装三样东西，都由 launchd 启动、出错后重启：
+
+- **守护进程**（root，开机运行）：监听端口、负责登录，把会话交给当前占着屏幕的那一方；你的服务端身份会复制给它，客户端看到的指纹不变。
+- **登录窗口 agent**：没人登录时显示登录窗口。
+- **你会话里的菜单栏应用**：显示你的桌面，现在作为守护进程的 agent 运行。
 
 | 命令 | 作用 |
 | --- | --- |
 | `rdmachine-service status` | 装了没有、谁在运行、监听什么端口 |
-| `sudo rdmachine-service start` / `stop` / `restart` | 启动、停止、重启当前会话的服务端 |
+| `sudo rdmachine-service start` / `stop` / `restart` | 启动、停止、重启 |
 | `sudo rdmachine-service startmode manual` / `automatic` | 不自动启动 / 自动启动 |
-| `sudo rdmachine-service uninstall` | 卸载 |
+| `sudo rdmachine-service uninstall` | 卸载（之后菜单栏应用照旧独立运行） |
 
 - **锁屏**：用账号密码连接时，服务端在画面连上后替你把密码填进锁屏；用配对码连接时在远程画面里自己输。
-- **登录窗口**：用这台 Mac 上任一账号的密码连接，服务端替你填进登录窗口并登录，客户端随后自动重新连接到登录后的桌面。登录窗口不提供配对码。
+- **登录窗口**：用这台 Mac 上任一账号的密码连接，服务端替你填进登录窗口并登录，画面随后自动换成登录后的桌面（同一条连接，不用重连）。在远程退出登录，画面回到登录窗口。登录窗口不提供配对码。
+- 有人登录时只能用那个账号连接；连接期间如果被控 Mac 上换了另一个人登录，会话结束。
 - 改了端口或重新生成身份后，再运行一次 `install`。macOS 可能在“系统设置 → 通用 → 登录项与扩展 → 允许在后台”里列出 RDMachine Server，保持打开。
 - 开着 FileVault 时，重启后停在开机解锁界面，这时还连不上。
 

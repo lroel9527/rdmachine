@@ -1,7 +1,8 @@
 add_executable(rdm_session_tests
   test_storage.cpp
   test_live_stats.cpp
-  test_media_e2e.cpp)
+  test_media_e2e.cpp
+  test_daemon_e2e.cpp)
 if(APPLE)
   # The real NSPasteboard; needs a logged-in session (a pasteboard server).
   # The real virtual display (RDM_TEST_VIRTUAL_DESKTOP=1: it rearranges the displays).

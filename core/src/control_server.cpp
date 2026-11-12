@@ -106,15 +106,19 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
       guards.limiter = &limiter_;
       guards.pairing = options_.offer_pairing_codes ? &pairing_ : nullptr;
       ServerSession session(delegate_, guards, conn->peer_ip());
-      auto last_heard = Clock::now();
+      auto last_heard = Clock::now(), last_ping = Clock::now();
       int64_t next_ping = 1;
       bool open = true;
+      // Short waits, so that a session the delegate wants moved or ended
+      // (ServerSession::Tick) is acted on promptly.
+      constexpr int kTickMs = 250;
       while (open && !stop_) {
-        auto r = channel.Receive(std::min(options_.ping_interval_ms, options_.idle_timeout_ms));
+        auto r = channel.Receive(kTickMs);
         ServerSession::Output out;
+        const auto now = Clock::now();
         switch (r.status) {
           case MessageChannel::Received::kMessage:
-            last_heard = Clock::now();
+            last_heard = now;
             out = session.Handle(*r.message);
             break;
           case MessageChannel::Received::kProtocolError:
@@ -124,13 +128,20 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
             open = false;
             continue;
           case MessageChannel::Received::kTimeout:
-            if (Clock::now() - last_heard >= std::chrono::milliseconds(options_.idle_timeout_ms)) {
+            if (now - last_heard >= std::chrono::milliseconds(options_.idle_timeout_ms)) {
               out.send.push_back(Bye{"idle_timeout"});
               out.close = true;
-            } else {
+            } else if (now - last_heard >= std::chrono::milliseconds(options_.ping_interval_ms) &&
+                       now - last_ping >= std::chrono::milliseconds(options_.ping_interval_ms)) {
               out.send.push_back(Ping{next_ping++});
+              last_ping = now;
             }
             break;
+        }
+        if (!out.close) {
+          ServerSession::Output tick = session.Tick();
+          for (Message& m : tick.send) out.send.push_back(std::move(m));
+          out.close = out.close || tick.close;
         }
         for (const Message& m : out.send) {
           if (!channel.Send(m)) {

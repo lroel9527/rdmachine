@@ -128,8 +128,7 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     s->clipboard_ = std::make_unique<ClipboardSync>(
         s->options_.clipboard,
         [raw](uint32_t type, std::string_view payload) {
-          return rda_viewer_send_message(raw->viewer_, type, reinterpret_cast<const uint8_t*>(payload.data()),
-                                         payload.size()) == RDA_OK;
+          return raw->SendMessage(type, reinterpret_cast<const uint8_t*>(payload.data()), payload.size()) == RDA_OK;
         },
         so);
   }
@@ -164,19 +163,73 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     if (!AwaitReady(s->control_->channel(), connect_ms, result)) return nullptr;
   }
   result->session = s->session_;
-  // viewer_ stays the same from here on, so the clipboard thread may use it.
   if (s->clipboard_) s->clipboard_->Start();
   s->thread_ = std::thread([raw = s.get()] { raw->KeepAlive(); });
   return s;
+}
+
+rda_status RemoteSession::SendInput(const rda_input_event& ev) {
+  std::lock_guard lock(mu_);
+  return viewer_ ? rda_viewer_send_input(viewer_, &ev) : RDA_ERR_CLOSED;
+}
+
+rda_status RemoteSession::SendMessage(uint32_t type, const uint8_t* payload, size_t n) {
+  std::lock_guard lock(mu_);
+  return viewer_ ? rda_viewer_send_message(viewer_, type, payload, n) : RDA_ERR_CLOSED;
+}
+
+rda_viewer* RemoteSession::viewer() const {
+  std::lock_guard lock(mu_);
+  return viewer_;
+}
+
+SessionReady RemoteSession::session() const {
+  std::lock_guard lock(mu_);
+  return session_;
+}
+
+bool RemoteSession::FollowMove(const SessionReady& ready) {
+  rda_viewer* fresh = nullptr;
+  std::string error;
+  if (CreateSessionViewer(options_.control.host, ready, ViewerConfig(), &fresh, &error) != RDA_OK) {
+    if (options_.log) options_.log("moved session: " + error);
+    return false;
+  }
+  const int wait_ms = ready.transport == MediaTransport::kUdp && options_.udp_wait_ms > 0 ? options_.udp_wait_ms
+                                                                                         : options_.control.timeout_ms;
+  if (WaitConnected(fresh, wait_ms) != RDA_STATE_CONNECTED) {
+    rda_viewer_destroy(fresh);
+    return false;
+  }
+  rda_viewer* old = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    old = viewer_;
+    viewer_ = fresh;
+    session_ = ready;
+  }
+  if (old) rda_viewer_destroy(old);  // no callback of it runs after this
+  if (options_.log) options_.log("session moved: new picture connection");
+  if (options_.on_moved) options_.on_moved(ready);
+  return true;
 }
 
 void RemoteSession::KeepAlive() {
   using Clock = std::chrono::steady_clock;
   constexpr auto kPingEvery = std::chrono::seconds(15);
   constexpr auto kSilenceLimit = std::chrono::seconds(45);
+  // The server gives a move 60 seconds (ServerSession::kMoveTimeout).
+  constexpr auto kMoveLimit = std::chrono::seconds(75);
   MessageChannel& ch = control_->channel();
   auto last_sent = Clock::now(), last_heard = Clock::now();
   int64_t next_ping = 1;
+  bool moving = false;
+  bool tcp_asked = false;
+  Clock::time_point moving_since{};
+  // The picture can drop a moment before the reason arrives on the control
+  // connection (bye, session_moving): wait a little before calling it lost.
+  constexpr auto kMediaGrace = std::chrono::milliseconds(1500);
+  std::optional<Clock::time_point> media_down_since;
   std::string ended;
   while (!stop_ && ended.empty()) {
     auto r = ch.Receive(250);
@@ -191,6 +244,25 @@ void RemoteSession::KeepAlive() {
           ended = bye->reason.empty() ? "server_closed" : bye->reason;
         } else if (auto* err = std::get_if<Error>(&*r.message)) {
           ended = err->code.empty() ? "server_closed" : err->code;
+        } else if (auto* mv = std::get_if<SessionMoving>(&*r.message)) {
+          if (options_.log) options_.log("session moving: " + mv->reason);
+          moving = true;
+          tcp_asked = false;
+          moving_since = now;
+        } else if (auto* ready = std::get_if<SessionReady>(&*r.message)) {
+          if (FollowMove(*ready)) {
+            moving = false;
+            media_down_since.reset();
+          } else if (ready->transport == MediaTransport::kUdp && !tcp_asked) {
+            // UDP did not get through to the new place: ask for TCP there.
+            SessionRequest tcp = options_.control.request;
+            tcp.transport = MediaTransport::kTcp;
+            tcp_asked = ch.Send(tcp);
+            moving = true;
+            if (!tcp_asked) ended = "connection_lost";
+          } else {
+            ended = "media_lost";
+          }
         }
         break;
       case MessageChannel::Received::kTimeout:
@@ -203,8 +275,11 @@ void RemoteSession::KeepAlive() {
     if (!ended.empty() || stop_) break;
     if (now - last_heard >= kSilenceLimit) {
       ended = "connection_lost";
-    } else if (rda_viewer_get_state(viewer_) == RDA_STATE_DISCONNECTED) {
+    } else if (moving && now - moving_since >= kMoveLimit) {
       ended = "media_lost";
+    } else if (!moving && rda_viewer_get_state(viewer()) == RDA_STATE_DISCONNECTED) {
+      if (!media_down_since) media_down_since = now;
+      if (now - *media_down_since >= kMediaGrace) ended = "media_lost";
     } else if (now - last_sent >= kPingEvery) {
       ch.Send(Ping{next_ping++});
       last_sent = now;
@@ -217,10 +292,13 @@ void RemoteSession::Close() {
   if (clipboard_) clipboard_->Stop();  // before the viewer it sends through
   stop_ = true;
   if (thread_.joinable()) thread_.join();
-  if (viewer_) {
-    rda_viewer_destroy(viewer_);
+  rda_viewer* v = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    v = viewer_;
     viewer_ = nullptr;
   }
+  if (v) rda_viewer_destroy(v);
   if (control_) {
     control_->Close("user_closed");
     control_.reset();

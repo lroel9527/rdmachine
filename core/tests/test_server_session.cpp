@@ -196,3 +196,136 @@ TEST_F(ServerSessionTest, SecondRequestReplacesSession) {
   EXPECT_EQ(delegate_.ends, 1);
   EXPECT_EQ(s.state(), ServerSession::State::kInSession);
 }
+
+namespace {
+
+// Logs in and starts a session; returns the session in kInSession.
+void StartSession(ServerSession& s) {
+  ClientHello h;
+  s.Handle(h);
+  Auth a;
+  a.username = "alice";
+  a.password = "secret";
+  s.Handle(a);
+  auto out = s.Handle(SessionRequest{});
+  ASSERT_EQ(out.send.size(), 1u);
+  ASSERT_TRUE(std::holds_alternative<SessionReady>(out.send[0]));
+  ASSERT_EQ(s.state(), ServerSession::State::kInSession);
+}
+
+}  // namespace
+
+TEST_F(ServerSessionTest, TickKeepsASessionTheDelegateDoesNotMove) {
+  auto s = Make();
+  StartSession(s);
+  auto out = s.Tick();
+  EXPECT_TRUE(out.send.empty());
+  EXPECT_FALSE(out.close);
+  EXPECT_EQ(s.state(), ServerSession::State::kInSession);
+}
+
+TEST_F(ServerSessionTest, AMovedSessionSaysSoThenStartsAgainWithNewSecrets) {
+  auto s = Make();
+  StartSession(s);
+  const auto first_key = delegate_.last_secrets.key;
+  delegate_.check = {SessionCheck::Action::kMove, "user_logged_in"};
+  auto out = s.Tick();
+  ASSERT_EQ(out.send.size(), 1u);
+  EXPECT_EQ(std::get<SessionMoving>(out.send[0]).reason, "user_logged_in");
+  EXPECT_EQ(s.state(), ServerSession::State::kMoving);
+  EXPECT_EQ(delegate_.ends, 0);  // the client hears of the move before the picture stops
+  out = s.Tick();  // the next tick ends the old session and starts it again
+  ASSERT_EQ(out.send.size(), 1u);
+  const auto& ready = std::get<SessionReady>(out.send[0]);
+  EXPECT_NE(ready.key, first_key);
+  EXPECT_FALSE(out.close);
+  EXPECT_EQ(delegate_.ends, 1);
+  EXPECT_EQ(delegate_.starts, 2);
+  EXPECT_EQ(s.state(), ServerSession::State::kInSession);
+}
+
+TEST_F(ServerSessionTest, AMoveRetriesEverySecondUntilTheNewSessionStarts) {
+  auto s = Make();
+  StartSession(s);
+  delegate_.check = {SessionCheck::Action::kMove, "user_logged_in"};
+  delegate_.refuse_starts = 2;  // the new session's agent is not there yet
+  auto out = s.Tick();
+  ASSERT_EQ(out.send.size(), 1u);
+  EXPECT_TRUE(std::holds_alternative<SessionMoving>(out.send[0]));
+  EXPECT_EQ(s.state(), ServerSession::State::kMoving);
+  EXPECT_TRUE(s.Tick().send.empty());  // refused
+  EXPECT_TRUE(s.Tick().send.empty());  // not before a second has passed
+  now_ += 1s;
+  EXPECT_TRUE(s.Tick().send.empty());  // refused again
+  EXPECT_EQ(s.state(), ServerSession::State::kMoving);
+  now_ += 1s;
+  out = s.Tick();
+  ASSERT_EQ(out.send.size(), 1u);
+  EXPECT_TRUE(std::holds_alternative<SessionReady>(out.send[0]));
+  EXPECT_EQ(s.state(), ServerSession::State::kInSession);
+}
+
+TEST_F(ServerSessionTest, AMoveThatNeverSucceedsFailsAfterTheTimeout) {
+  auto s = Make();
+  StartSession(s);
+  delegate_.check = {SessionCheck::Action::kMove, "user_logged_in"};
+  delegate_.refuse_starts = 1000;
+  s.Tick();
+  EXPECT_EQ(s.state(), ServerSession::State::kMoving);
+  ServerSession::Output out;
+  for (int i = 0; i < 70 && s.state() == ServerSession::State::kMoving; ++i) {
+    now_ += 1s;
+    out = s.Tick();
+  }
+  EXPECT_EQ(s.state(), ServerSession::State::kClosed);
+  EXPECT_EQ(ErrorCode(out), "unavailable");
+  EXPECT_EQ(delegate_.ends, 1);  // nothing was running to end again
+}
+
+TEST_F(ServerSessionTest, ARequestWhileMovingIsWhatStartsAgain) {
+  auto s = Make();
+  StartSession(s);
+  delegate_.check = {SessionCheck::Action::kMove, "user_logged_in"};
+  s.Tick();
+  ASSERT_EQ(s.state(), ServerSession::State::kMoving);
+  SessionRequest tcp;
+  tcp.transport = MediaTransport::kTcp;
+  EXPECT_TRUE(s.Handle(tcp).send.empty());
+  auto out = s.Tick();
+  ASSERT_EQ(out.send.size(), 1u);
+  EXPECT_EQ(std::get<SessionReady>(out.send[0]).transport, MediaTransport::kTcp);
+}
+
+TEST_F(ServerSessionTest, ByeWhileMovingEndsNothingTwice) {
+  auto s = Make();
+  StartSession(s);
+  delegate_.check = {SessionCheck::Action::kMove, "user_logged_in"};
+  delegate_.refuse_starts = 5;
+  s.Tick();
+  auto out = s.Handle(Bye{"user_closed"});
+  EXPECT_TRUE(out.close);
+  EXPECT_EQ(delegate_.ends, 1);
+}
+
+TEST_F(ServerSessionTest, TheDelegateCanEndASession) {
+  auto s = Make();
+  StartSession(s);
+  delegate_.check = {SessionCheck::Action::kEnd, "console_changed"};
+  auto out = s.Tick();
+  ASSERT_EQ(out.send.size(), 1u);
+  EXPECT_EQ(std::get<Bye>(out.send[0]).reason, "console_changed");
+  EXPECT_TRUE(out.close);
+  EXPECT_EQ(s.state(), ServerSession::State::kClosed);
+  EXPECT_EQ(delegate_.ends, 0);  // the reason goes out first
+}
+
+TEST_F(ServerSessionTest, AnEndedSessionStopsWhenTheConnectionCloses) {
+  {
+    auto s = Make();
+    StartSession(s);
+    delegate_.check = {SessionCheck::Action::kEnd, "console_changed"};
+    s.Tick();
+  }
+  EXPECT_EQ(delegate_.ends, 1);
+}
+

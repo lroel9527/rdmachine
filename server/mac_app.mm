@@ -279,9 +279,17 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   const uint16_t port = _runtime->port();
 
   [self add:[NSString stringWithFormat:@"RDMachine Server %@", NS(_info.version)] action:nullptr];
-  [self add:(port ? [NSString stringWithFormat:@"正在监听端口 %u（登录账号：%@）", port, NS(_info.user)]
-                  : @"服务未运行")
-      action:nullptr];
+  if (_runtime->agent_mode()) {
+    // The daemon listens; this app shows this session's desktop for it.
+    [self add:(_runtime->daemon_connected()
+                   ? [NSString stringWithFormat:@"服务运行中：端口 %u（守护进程，登录账号：%@）", port, NS(_info.user)]
+                   : @"正在等待守护进程（sudo rdmachine-service start）")
+        action:nullptr];
+  } else {
+    [self add:(port ? [NSString stringWithFormat:@"正在监听端口 %u（登录账号：%@）", port, NS(_info.user)]
+                    : @"服务未运行")
+        action:nullptr];
+  }
   if (st.running) {
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - st.started);
     [self add:[NSString stringWithFormat:@"已连接：%@ · %@ · %@", PeerText(st),

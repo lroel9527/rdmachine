@@ -69,13 +69,33 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.pam_service = options_.pam_service;
   mo.login_window = options_.login_window;
   mo.inject_input = !s.view_only;
-  mo.clipboard = SystemClipboard();
+  // No one's clipboard at the login window.
+  mo.clipboard = options_.login_window ? nullptr : SystemClipboard();
   mo.clipboard_mode = s.clipboard_mode;
   mo.virtual_desktop = SystemVirtualDesktop();
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;
   mo.log = options_.log;
   auto media = std::make_unique<MediaHost>(mo);
+
+  if (agent_mode()) {
+    AgentHostOptions ao;
+    ao.socket_path = options_.agent_socket;
+    ao.kind = options_.agent_kind;
+    ao.log = options_.log;
+    ao.send_settings = options_.agent_kind == "aqua";
+    ao.port = s.port;
+    ao.offer_pairing_codes = s.offer_pairing_codes;
+    auto agent = std::make_unique<AgentHost>(*media, ao);
+    agent->Start();
+    media_ = std::move(media);
+    agent_ = std::move(agent);
+    saved_ = saved;
+    code_.clear();
+    Log(std::string("running as the ") + options_.agent_kind + " agent of the rdmachine daemon" +
+        (s.view_only ? " (view only)" : "") + ", clipboard " + ClipboardModeName(mo.clipboard ? s.clipboard_mode : ClipboardMode::kOff));
+    return true;
+  }
 
   ControlServerOptions co;
   co.bind_address = options_.bind_address;
@@ -102,6 +122,7 @@ void ServerRuntime::Stop() {
 void ServerRuntime::StopLocked() {
   if (server_) server_->Stop();  // ends the session through the delegate
   server_.reset();
+  agent_.reset();  // ends a session it runs
   media_.reset();  // after the server that refers to it
   code_.clear();
 }
@@ -118,16 +139,33 @@ ServerSettings ServerRuntime::effective_settings() const {
 
 bool ServerRuntime::running() const {
   std::lock_guard lock(mu_);
-  return server_ != nullptr;
+  return server_ != nullptr || agent_ != nullptr;
 }
 
 uint16_t ServerRuntime::port() const {
   std::lock_guard lock(mu_);
+  if (agent_) return agent_->port();
   return server_ ? server_->port() : 0;
+}
+
+bool ServerRuntime::daemon_connected() const {
+  std::lock_guard lock(mu_);
+  return agent_ && agent_->connected();
+}
+
+std::string ServerRuntime::daemon_fingerprint() const {
+  std::lock_guard lock(mu_);
+  return agent_ ? agent_->fingerprint() : std::string();
 }
 
 std::string ServerRuntime::IssuePairingCode() {
   std::lock_guard lock(mu_);
+  if (agent_) {
+    const AgentHost::PairingCode c = agent_->IssuePairingCode();
+    code_ = c.code;
+    code_expires_ = Clock::now() + c.remaining;
+    return code_;
+  }
   if (!server_) return {};
   code_ = server_->IssuePairingCode();
   return code_;
@@ -136,6 +174,14 @@ std::string ServerRuntime::IssuePairingCode() {
 ServerRuntime::PairingCode ServerRuntime::CurrentPairingCode() const {
   std::lock_guard lock(mu_);
   PairingCode out;
+  if (agent_) {
+    // The daemon's code; it may have been used meanwhile (shown until it lapses).
+    const auto left = code_expires_ - Clock::now();
+    if (code_.empty() || left <= Clock::duration::zero()) return out;
+    out.code = code_;
+    out.remaining = std::chrono::ceil<std::chrono::seconds>(left);
+    return out;
+  }
   if (!server_ || code_.empty()) return out;
   const auto left = server_->PairingCodeRemaining();
   if (left <= Clock::duration::zero()) return out;
@@ -146,6 +192,10 @@ ServerRuntime::PairingCode ServerRuntime::CurrentPairingCode() const {
 
 void ServerRuntime::Disconnect() {
   std::lock_guard lock(mu_);
+  if (agent_) {
+    agent_->Disconnect();
+    return;
+  }
   if (!server_) return;
   server_->CloseConnections();
   Log("disconnected by the user at this computer");

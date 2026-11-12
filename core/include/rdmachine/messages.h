@@ -96,6 +96,15 @@ struct Pong {
   int64_t id = 0;
 };
 
+// Server -> client during a session: the picture is moving to another
+// graphical session of this computer (someone logged in at the login window,
+// logged out, or switched users). The rdaccel connection ends; a new
+// session_ready follows on this connection, or bye if the move fails. The
+// client keeps the control connection and waits (docs/protocol.md, "会话迁移").
+struct SessionMoving {
+  std::string reason;  // "user_logged_in", "user_logged_out", "agent_restarted", ...
+};
+
 // Either side, before closing.
 struct Bye {
   std::string reason;
@@ -108,7 +117,7 @@ struct Error {
 };
 
 using Message = std::variant<ClientHello, ServerHello, Auth, AuthResult, SessionRequest,
-                             SessionReady, Ping, Pong, Bye, Error>;
+                             SessionReady, Ping, Pong, Bye, Error, SessionMoving>;
 
 // The "type" string a message is sent with.
 const char* MessageType(const Message& m);

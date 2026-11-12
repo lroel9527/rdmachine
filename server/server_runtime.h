@@ -10,6 +10,7 @@
 #include <string>
 
 #include "rdmachine/control_server.h"
+#include "rdmachine/session/agent_host.h"
 #include "rdmachine/session/media_host.h"
 #include "rdmachine/session/server_settings.h"
 #include "rdmachine/tls.h"
@@ -41,6 +42,12 @@ class ServerRuntime {
     // Runs in the login window session (--login-window): any account may
     // log in, no pairing codes (no one to show them to).
     bool login_window = false;
+    // Agent mode (docs/decisions.md, "守护进程和 agent"): the rdmachine
+    // daemon owns the port and the logins; this process only runs the
+    // picture for its graphical session. Empty = standalone (its own control
+    // server, as before 3.0 and without rdmachine-service).
+    std::string agent_kind;  // "aqua" or "loginwindow"
+    std::string agent_socket = DefaultAgentSocketPath();
     SettingsOverrides overrides;
     std::function<void(const std::string&)> log;
   };
@@ -62,6 +69,10 @@ class ServerRuntime {
   const SettingsOverrides& overrides() const { return options_.overrides; }
   bool running() const;
   uint16_t port() const;
+  bool agent_mode() const { return !options_.agent_kind.empty(); }
+  // Agent mode: whether the daemon is connected, and its fingerprint.
+  bool daemon_connected() const;
+  std::string daemon_fingerprint() const;
 
   // A new pairing code (empty if pairing is off or the server is stopped).
   std::string IssuePairingCode();
@@ -85,8 +96,10 @@ class ServerRuntime {
   mutable std::mutex mu_;
   ServerSettings saved_;
   std::unique_ptr<MediaHost> media_;
-  std::unique_ptr<ControlServer> server_;
+  std::unique_ptr<ControlServer> server_;  // standalone
+  std::unique_ptr<AgentHost> agent_;       // agent mode
   std::string code_;  // last issued; valid while the server says time remains
+  Clock::time_point code_expires_{};  // agent mode: when the daemon said it lapses
 };
 
 }  // namespace rdm
