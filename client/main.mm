@@ -22,6 +22,11 @@
 
 #include <rdaccel/rdaccel.h>
 #import <Security/Security.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -138,12 +143,12 @@ struct StatsField {
   bool on_by_default;
 };
 const StatsField kStatsFields[] = {
-    {@"time", @"Connection Time", true},  {@"transport", @"Transport (UDP/TCP)", true},
-    {@"fps", @"Frame Rate", true},        {@"latency", @"Latency", true},
-    {@"loss", @"Packet Loss", true},      {@"bitrate", @"Bitrate", false},
-    {@"bandwidth", @"Bandwidth", false},  {@"resolution", @"Resolution", false},
-    {@"encoder", @"Encoder", false},      {@"input", @"Input Source", false},
-    {@"response", @"Input to Screen", true},
+    {@"time", @"连接时长", true},  {@"transport", @"传输（UDP/TCP）", true},
+    {@"fps", @"帧率", true},        {@"latency", @"延迟", true},
+    {@"loss", @"丢包", true},      {@"bitrate", @"码率", false},
+    {@"bandwidth", @"带宽", false},  {@"resolution", @"分辨率", false},
+    {@"encoder", @"编码器", false},      {@"input", @"输入法", false},
+    {@"response", @"操作到画面", true},
 };
 const int kStatsOpacities[] = {15, 35, 60};  // background, percent
 
@@ -226,29 +231,26 @@ void Owe(std::vector<rda_rect>& owed, const rda_rect& r, int32_t w, int32_t h) {
 NSString* DescribeError(const rdm::ConnectResult& r) {
   const std::string& e = r.error;
   NSString* text;
-  if (e == "connect_failed") text = @"Could not reach the server.";
-  else if (e == "bad_credentials") text = @"Wrong account, password or pairing code.";
+  if (e == "connect_failed") text = @"连不上那台电脑：它可能没开机、不在网络上，或者服务没在运行。";
+  else if (e == "bad_credentials") text = @"账号、密码或配对码不对。";
   else if (e == "not_console_user")
-    text = @"Someone else is logged in on that Mac: only that account can connect now (any account can at its "
-           @"login window).";
+    text = @"那台 Mac 上现在是别人登录着，只能用那个账号连接（停在登录窗口时任何账号都可以）。";
   else if (e == "unavailable")
-    text = @"That Mac's server is not ready for this session yet (it starts with the login window or the user's "
-           @"session). Try again in a moment.";
-  else if (e == "code_expired") text = @"The pairing code has expired or was already used. Ask for a new one.";
+    text = @"那台 Mac 的服务还没准备好（它随登录窗口或用户会话启动），稍等一下再连。";
+  else if (e == "code_expired") text = @"配对码已过期或已经用过，请在那台 Mac 的菜单栏里生成新的。";
   else if (e == "rate_limited")
-    text = [NSString stringWithFormat:@"Too many failed attempts. Try again in %lld seconds.",
+    text = [NSString stringWithFormat:@"失败次数太多，请 %lld 秒后再试。",
                                       static_cast<long long>((r.retry_after_ms.value_or(60000) + 999) / 1000)];
-  else if (e == "method_unsupported") text = @"The server does not accept this way of logging in.";
-  else if (e == "busy") text = @"Someone else is connected to that Mac.";
+  else if (e == "method_unsupported") text = @"那台电脑不接受这种登录方式。";
+  else if (e == "busy") text = @"已经有人连着那台 Mac。";
   else if (e == "capture_denied")
-    text = @"The server may not record its screen. On that Mac, allow rdmachine-server under System Settings > "
-           @"Privacy & Security > Screen Recording.";
-  else if (e == "no_display") text = @"The server has no display to share.";
-  else if (e == "incompatible") text = @"The server runs another version of rdmachine. Update both.";
-  else if (e == "media_failed") text = @"Logged in, but the picture connection did not come up (firewall?).";
-  else if (e == "untrusted_server") text = @"Connection cancelled.";
-  else if (e == "timeout") text = @"The server did not answer in time.";
-  else text = [NSString stringWithFormat:@"Connection failed (%@).", NS(e)];
+    text = @"那台 Mac 不允许录制屏幕：请在它的“系统设置 → 隐私与安全性 → 屏幕录制”里打开 RDMachine Server。";
+  else if (e == "no_display") text = @"那台电脑没有可以共享的显示器。";
+  else if (e == "incompatible") text = @"两边的 rdmachine 版本不一样，请都更新到同一个版本。";
+  else if (e == "media_failed") text = @"登录成功了，但画面连接没建立起来（可能被防火墙挡住）。";
+  else if (e == "untrusted_server") text = @"已取消连接。";
+  else if (e == "timeout") text = @"那台电脑没有及时回应。";
+  else text = [NSString stringWithFormat:@"连接失败（%@）。", NS(e)];
   if (!r.detail.empty()) text = [text stringByAppendingFormat:@"\n\n%@", NS(r.detail)];
   return text;
 }
@@ -365,6 +367,44 @@ bool HasSavedLogin(NSString* target) {
   return has;
 }
 
+// Whether something accepts TCP connections at host:port within timeout_ms:
+// the list's "online" (the server's control port; nothing is sent, and the
+// server does not log a peer that closes without a word).
+bool TcpReachable(const std::string& host, uint16_t port, int timeout_ms) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* res = nullptr;
+  if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) return false;
+  bool ok = false;
+  for (addrinfo* a = res; a && !ok; a = a->ai_next) {
+    const int fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if (fd < 0) continue;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) {
+      ok = true;
+    } else if (errno == EINPROGRESS) {
+      pollfd pfd{fd, POLLOUT, 0};
+      if (poll(&pfd, 1, timeout_ms) == 1) {
+        int err = 0;
+        socklen_t len = sizeof err;
+        ok = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0;
+      }
+    }
+    close(fd);
+  }
+  freeaddrinfo(res);
+  return ok;
+}
+
+// "12 秒", "5 分钟", "2 小时 5 分钟".
+NSString* DurationText(int64_t secs) {
+  if (secs < 60) return [NSString stringWithFormat:@"%lld 秒", static_cast<long long>(std::max<int64_t>(secs, 1))];
+  if (secs < 3600) return [NSString stringWithFormat:@"%lld 分钟", static_cast<long long>(secs / 60)];
+  const long long h = secs / 3600, m = (secs % 3600) / 60;
+  return m ? [NSString stringWithFormat:@"%lld 小时 %lld 分钟", h, m] : [NSString stringWithFormat:@"%lld 小时", h];
+}
+
 // How the remote window was left (full screen, or its size), for the next
 // connection.
 NSString* const kRemoteFullScreenKey = @"remoteWindowFullScreen";
@@ -389,6 +429,12 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 // The server this window shows: the address as typed, and the name it gave.
 @property(nonatomic, copy) NSString* target;
 @property(nonatomic, copy) NSString* serverName;
+// Set while it is connecting again after a drop (for the list).
+@property(nonatomic, strong) NSDate* reconnectingSince;
+// A session is attached (the picture is live).
+- (BOOL)isLive;
+// "已连接 12 分钟 · UDP · 18 ms · 2880×1800", for the list.
+- (NSString*)liveDetail;
 - (instancetype)initWithTitle:(NSString*)title;
 // The desktop to ask the server for: this window's picture area at its
 // largest comfortable size on its screen, in that screen's pixels.
@@ -615,6 +661,23 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   return d;
 }
 
+- (BOOL)isLive {
+  return _session != nullptr;
+}
+
+- (NSString*)liveDetail {
+  const auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _connectedAt).count();
+  NSMutableArray* parts = [NSMutableArray arrayWithObject:[@"已连接 " stringByAppendingString:DurationText(secs)]];
+  if (_stats) {
+    if (!_stats->transport.empty()) [parts addObject:NS(_stats->transport).uppercaseString];
+    if (_stats->rtt_ms > 0) [parts addObject:[NSString stringWithFormat:@"%.0f ms", _stats->rtt_ms]];
+    if (_stats->width > 0 && _stats->height > 0) {
+      [parts addObject:[NSString stringWithFormat:@"%d×%d", _stats->width, _stats->height]];
+    }
+  }
+  return [parts componentsJoinedByString:@" · "];
+}
+
 - (void)showStatus:(NSString*)text {
   if (!_statusView) {
     _statusView = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, 380, 96)];
@@ -629,7 +692,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
     _statusLabel.alignment = NSTextAlignmentCenter;
     _statusLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
     [_statusView addSubview:_statusLabel];
-    NSButton* stop = [NSButton buttonWithTitle:@"Disconnect" target:_window action:@selector(performClose:)];
+    NSButton* stop = [NSButton buttonWithTitle:@"断开" target:_window action:@selector(performClose:)];
     stop.frame = NSMakeRect(140, 10, 100, 28);
     [_statusView addSubview:stop];
   }
@@ -830,7 +893,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [self releaseHeld];
   [self desktopNeedsUpdate];
   CATextLayer* hint = [CATextLayer layer];
-  hint.string = @"Press ⌃⌥⌘F to leave full screen";
+  hint.string = @"按 ⌃⌥⌘F 退出全屏";
   hint.font = (__bridge CFTypeRef)[NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
   hint.fontSize = 15;
   hint.alignmentMode = kCAAlignmentCenter;
@@ -951,7 +1014,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   const long long secs =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _connectedAt).count();
   add(@"time", [NSString stringWithFormat:@"%02lld:%02lld:%02lld", secs / 3600, secs / 60 % 60, secs % 60]);
-  add(@"transport", r.transport == "tcp" ? @"TCP (UDP blocked)" : @"UDP");
+  add(@"transport", r.transport == "tcp" ? @"TCP（UDP 不通）" : @"UDP");
   add(@"fps", [NSString stringWithFormat:@"%.0f fps", r.encoded_fps]);
   add(@"latency", r.rtt_ms <= 0   ? @"RTT –"
                   : r.rtt_ms < 10 ? [NSString stringWithFormat:@"RTT %.1f ms", r.rtt_ms]
@@ -962,15 +1025,15 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   add(@"resolution", [NSString stringWithFormat:@"%d×%d", r.width, r.height]);
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   // Not a field to pick: whoever sees soft photos should see why.
-  if (r.text_mode) [lines addObject:@"Data saver"];
+  if (r.text_mode) [lines addObject:@"省流量"];
   // Nor this: the input menu is greyed out and nothing here says why.
   _secureInputHolder = SecureInputHolder() == getpid() ? ReleaseSecureInput() : SecureInputHolder();
   if (_secureInputHolder != 0) {
-    [lines addObject:[NSString stringWithFormat:@"Input methods blocked by %@", DescribeProcess(_secureInputHolder)]];
+    [lines addObject:[NSString stringWithFormat:@"输入法被 %@ 拦住", DescribeProcess(_secureInputHolder)]];
   }
-  add(@"input", r.input_source.empty() ? @"Input –" : NS(r.input_source));
+  add(@"input", r.input_source.empty() ? @"输入法 –" : NS(r.input_source));
   const double response = _responseMs.load();
-  add(@"response", response < 0 ? @"Input→screen –" : [NSString stringWithFormat:@"Input→screen %.0f ms", response]);
+  add(@"response", response < 0 ? @"操作到画面 –" : [NSString stringWithFormat:@"操作到画面 %.0f ms", response]);
   if (lines.count == 0) {
     _statsLayer.hidden = YES;
     return;
@@ -1279,7 +1342,110 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // ---------------------------------------------------------------------------
 // Connect window and application
 
+// One computer in the list: an icon tile, the name with a status pill, a
+// line of details, and the row's button (Connect / Show window).
+@interface MachineCell : NSTableCellView
+@property(nonatomic, strong) NSView* tile;
+@property(nonatomic, strong) NSImageView* icon;
+@property(nonatomic, strong) NSTextField* name;
+@property(nonatomic, strong) NSView* pill;
+@property(nonatomic, strong) NSTextField* pillText;
+@property(nonatomic, strong) NSTextField* detail;
+@property(nonatomic, strong) NSButton* action;
+@property(nonatomic, strong) NSColor* tint;  // status colour; nil = neutral
+- (void)setStatus:(NSString*)text tint:(NSColor*)tint;
+@end
+
+@implementation MachineCell
+
+- (instancetype)initWithFrame:(NSRect)frame {
+  if (!(self = [super initWithFrame:frame])) return nil;
+  _tile = [[NSView alloc] initWithFrame:NSZeroRect];
+  _tile.wantsLayer = YES;
+  _tile.layer.cornerRadius = 10;
+  [self addSubview:_tile];
+  _icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+  _icon.image = [NSImage imageWithSystemSymbolName:@"desktopcomputer" accessibilityDescription:nil];
+  _icon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:18 weight:NSFontWeightRegular];
+  [_tile addSubview:_icon];
+  _name = [NSTextField labelWithString:@""];
+  _name.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+  _name.lineBreakMode = NSLineBreakByTruncatingTail;
+  [self addSubview:_name];
+  _pill = [[NSView alloc] initWithFrame:NSZeroRect];
+  _pill.wantsLayer = YES;
+  _pill.layer.cornerRadius = 8;
+  [self addSubview:_pill];
+  _pillText = [NSTextField labelWithString:@""];
+  _pillText.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+  [_pill addSubview:_pillText];
+  _detail = [NSTextField labelWithString:@""];
+  _detail.font = [NSFont systemFontOfSize:12];
+  _detail.textColor = NSColor.secondaryLabelColor;
+  _detail.lineBreakMode = NSLineBreakByTruncatingTail;
+  [self addSubview:_detail];
+  _action = [NSButton buttonWithTitle:@"连接" target:nil action:nil];
+  _action.bezelStyle = NSBezelStyleRounded;
+  _action.controlSize = NSControlSizeRegular;
+  [self addSubview:_action];
+  return self;
+}
+
+- (void)setStatus:(NSString*)text tint:(NSColor*)tint {
+  _tint = tint;
+  _pillText.stringValue = text ?: @"";
+  _pill.hidden = text.length == 0;
+  [self applyColors];
+  self.needsLayout = YES;
+}
+
+// Layer colours do not follow light and dark mode by themselves.
+- (void)applyColors {
+  [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+    NSColor* base = self->_tint ?: NSColor.secondaryLabelColor;
+    self->_tile.layer.backgroundColor = [base colorWithAlphaComponent:self->_tint ? 0.16 : 0.10].CGColor;
+    self->_icon.contentTintColor = base;
+    self->_pill.layer.backgroundColor = [base colorWithAlphaComponent:0.16].CGColor;
+    self->_pillText.textColor = base;
+  }];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+  [super viewDidChangeEffectiveAppearance];
+  [self applyColors];
+}
+
+- (void)layout {
+  [super layout];
+  const CGFloat W = self.bounds.size.width, H = self.bounds.size.height;
+  _tile.frame = NSMakeRect(12, std::round((H - 40) / 2), 40, 40);
+  _icon.frame = NSMakeRect(8, 8, 24, 24);
+  [_action sizeToFit];
+  NSRect b = _action.frame;
+  b.size.width = std::max<CGFloat>(b.size.width, 84);
+  b.origin = NSMakePoint(W - b.size.width - 12, std::round((H - b.size.height) / 2));
+  _action.frame = b;
+  const CGFloat left = 64, right = b.origin.x - 12;
+  // Measured from the text itself: a reused cell's intrinsic size can be the
+  // previous row's.
+  const NSSize pillSize = NSMakeSize(std::ceil(_pillText.attributedStringValue.size.width) + 2, 15);
+  const CGFloat pillW = _pill.hidden ? 0 : pillSize.width + 14;
+  const CGFloat textW = std::ceil(_name.attributedStringValue.size.width) + 4;
+  const CGFloat nameW = std::min<CGFloat>(textW, right - left - pillW - (pillW ? 8 : 0));
+  _name.frame = NSMakeRect(left, H / 2 + 1, std::max<CGFloat>(nameW, 0), 19);
+  _pill.frame = NSMakeRect(left + nameW + 8, H / 2 + 2, pillW, 17);
+  _pillText.frame = NSMakeRect(7, 1, pillSize.width, 15);
+  _detail.frame = NSMakeRect(left, H / 2 - 19, std::max<CGFloat>(right - left, 0), 16);
+}
+
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
+@end
+
+@interface AppDelegate ()
+- (RemoteWindowController*)windowForTarget:(NSString*)target;
+- (RemoteWindowController*)frontRemote;
 @end
 
 @implementation AppDelegate {
@@ -1289,12 +1455,21 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSButton* _machinesConnect;
   NSProgressIndicator* _machinesSpinner;
   NSArray<NSDictionary*>* _machines;
+  NSTextField* _machinesSummary;
+  // Which listed computers answered on their control port lately (target ->
+  // @YES/@NO); probed every 15 seconds while the app runs.
+  NSMutableDictionary<NSString*, NSNumber*>* _online;
+  NSMutableSet<NSString*>* _probing;
+  NSTimer* _probeTimer;
+  NSTimer* _refreshTimer;
   // The form for a new computer (or one whose password is not saved).
   NSWindow* _connectWindow;
   NSTextField* _host;
   NSTextField* _user;
   NSSecureTextField* _password;
-  NSButton* _usePairing;
+  NSSegmentedControl* _authMode;  // 0 password, 1 pairing code
+  NSTextField* _userLabel;
+  NSTextField* _secretLabel;
   NSTextField* _code;
   NSButton* _connectButton;
   NSProgressIndicator* _spinner;
@@ -1321,15 +1496,42 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   return l;
 }
 
+// Developer aid: rdmachine-client --snapshot=DIR draws the list (with sample
+// computers) and the new-connection form into DIR/list.png and DIR/form.png
+// without showing a window, then quits. For checking the layout.
+- (void)writeSnapshotsTo:(NSString*)dir {
+  _machines = @[
+    @{@"target" : @"10.0.0.3", @"user" : @"lroel", @"name" : @"lroel的Mac Mini", @"last" : NSDate.date},
+    @{@"target" : @"192.168.1.20", @"user" : @"lroel", @"name" : @"Office-iMac",
+      @"last" : [NSDate dateWithTimeIntervalSinceNow:-3 * 86400]},
+    @{@"target" : @"home.example", @"user" : @"", @"name" : @"家里的 Mac",
+      @"last" : [NSDate dateWithTimeIntervalSinceNow:-14 * 86400]},
+  ];
+  _online[@"192.168.1.20"] = @YES;
+  _online[@"home.example"] = @NO;
+  [_machinesTable reloadData];
+  [self updateMachinesSummary];
+  auto write = [](NSWindow* w, NSString* path) {
+    NSView* v = w.contentView.superview ?: w.contentView;
+    [v layoutSubtreeIfNeeded];
+    [v displayIfNeeded];
+    NSBitmapImageRep* rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds];
+    [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
+  };
+  write(_machinesWindow, [dir stringByAppendingPathComponent:@"list.png"]);
+  write(_connectWindow, [dir stringByAppendingPathComponent:@"form.png"]);
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
   _remotes = [NSMutableArray array];
   _knownHosts = std::make_unique<rdm::KnownHosts>(rdm::DefaultConfigDir() + "/known_hosts");
   [self buildMenu];
-  _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 230)
+  _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 280)
                                                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                  backing:NSBackingStoreBuffered
                                                    defer:NO];
-  _connectWindow.title = @"rdmachine";
+  _connectWindow.title = @"新建连接";
   _connectWindow.releasedWhenClosed = NO;
   // No zoom-in animation: it showed a small translucent frame before the
   // window, which looked like a stray window flashing at start.
@@ -1337,44 +1539,73 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSView* v = _connectWindow.contentView;
   NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
 
-  [v addSubview:Label(@"Server:", NSMakeRect(20, 182, 100, 22))];
+  NSTextField* heading = [NSTextField labelWithString:@"连接到一台 Mac"];
+  heading.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
+  heading.frame = NSMakeRect(24, 232, 392, 24);
+  [v addSubview:heading];
+
+  [v addSubview:Label(@"电脑", NSMakeRect(20, 192, 90, 20))];
   _host = [NSTextField textFieldWithString:[defaults stringForKey:@"lastHost"] ?: @""];
-  _host.frame = NSMakeRect(130, 180, 260, 24);
-  _host.placeholderString = @"mac.local or 192.168.1.20";
+  _host.frame = NSMakeRect(120, 189, 296, 24);
+  _host.placeholderString = @"mac.local 或 192.168.1.20";
   [v addSubview:_host];
 
-  [v addSubview:Label(@"Account:", NSMakeRect(20, 148, 100, 22))];
+  [v addSubview:Label(@"登录方式", NSMakeRect(20, 156, 90, 20))];
+  _authMode = [NSSegmentedControl segmentedControlWithLabels:@[ @"密码", @"配对码" ]
+                                                trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                      target:self
+                                                      action:@selector(pairingToggled:)];
+  _authMode.frame = NSMakeRect(120, 152, 160, 26);
+  _authMode.selectedSegment = 0;
+  [v addSubview:_authMode];
+
+  _userLabel = Label(@"账号", NSMakeRect(20, 120, 90, 20));
+  [v addSubview:_userLabel];
   _user = [NSTextField textFieldWithString:[defaults stringForKey:@"lastUser"] ?: NSUserName()];
-  _user.frame = NSMakeRect(130, 146, 260, 24);
+  _user.frame = NSMakeRect(120, 117, 296, 24);
   [v addSubview:_user];
 
-  [v addSubview:Label(@"Password:", NSMakeRect(20, 114, 100, 22))];
-  _password = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(130, 112, 260, 24)];
+  _secretLabel = Label(@"密码", NSMakeRect(20, 84, 90, 20));
+  [v addSubview:_secretLabel];
+  _password = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(120, 81, 296, 24)];
+  _password.placeholderString = @"那台 Mac 上这个账号的登录密码";
   [v addSubview:_password];
-
-  _usePairing = [NSButton checkboxWithTitle:@"Use a pairing code instead"
-                                     target:self
-                                     action:@selector(pairingToggled:)];
-  _usePairing.frame = NSMakeRect(128, 82, 260, 22);
-  [v addSubview:_usePairing];
   _code = [NSTextField textFieldWithString:@""];
-  _code.frame = NSMakeRect(130, 54, 260, 24);
-  _code.placeholderString = @"8 digits shown by the server";
+  _code.frame = NSMakeRect(120, 81, 296, 24);
+  _code.placeholderString = @"那台 Mac 菜单栏里显示的 8 位数字";
   _code.hidden = YES;
   [v addSubview:_code];
 
-  _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(130, 18, 20, 20)];
+  NSTextField* hint = [NSTextField labelWithString:@"连上后会记住，下次在列表里双击就能连。"];
+  hint.font = [NSFont systemFontOfSize:12];
+  hint.textColor = NSColor.secondaryLabelColor;
+  hint.frame = NSMakeRect(120, 54, 296, 18);
+  [v addSubview:hint];
+
+  _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(24, 20, 20, 20)];
   _spinner.style = NSProgressIndicatorStyleSpinning;
   _spinner.displayedWhenStopped = NO;
   [v addSubview:_spinner];
-  _connectButton = [NSButton buttonWithTitle:@"Connect" target:self action:@selector(connect:)];
-  _connectButton.frame = NSMakeRect(290, 12, 106, 32);
+  NSButton* cancel = [NSButton buttonWithTitle:@"取消" target:_connectWindow action:@selector(performClose:)];
+  cancel.frame = NSMakeRect(222, 14, 96, 32);
+  cancel.keyEquivalent = @"\e";
+  [v addSubview:cancel];
+  _connectButton = [NSButton buttonWithTitle:@"连接" target:self action:@selector(connect:)];
+  _connectButton.frame = NSMakeRect(322, 14, 96, 32);
   _connectButton.keyEquivalent = @"\r";
   [v addSubview:_connectButton];
 
   [_connectWindow center];
+  _connectWindow.delegate = self;  [_connectWindow center];
   _connectWindow.delegate = self;  // closing the form goes back to the list
   [self buildMachinesWindow];
+  for (NSString* a in NSProcessInfo.processInfo.arguments) {
+    if ([a hasPrefix:@"--snapshot="]) {
+      [self writeSnapshotsTo:[a substringFromIndex:11]];
+      [NSApp terminate:nil];
+      return;
+    }
+  }
   [NSApp activateIgnoringOtherApps:YES];
 
   // rdmachine-client HOST[:PORT] [--code=PAIRING_CODE]: the address filled
@@ -1398,8 +1629,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   if (host) {
     _host.stringValue = host;
     if (code.length > 0) {
-      _usePairing.state = NSControlStateValueOn;
-      [self pairingToggled:nil];
+      [self setUsingPairing:YES];
       _code.stringValue = code;
       [self connect:nil];
       started = YES;
@@ -1450,8 +1680,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _host.stringValue = @"";
   _user.stringValue = NSUserName();
   _password.stringValue = @"";
-  _usePairing.state = NSControlStateValueOff;
-  [self pairingToggled:nil];
+  [self setUsingPairing:NO];
   [self showConnectWindow];
   [_connectWindow makeFirstResponder:_host];
 }
@@ -1466,63 +1695,152 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (void)buildMachinesWindow {
-  _machinesWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 460, 340)
+  _machinesWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 420)
                                                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                                          NSWindowStyleMaskResizable
+                                                          NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable
                                                   backing:NSBackingStoreBuffered
                                                     defer:NO];
   _machinesWindow.title = @"rdmachine";
   _machinesWindow.releasedWhenClosed = NO;
   _machinesWindow.animationBehavior = NSWindowAnimationBehaviorNone;
-  _machinesWindow.contentMinSize = NSMakeSize(360, 220);
+  _machinesWindow.contentMinSize = NSMakeSize(440, 260);
+  _machinesWindow.frameAutosaveName = @"MachinesWindow";
   NSView* v = _machinesWindow.contentView;
 
-  NSScrollView* scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 56, 460, 284)];
+  // "新建连接" at the right of the title bar.
+  NSButton* add = [NSButton buttonWithTitle:@"新建连接" target:self action:@selector(newConnection:)];
+  add.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:nil];
+  add.imagePosition = NSImageLeading;
+  add.bezelStyle = NSBezelStyleRounded;
+  add.controlSize = NSControlSizeSmall;
+  add.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  [add sizeToFit];
+  NSView* accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, add.frame.size.width + 12, 28)];
+  [add setFrameOrigin:NSMakePoint(0, std::round((28 - add.frame.size.height) / 2))];
+  [accessory addSubview:add];
+  NSTitlebarAccessoryViewController* acc = [[NSTitlebarAccessoryViewController alloc] init];
+  acc.view = accessory;
+  acc.layoutAttribute = NSLayoutAttributeTrailing;
+  [_machinesWindow addTitlebarAccessoryViewController:acc];
+
+  NSScrollView* scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 32, 560, 388)];
   scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   scroll.hasVerticalScroller = YES;
   scroll.borderType = NSNoBorder;
+  scroll.drawsBackground = NO;
   _machinesTable = [[NSTableView alloc] initWithFrame:scroll.bounds];
   NSTableColumn* col = [[NSTableColumn alloc] initWithIdentifier:@"machine"];
   col.resizingMask = NSTableColumnAutoresizingMask;
+  col.width = scroll.contentSize.width;  // one column, as wide as the list
   [_machinesTable addTableColumn:col];
   _machinesTable.headerView = nil;
-  _machinesTable.rowHeight = 46;
-  _machinesTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+  _machinesTable.rowHeight = 64;
+  _machinesTable.intercellSpacing = NSMakeSize(0, 2);
+  _machinesTable.columnAutoresizingStyle = NSTableViewLastColumnOnlyAutoresizingStyle;
+  _machinesTable.backgroundColor = NSColor.clearColor;
   if (@available(macOS 11.0, *)) _machinesTable.style = NSTableViewStyleInset;
   _machinesTable.dataSource = self;
   _machinesTable.delegate = self;
   _machinesTable.target = self;
   _machinesTable.doubleAction = @selector(connectSelected:);
   NSMenu* menu = [[NSMenu alloc] init];
-  [menu addItemWithTitle:@"Connect" action:@selector(connectSelected:) keyEquivalent:@""].target = self;
-  [menu addItemWithTitle:@"Edit…" action:@selector(editMachine:) keyEquivalent:@""].target = self;
-  [menu addItemWithTitle:@"Forget Password" action:@selector(forgetMachinePassword:) keyEquivalent:@""].target = self;
+  [menu addItemWithTitle:@"连接" action:@selector(connectSelected:) keyEquivalent:@""].target = self;
+  [menu addItemWithTitle:@"编辑…" action:@selector(editMachine:) keyEquivalent:@""].target = self;
+  [menu addItemWithTitle:@"忘记密码" action:@selector(forgetMachinePassword:) keyEquivalent:@""].target = self;
   [menu addItem:NSMenuItem.separatorItem];
-  [menu addItemWithTitle:@"Remove from List" action:@selector(removeMachine:) keyEquivalent:@""].target = self;
+  [menu addItemWithTitle:@"从列表中删除" action:@selector(removeMachine:) keyEquivalent:@""].target = self;
   _machinesTable.menu = menu;
   scroll.documentView = _machinesTable;
   [v addSubview:scroll];
+  [_machinesTable sizeLastColumnToFit];
 
-  NSButton* add = [NSButton buttonWithTitle:@"New Connection…" target:self action:@selector(newConnection:)];
-  add.frame = NSMakeRect(14, 12, 150, 32);
-  add.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
-  [v addSubview:add];
-  _machinesSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(310, 18, 20, 20)];
-  _machinesSpinner.style = NSProgressIndicatorStyleSpinning;
-  _machinesSpinner.displayedWhenStopped = NO;
-  _machinesSpinner.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-  [v addSubview:_machinesSpinner];
-  _machinesConnect = [NSButton buttonWithTitle:@"Connect" target:self action:@selector(connectSelected:)];
-  _machinesConnect.frame = NSMakeRect(340, 12, 106, 32);
-  _machinesConnect.keyEquivalent = @"\r";
-  _machinesConnect.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+  NSBox* line = [[NSBox alloc] initWithFrame:NSMakeRect(0, 31, 560, 1)];
+  line.boxType = NSBoxSeparator;
+  line.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+  [v addSubview:line];
+  _machinesSummary = [NSTextField labelWithString:@""];
+  _machinesSummary.font = [NSFont systemFontOfSize:11];
+  _machinesSummary.textColor = NSColor.secondaryLabelColor;
+  _machinesSummary.frame = NSMakeRect(16, 8, 250, 16);
+  _machinesSummary.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+  [v addSubview:_machinesSummary];
+  NSTextField* tips = [NSTextField labelWithString:@"双击连接 · 右键编辑、忘记密码、删除"];
+  tips.font = [NSFont systemFontOfSize:11];
+  tips.textColor = NSColor.tertiaryLabelColor;
+  tips.alignment = NSTextAlignmentRight;
+  tips.frame = NSMakeRect(270, 8, 274, 16);
+  tips.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+  [v addSubview:tips];
+
+  _machinesSpinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];  // kept for setBusy
+  _machinesConnect = [NSButton buttonWithTitle:@"连接" target:self action:@selector(connectSelected:)];
+  _machinesConnect.keyEquivalent = @"\r";  // Return connects the selected row
+  _machinesConnect.frame = NSMakeRect(-200, -200, 10, 10);
   [v addSubview:_machinesConnect];
   [_machinesWindow center];
+
+  _online = [NSMutableDictionary dictionary];
+  _probing = [NSMutableSet set];
+  _probeTimer = [NSTimer scheduledTimerWithTimeInterval:15 target:self selector:@selector(probeMachines) userInfo:nil repeats:YES];
+  _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(refreshMachines) userInfo:nil repeats:YES];
+  [self probeMachines];
+}
+
+// Every 15 seconds: which listed computers (not connected right now) answer.
+- (void)probeMachines {
+  for (NSDictionary* m in LoadMachines()) {
+    NSString* target = m[@"target"];
+    if ([self windowForTarget:target] || [_probing containsObject:target]) continue;
+    std::string host;
+    uint16_t port = 0;
+    if (!ParseTarget(target, &host, &port)) continue;
+    [_probing addObject:target];
+    __weak AppDelegate* weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      const bool up = TcpReachable(host, port, 1500);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        AppDelegate* me = weakSelf;
+        if (!me) return;
+        [me->_probing removeObject:target];
+        me->_online[target] = @(up);
+        [me refreshMachines];
+      });
+    });
+  }
+}
+
+// The list's live parts (durations, statuses), once a second while it shows.
+- (void)refreshMachines {
+  if (!_machinesWindow.visible) return;
+  [_machinesTable reloadData];
+  [self updateMachinesSummary];
+}
+
+- (void)updateMachinesSummary {
+  int live = 0, retrying = 0;
+  for (RemoteWindowController* r in _remotes) {
+    if (r.isLive) ++live;
+    else ++retrying;
+  }
+  NSMutableArray* parts = [NSMutableArray array];
+  [parts addObject:[NSString stringWithFormat:@"%lu 台电脑", static_cast<unsigned long>(_machines.count)]];
+  if (live) [parts addObject:[NSString stringWithFormat:@"已连接 %d 台", live]];
+  if (retrying) [parts addObject:[NSString stringWithFormat:@"正在重连 %d 台", retrying]];
+  _machinesSummary.stringValue = [parts componentsJoinedByString:@" · "];
+}
+
+// The row's button: the window of a connected computer, or connect.
+- (void)rowAction:(NSButton*)sender {
+  const NSInteger row = [_machinesTable rowForView:sender];
+  if (row < 0 || static_cast<NSUInteger>(row) >= _machines.count) return;
+  [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:static_cast<NSUInteger>(row)] byExtendingSelection:NO];
+  [self connectSelected:nil];
 }
 
 - (void)reloadMachines {
   _machines = LoadMachines();
   [_machinesTable reloadData];
+  [self updateMachinesSummary];
   if (_machines.count > 0 && _machinesTable.selectedRow < 0) {
     [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
   }
@@ -1533,50 +1851,46 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (NSView*)tableView:(NSTableView*)tableView viewForTableColumn:(NSTableColumn*)column row:(NSInteger)row {
-  NSTableCellView* cell = [tableView makeViewWithIdentifier:@"machineCell" owner:self];
-  NSTextField *name, *detail, *status;
+  MachineCell* cell = [tableView makeViewWithIdentifier:@"machineCell" owner:self];
   if (!cell) {
-    cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, column.width, 46)];
+    cell = [[MachineCell alloc] initWithFrame:NSMakeRect(0, 0, column.width, 64)];
     cell.identifier = @"machineCell";
-    name = [NSTextField labelWithString:@""];
-    name.font = [NSFont boldSystemFontOfSize:13];
-    name.frame = NSMakeRect(6, 23, column.width - 130, 18);
-    name.autoresizingMask = NSViewWidthSizable;
-    name.lineBreakMode = NSLineBreakByTruncatingTail;
-    name.tag = 1;
-    detail = [NSTextField labelWithString:@""];
-    detail.font = [NSFont systemFontOfSize:11];
-    detail.textColor = NSColor.secondaryLabelColor;
-    detail.frame = NSMakeRect(6, 5, column.width - 12, 16);
-    detail.autoresizingMask = NSViewWidthSizable;
-    detail.lineBreakMode = NSLineBreakByTruncatingTail;
-    detail.tag = 2;
-    status = [NSTextField labelWithString:@""];
-    status.font = [NSFont systemFontOfSize:11];
-    status.alignment = NSTextAlignmentRight;
-    status.frame = NSMakeRect(column.width - 124, 24, 118, 16);
-    status.autoresizingMask = NSViewMinXMargin;
-    status.tag = 3;
-    [cell addSubview:name];
-    [cell addSubview:detail];
-    [cell addSubview:status];
-  } else {
-    name = [cell viewWithTag:1];
-    detail = [cell viewWithTag:2];
-    status = [cell viewWithTag:3];
   }
+  cell.action.target = self;
+  cell.action.action = @selector(rowAction:);
   NSDictionary* m = _machines[static_cast<NSUInteger>(row)];
-  name.stringValue = m[@"name"] ?: m[@"target"];
-  NSString* when = @"";
-  if ([m[@"last"] isKindOfClass:NSDate.class]) {
-    NSRelativeDateTimeFormatter* f = [[NSRelativeDateTimeFormatter alloc] init];
-    when = [f localizedStringForDate:m[@"last"] relativeToDate:NSDate.date];
+  NSString* target = m[@"target"];
+  cell.name.stringValue = [m[@"name"] length] ? m[@"name"] : target;
+  NSString* user = [m[@"user"] length] ? m[@"user"] : @"配对码";
+  RemoteWindowController* open = [self windowForTarget:target];
+  if (open && open.isLive) {
+    [cell setStatus:@"已连接" tint:NSColor.systemGreenColor];
+    cell.detail.stringValue = [NSString stringWithFormat:@"%@ · %@ · %@", target, user, [open liveDetail]];
+    cell.action.title = @"显示窗口";
+  } else if (open) {
+    const int64_t down = open.reconnectingSince ? static_cast<int64_t>(-open.reconnectingSince.timeIntervalSinceNow) : 0;
+    [cell setStatus:@"正在重连…" tint:NSColor.systemOrangeColor];
+    cell.detail.stringValue = [NSString stringWithFormat:@"%@ · %@ · 断开 %@，最多重试 1 分钟", target, user, DurationText(down)];
+    cell.action.title = @"显示窗口";
+  } else {
+    NSNumber* up = _online[target];
+    if (!up) [cell setStatus:@"" tint:nil];
+    else if (up.boolValue) [cell setStatus:@"在线" tint:NSColor.systemBlueColor];
+    else [cell setStatus:@"离线" tint:nil];
+    NSString* when = @"";
+    if ([m[@"last"] isKindOfClass:NSDate.class]) {
+      NSRelativeDateTimeFormatter* f = [[NSRelativeDateTimeFormatter alloc] init];
+      f.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+      NSDate* last = m[@"last"];
+      when = -last.timeIntervalSinceNow < 60
+                 ? @"上次 刚刚"
+                 : [@"上次 " stringByAppendingString:[f localizedStringForDate:last relativeToDate:NSDate.date]];
+    }
+    NSString* saved = HasSavedLogin(target) ? @"已保存密码" : @"需要密码";
+    cell.detail.stringValue = [NSString stringWithFormat:@"%@ · %@%@%@ · %@", target, user, when.length ? @" · " : @"", when, saved];
+    cell.action.title = @"连接";
   }
-  NSString* user = [m[@"user"] length] ? m[@"user"] : @"pairing code";
-  detail.stringValue = [NSString stringWithFormat:@"%@ · %@%@%@", m[@"target"], user, when.length ? @" · " : @"", when];
-  const bool saved = HasSavedLogin(m[@"target"]);
-  status.stringValue = saved ? @"● Password saved" : @"○ Needs password";
-  status.textColor = saved ? NSColor.systemGreenColor : NSColor.secondaryLabelColor;
+  cell.needsLayout = YES;
   return cell;
 }
 
@@ -1616,8 +1930,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _host.stringValue = m[@"target"];
   _user.stringValue = [m[@"user"] length] ? m[@"user"] : NSUserName();
   _password.stringValue = @"";
-  _usePairing.state = NSControlStateValueOff;
-  [self pairingToggled:nil];
+  [self setUsingPairing:NO];
   [self showConnectWindow];
   [_connectWindow makeFirstResponder:_password];
 }
@@ -1649,17 +1962,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSDictionary* m = [self chosenMachine];
   if (!m) return;
   NSAlert* a = [[NSAlert alloc] init];
-  a.messageText = [NSString stringWithFormat:@"Edit %@", m[@"name"] ?: m[@"target"]];
-  [a addButtonWithTitle:@"Save"];
-  [a addButtonWithTitle:@"Cancel"];
+  a.messageText = [NSString stringWithFormat:@"编辑 %@", m[@"name"] ?: m[@"target"]];
+  [a addButtonWithTitle:@"保存"];
+  [a addButtonWithTitle:@"取消"];
   NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 60)];
   NSTextField* target = [NSTextField textFieldWithString:m[@"target"]];
   target.frame = NSMakeRect(80, 34, 220, 24);
   NSTextField* user = [NSTextField textFieldWithString:m[@"user"] ?: @""];
   user.frame = NSMakeRect(80, 2, 220, 24);
-  [box addSubview:Label(@"Server:", NSMakeRect(0, 36, 74, 20))];
+  [box addSubview:Label(@"电脑", NSMakeRect(0, 36, 74, 20))];
   [box addSubview:target];
-  [box addSubview:Label(@"Account:", NSMakeRect(0, 4, 74, 20))];
+  [box addSubview:Label(@"账号", NSMakeRect(0, 4, 74, 20))];
   [box addSubview:user];
   a.accessoryView = box;
   a.window.initialFirstResponder = target;
@@ -1696,10 +2009,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   }
   _host.stringValue = target;
   _user.stringValue = NS(user);
-  _usePairing.state = NSControlStateValueOff;
+  _authMode.selectedSegment = 0;
   _code.hidden = YES;
-  _password.enabled = YES;
-  _user.enabled = YES;
+  _password.hidden = NO;
+  _user.hidden = NO;
+  _userLabel.hidden = NO;
+  _secretLabel.stringValue = @"密码";
   _password.stringValue = NS(password);
   std::fill(password.begin(), password.end(), '\0');
   _automatic = YES;
@@ -1718,7 +2033,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   }
   if (![self connectWithSavedLoginTo:remote.target remote:remote]) {
     [remote.window close];
-    [self alert:@"Disconnected" text:@"The connection was lost, and there is no saved login to connect again with."];
+    [self alert:@"连接已断开" text:@"连接断了，而且没有保存的密码可以用来重新连接。"];
   }
 }
 
@@ -1741,8 +2056,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   ForgetLogin(rdm::KnownHosts::Key(host, port));
   [_machinesTable reloadData];
   NSAlert* a = [[NSAlert alloc] init];
-  a.messageText = [NSString stringWithFormat:@"Forgot the saved password for %@", target];
-  a.informativeText = @"The next connection asks for it again.";
+  a.messageText = [NSString stringWithFormat:@"已忘记 %@ 的密码", target];
+  a.informativeText = @"下次连接时会再问你。";
   [a runModal];
 }
 
@@ -1814,55 +2129,52 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSMenuItem* appItem = [[NSMenuItem alloc] init];
   [bar addItem:appItem];
   NSMenu* appMenu = [[NSMenu alloc] init];
-  [appMenu addItemWithTitle:@"Connect to Another Computer…" action:@selector(connectToAnother:) keyEquivalent:@"n"]
+  [appMenu addItemWithTitle:@"连接到其他电脑…" action:@selector(connectToAnother:) keyEquivalent:@"n"]
       .target = self;
-  [appMenu addItemWithTitle:@"Forget Saved Password…" action:@selector(forgetSavedPassword:) keyEquivalent:@""]
+  [appMenu addItemWithTitle:@"忘记已保存的密码" action:@selector(forgetSavedPassword:) keyEquivalent:@""]
       .target = self;
   [appMenu addItem:NSMenuItem.separatorItem];
-  [appMenu addItemWithTitle:@"Quit rdmachine" action:@selector(terminate:) keyEquivalent:@"q"];
+  [appMenu addItemWithTitle:@"退出 rdmachine" action:@selector(terminate:) keyEquivalent:@"q"];
   appItem.submenu = appMenu;
   NSMenuItem* editItem = [[NSMenuItem alloc] init];
   [bar addItem:editItem];
-  NSMenu* edit = [[NSMenu alloc] initWithTitle:@"Edit"];
-  [edit addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
-  [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
-  [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
-  [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+  NSMenu* edit = [[NSMenu alloc] initWithTitle:@"编辑"];
+  [edit addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
+  [edit addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
+  [edit addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
+  [edit addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
   editItem.submenu = edit;
   NSMenuItem* viewItem = [[NSMenuItem alloc] init];
   [bar addItem:viewItem];
-  NSMenu* view = [[NSMenu alloc] initWithTitle:@"View"];
+  NSMenu* view = [[NSMenu alloc] initWithTitle:@"显示"];
   // In a remote window the key goes through localShortcut: instead (every
   // key there goes to the server); the menu item is for finding it.
-  NSMenuItem* fs = [view addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+  NSMenuItem* fs = [view addItemWithTitle:@"进入/退出全屏" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
   fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
   [view addItem:NSMenuItem.separatorItem];
-  NSMenuItem* sync = [view addItemWithTitle:@"Sync Keyboard Language"
+  NSMenuItem* sync = [view addItemWithTitle:@"同步键盘语言"
                                      action:@selector(toggleSyncKeyboardLanguage:)
                               keyEquivalent:@""];
   sync.target = self;
   sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
-  sync.toolTip = @"The server switches to the input source used on this Mac (Pinyin, ABC, ...), "
-                 @"including when Caps Lock switches it.";
-  NSMenuItem* textMode = [view addItemWithTitle:@"Data Saver (Sharp Text)"
+  sync.toolTip = @"被控端跟着这台 Mac 切换输入法（拼音、ABC 等），包括用 Caps Lock 切换的时候。";
+  NSMenuItem* textMode = [view addItemWithTitle:@"省流量（文字清晰）"
                                          action:@selector(toggleTextMode:)
                                   keyEquivalent:@""];
   textMode.target = self;
   textMode.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
-  textMode.toolTip = @"The same picture with less traffic: text that stands still or is being typed is sent far more "
-                     @"compactly (with slightly fewer colours). Scrolling and video look as usual and save less.";
-  NSMenuItem* textRes = [view addItemWithTitle:@"Data Saver at Standard Resolution (1x)"
+  textMode.toolTip = @"画面和平时一样，流量更少：静止和正在输入的文字用更紧凑的方式发送（颜色略少）；滚动和视频照常，省得少些。";
+  NSMenuItem* textRes = [view addItemWithTitle:@"省流量时用标准分辨率（1 倍）"
                                         action:@selector(toggleTextModeStandardResolution:)
                                  keyEquivalent:@""];
   textRes.target = self;
   textRes.indentationLevel = 1;
   textRes.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
-  textRes.toolTip = @"With Data Saver on, use a desktop of one pixel per point instead of a Retina (2x) one: a "
-                    @"quarter of the pixels, so much less traffic; letters look coarser.";
+  textRes.toolTip = @"开着省流量时，用 1 倍的桌面代替 Retina（2 倍）：像素只有四分之一，流量少很多；字会粗糙一些。";
   [view addItem:NSMenuItem.separatorItem];
-  NSMenuItem* statsItem = [view addItemWithTitle:@"Statistics" action:nil keyEquivalent:@""];
-  NSMenu* stats = [[NSMenu alloc] initWithTitle:@"Statistics"];
-  [stats addItemWithTitle:@"Show Statistics" action:@selector(toggleStatsShown:) keyEquivalent:@""].target = self;
+  NSMenuItem* statsItem = [view addItemWithTitle:@"统计信息" action:nil keyEquivalent:@""];
+  NSMenu* stats = [[NSMenu alloc] initWithTitle:@"统计信息"];
+  [stats addItemWithTitle:@"显示统计信息" action:@selector(toggleStatsShown:) keyEquivalent:@""].target = self;
   [stats addItem:NSMenuItem.separatorItem];
   for (const auto& f : kStatsFields) {
     NSMenuItem* it = [stats addItemWithTitle:f.title action:@selector(toggleStatsField:) keyEquivalent:@""];
@@ -1871,7 +2183,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     it.indentationLevel = 1;
   }
   [stats addItem:NSMenuItem.separatorItem];
-  [stats addItemWithTitle:@"Background" action:nil keyEquivalent:@""].enabled = NO;
+  [stats addItemWithTitle:@"背景透明度" action:nil keyEquivalent:@""].enabled = NO;
   for (int pct : kStatsOpacities) {
     NSMenuItem* it = [stats addItemWithTitle:[NSString stringWithFormat:@"%d%%", pct]
                                       action:@selector(setStatsOpacity:)
@@ -1885,11 +2197,22 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSApp.mainMenu = bar;
 }
 
+- (BOOL)usingPairing {
+  return _authMode.selectedSegment == 1;
+}
+
+- (void)setUsingPairing:(BOOL)pairing {
+  _authMode.selectedSegment = pairing ? 1 : 0;
+  [self pairingToggled:nil];
+}
+
 - (void)pairingToggled:(id)sender {
-  const BOOL pairing = _usePairing.state == NSControlStateValueOn;
+  const BOOL pairing = [self usingPairing];
   _code.hidden = !pairing;
-  _password.enabled = !pairing;
-  _user.enabled = !pairing;
+  _password.hidden = pairing;
+  _user.hidden = pairing;
+  _userLabel.hidden = pairing;
+  _secretLabel.stringValue = pairing ? @"配对码" : @"密码";
   [_connectWindow makeFirstResponder:pairing ? _code : _password];
 }
 
@@ -1922,14 +2245,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   __block BOOL yes = NO;
   dispatch_sync(dispatch_get_main_queue(), ^{
     NSAlert* a = [[NSAlert alloc] init];
-    a.messageText = [NSString stringWithFormat:@"First connection to %@", host];
+    a.messageText = [NSString stringWithFormat:@"第一次连接 %@", host];
     a.informativeText = [NSString
-        stringWithFormat:@"Check that this fingerprint matches the one the server shows "
-                         @"(rdmachine-server --fingerprint on that Mac):\n\n%@\n\nIt will be remembered, "
-                         @"and a different one will be refused from now on.",
+        stringWithFormat:@"请核对这个指纹和那台 Mac 显示的一致（菜单栏里的“复制本机指纹”）：\n\n%@\n\n确认后会记住，以后指纹变了会提醒你。",
                          fp];
-    [a addButtonWithTitle:@"Trust and Connect"];
-    [a addButtonWithTitle:@"Cancel"];
+    [a addButtonWithTitle:@"信任并连接"];
+    [a addButtonWithTitle:@"取消"];
     yes = [a runModal] == NSAlertFirstButtonReturn;
   });
   return yes;
@@ -1941,13 +2262,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   __block BOOL yes = NO;
   dispatch_sync(dispatch_get_main_queue(), ^{
     NSAlert* a = [[NSAlert alloc] init];
-    a.messageText = [NSString stringWithFormat:@"%@ has a new identity", host];
+    a.messageText = [NSString stringWithFormat:@"%@ 的身份变了", host];
     a.informativeText = [NSString
-        stringWithFormat:@"Its fingerprint is not the one remembered. That happens when the server was reinstalled "
-                         @"or its identity made anew; if you did not expect it, do not connect.\n\nRemembered:\n%@\n\nNow:\n%@",
+        stringWithFormat:@"它的指纹和记住的不一样。重装过系统或者重新生成过身份时会这样；如果你没有预料到，就不要连接。\n\n记住的：\n%@\n\n现在的：\n%@",
                          oldFp, newFp];
-    [a addButtonWithTitle:@"Trust the New Identity and Connect"];
-    [a addButtonWithTitle:@"Cancel"];
+    [a addButtonWithTitle:@"信任新身份并连接"];
+    [a addButtonWithTitle:@"取消"];
     yes = [a runModal] == NSAlertFirstButtonReturn;
   });
   return yes;
@@ -1972,7 +2292,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.control.host = host;
   opts.control.port = port;
   opts.control.client_name = NSHost.currentHost.localizedName.UTF8String ?: "Mac";
-  if (_usePairing.state == NSControlStateValueOn) {
+  if ([self usingPairing]) {
     opts.control.auth.method = rdm::AuthMethod::kPairingCode;
     opts.control.auth.code = _code.stringValue.UTF8String;
   } else {
@@ -2027,19 +2347,19 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
   opts.on_moving = [weakRemote](const std::string& reason) {
-    NSString* text = reason == "user_logged_in"    ? @"Logged in on that Mac — switching to the desktop…"
-                     : reason == "user_logged_out" ? @"Logged out on that Mac — switching to the login window…"
-                     : reason == "user_switched"   ? @"Switching to the desktop of the user now logged in…"
-                     : reason == "agent_restarted" ? @"The server on that Mac restarted — reconnecting…"
-                     : reason == "server_stopping" ? @"The server on that Mac stopped — waiting for it to come back…"
-                                                   : @"Switching to that Mac's new desktop…";
+    NSString* text = reason == "user_logged_in"    ? @"那台 Mac 已登录，正在切换到桌面…"
+                     : reason == "user_logged_out" ? @"那台 Mac 已退出登录，正在切换到登录窗口…"
+                     : reason == "user_switched"   ? @"正在切换到新登录用户的桌面…"
+                     : reason == "agent_restarted" ? @"那台 Mac 的服务重启了，正在重新连接…"
+                     : reason == "server_stopping" ? @"那台 Mac 的服务停了，正在等它恢复…"
+                                                   : @"正在切换到那台 Mac 的新桌面…";
     dispatch_async(dispatch_get_main_queue(), ^{
       [weakRemote showStatus:text];
     });
   };
   opts.on_stalled = [weakRemote](bool stalled) {
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (stalled) [weakRemote showStatus:@"Connection interrupted — waiting for that Mac…"];
+      if (stalled) [weakRemote showStatus:@"连接中断，正在等待那台 Mac…"];
       else [weakRemote hideStatus];
     });
   };
@@ -2096,7 +2416,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
         return;
       }
       [remote.window close];  // brings back the connect window
-      [self alert:@"Disconnected" text:[@"Could not connect again.\n\n" stringByAppendingString:DescribeError(result)]];
+      [self alert:@"连接已断开" text:[@"没能重新连上。\n\n" stringByAppendingString:DescribeError(result)]];
       return;
     }
     if (automatic && result.error == "bad_credentials") {
@@ -2106,19 +2426,18 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       _user.stringValue = NS(_pendingUser);
       [self showConnectWindow];
       [_connectWindow makeFirstResponder:_password];
-      [self alert:@"The saved password no longer works"
-             text:@"It was probably changed on that Mac. Enter the new one; it is remembered again."];
+      [self alert:@"保存的密码不能用了"
+             text:@"可能在那台 Mac 上改过密码。输入新密码后会重新记住。"];
       return;
     }
     if (!_connectWindow.visible) [self showMachines];
     if (changed) {
-      [self alert:@"The server's identity has changed"
-             text:[NSString stringWithFormat:@"The fingerprint is not the one remembered for this server, so "
-                                             @"rdmachine refused to connect. If you know why (the server was "
-                                             @"reinstalled), remove its line from:\n\n%@",
+      [self alert:@"那台电脑的身份变了"
+             text:[NSString stringWithFormat:@"指纹和记住的不一样，所以没有连接。如果你知道原因（比如重装过），"
+                                             @"可以在列表里删掉这台电脑再重新连接，或者删掉这个文件里它的那一行：\n\n%@",
                                              NS(_knownHosts->path())]];
     } else if (result.error != "untrusted_server") {
-      [self alert:@"Could not connect" text:DescribeError(result)];
+      [self alert:@"连接失败" text:DescribeError(result)];
     }
     return;
   }
@@ -2131,7 +2450,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   remote.serverName = NS(result.server.server_name);
   RememberMachine(remote.target, NS(_pendingUser), remote.serverName);
   [remote attachSession:std::move(session)];
-  remote.window.title = [NSString stringWithFormat:@"%@ (%@)", remote.serverName, remote.target];
+  remote.reconnectingSince = nil;
+  remote.window.title = [NSString stringWithFormat:@"%@（%@）", remote.serverName, remote.target];
   if (!reused && [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey] &&
       !(remote.window.styleMask & NSWindowStyleMaskFullScreen)) {
     [remote.window toggleFullScreen:nil];  // as it was left last time
@@ -2169,27 +2489,28 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   if (lost && !key.empty() && LoadLogin(key, &saved_user, &saved_password)) {
     std::fill(saved_password.begin(), saved_password.end(), '\0');
     [remote endSession];
-    remote.window.title = [NSString stringWithFormat:@"%@ (%@) — reconnecting…", remote.serverName, remote.target];
+    remote.reconnectingSince = NSDate.date;
+    remote.window.title = [NSString stringWithFormat:@"%@（%@）— 正在重连…", remote.serverName, remote.target];
     [remote showStatus:[reason isEqualToString:@"server_shutdown"]
-                           ? @"The server on that Mac stopped — reconnecting when it is back…"
-                           : @"Connection lost — reconnecting…"];
+                           ? @"那台 Mac 的服务停了，恢复后会自动重新连接…"
+                           : @"连接断了，正在重新连接…"];
     _reconnectUntil = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     [self performSelector:@selector(reconnect:) withObject:remote afterDelay:1.0];
     return;
   }
   [remote.window close];  // ends the session and brings back the connect window
   NSString* text = [reason isEqualToString:@"server_disconnected"]
-                       ? @"Someone at that Mac chose Disconnect in its menu."
+                       ? @"那台 Mac 上有人在菜单里点了“断开当前连接”。"
                    : [reason isEqualToString:@"session_replaced"]
-                       ? @"You connected to that Mac from another computer, which took over the session."
+                       ? @"你从另一台电脑连上了那台 Mac，会话已经转到那边。"
                    : [reason isEqualToString:@"console_changed"]
-                       ? @"Someone else logged in on that Mac, so the session ended."
-                   : [reason isEqualToString:@"server_shutdown"] ? @"The server was stopped."
-                   : [reason isEqualToString:@"media_lost"]    ? @"The picture connection was lost."
+                       ? @"那台 Mac 上换了别人登录，会话已结束。"
+                   : [reason isEqualToString:@"server_shutdown"] ? @"那台 Mac 的服务停止了。"
+                   : [reason isEqualToString:@"media_lost"]    ? @"画面连接断了。"
                    : [reason isEqualToString:@"connection_lost"]
-                       ? @"The connection to the server was lost."
-                       : [NSString stringWithFormat:@"The session ended (%@).", reason];
-  [self alert:@"Disconnected" text:text];
+                       ? @"和那台电脑的连接断了。"
+                       : [NSString stringWithFormat:@"会话结束了（%@）。", reason];
+  [self alert:@"连接已断开" text:text];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app {

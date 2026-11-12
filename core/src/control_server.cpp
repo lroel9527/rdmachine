@@ -125,7 +125,11 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
   if (!stop_) {
     std::string error;
     if (!conn->ServerHandshake(options_.handshake_timeout_ms, &error)) {
-      std::fprintf(stderr, "rdmachine: %s from %s\n", error.c_str(), conn->peer_address().c_str());
+      // A peer that connects and closes without a word is a reachability
+      // check (the client's list shows which computers are online): not
+      // worth a log line every few seconds.
+      const bool just_closed = error.find("EOF") != std::string::npos || error.find("reset") != std::string::npos;
+      if (!just_closed) std::fprintf(stderr, "rdmachine: %s from %s\n", error.c_str(), conn->peer_address().c_str());
     } else {
       MessageChannel channel(*conn);
       ServerGuards guards;
