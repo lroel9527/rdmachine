@@ -120,6 +120,12 @@ class MediaHost : public ServerDelegate {
   // and start around it, which no rdaccel callback may do.
   void DesktopLoop();
   void StopDesktopLoop();
+  // macOS may stop the screen capture stream by itself (the screen locked or
+  // the display went to sleep after a long idle). The picture then stays on
+  // the last frame while input still arrives, until capture starts again:
+  // this thread restarts it, every 2 seconds until it works (OnError asks).
+  void CaptureLoop();
+  void StopCaptureLoop();
   // Types the login of a password session into the login window or the lock
   // screen, once the viewer is connected (its own thread; see type_login).
   void TypeLogin(std::string username, std::string password, bool type_name, bool at_login_window);
@@ -152,6 +158,11 @@ class MediaHost : public ServerDelegate {
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_
   std::thread desktop_thread_;                // runs while desktop_ exists
+  std::thread capture_thread_;                // runs while a session does
+  std::mutex capture_mu_;
+  std::condition_variable capture_cv_;
+  bool capture_restart_ = false;
+  bool capture_stop_ = false;
   std::mutex desktop_mu_;
   std::condition_variable desktop_cv_;
   std::optional<DesktopSpec> desktop_wanted_;  // the latest request not yet acted on

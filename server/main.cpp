@@ -338,6 +338,21 @@ int main(int argc, char** argv) {
     ropts.agent_kind = "aqua";
   }
   const bool agent = !ropts.agent_kind.empty();
+#if defined(__APPLE__)
+  // The desktop session's agent: one LaunchAgent plist serves every user, so
+  // launchd cannot name a log in each home. Write to ~/Library/Logs here,
+  // starting afresh once it passes 5 MB.
+  if (ropts.agent_kind == "aqua") {
+    const char* svc = std::getenv("XPC_SERVICE_NAME");
+    const char* home = std::getenv("HOME");
+    if (svc && std::strncmp(svc, "org.rdmachine.", 14) == 0 && home && *home) {
+      const std::string path = std::string(home) + "/Library/Logs/rdmachine-server.log";
+      struct stat st {};
+      const bool big = stat(path.c_str(), &st) == 0 && st.st_size > 5 * 1024 * 1024;
+      if (std::freopen(path.c_str(), big ? "w" : "a", stderr)) setvbuf(stderr, nullptr, _IOLBF, 0);
+    }
+  }
+#endif
   if (issue_code && (ov.offer_pairing_codes == false || ropts.login_window)) return Usage();
 
 #if defined(__APPLE__)

@@ -268,8 +268,60 @@ void MediaHost::OnState(void* user, rda_state state, rda_status reason) {
 }
 
 void MediaHost::OnError(void* user, rda_status status, const char* message) {
-  static_cast<MediaHost*>(user)->Log(std::string("rdaccel host: ") + rda_status_str(status) + ": " +
-                                     (message ? message : ""));
+  auto* self = static_cast<MediaHost*>(user);
+  const std::string what = message ? message : "";
+  self->Log(std::string("rdaccel host: ") + rda_status_str(status) + ": " + what);
+  // Capture stopped by the system (lock, display sleep): start it again, on
+  // the capture thread (no rdaccel call from inside its own callback).
+  if (what.rfind("capture stopped", 0) == 0) {
+    {
+      std::lock_guard c(self->capture_mu_);
+      self->capture_restart_ = true;
+    }
+    self->capture_cv_.notify_all();
+  }
+}
+
+void MediaHost::StopCaptureLoop() {
+  {
+    std::lock_guard c(capture_mu_);
+    capture_stop_ = true;
+  }
+  capture_cv_.notify_all();
+  if (capture_thread_.joinable()) capture_thread_.join();
+}
+
+void MediaHost::CaptureLoop() {
+  int failures = 0;  // in a row: logged at the first and then every minute
+  std::unique_lock c(capture_mu_);
+  for (;;) {
+    capture_cv_.wait(c, [this] { return capture_stop_ || capture_restart_; });
+    if (capture_stop_) break;
+    capture_restart_ = false;  // a stop reported from here on asks again
+    c.unlock();
+    bool ok = true;
+    {
+      std::lock_guard lock(mu_);  // host_ stays alive while it is held
+      if (host_) {
+        rda_host_stop_capture(host_);
+        ok = rda_host_start_capture(host_) == RDA_OK;
+        if (ok) {
+          Log(failures ? "screen capture started again after " + std::to_string(failures) + " tries"
+                       : std::string("screen capture started again"));
+        } else if (failures % 30 == 0) {
+          Log(std::string("screen capture could not start again yet (trying every 2 s): ") +
+              rda_last_error());
+        }
+      }
+    }
+    failures = ok ? 0 : failures + 1;
+    c.lock();
+    if (!ok) {
+      // The display may still be asleep: try again in a while.
+      capture_cv_.wait_for(c, std::chrono::seconds(2), [this] { return capture_stop_; });
+      capture_restart_ = true;
+    }
+  }
 }
 
 std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& request, const SessionSecrets& secrets,
@@ -476,6 +528,12 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     }
     desktop_thread_ = std::thread(&MediaHost::DesktopLoop, this);
   }
+  {
+    std::lock_guard c(capture_mu_);
+    capture_stop_ = false;
+    capture_restart_ = false;
+  }
+  capture_thread_ = std::thread(&MediaHost::CaptureLoop, this);
   {
     std::lock_guard in(inject_mu_);
     input_events_ = input_failed_ = input_logged_ = 0;
@@ -715,6 +773,7 @@ void MediaHost::EndSession() {
   LogInput();
   StopStats();
   StopDesktopLoop();
+  StopCaptureLoop();
   rda_host* host;
   rda_injector* injector;
   std::unique_ptr<VirtualDesktop> desktop;
