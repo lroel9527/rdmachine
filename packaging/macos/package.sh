@@ -100,7 +100,10 @@ make_app() {
   ditto "$bin/$exe" "$app/Contents/MacOS/$exe"
   local r
   for r in "$@"; do
-    install -m 755 "$r" "$app/Contents/Resources/$(basename "$r")"
+    case "$r" in
+      *.icns) install -m 644 "$r" "$app/Contents/Resources/AppIcon.icns" ;;  # CFBundleIconFile
+      *) install -m 755 "$r" "$app/Contents/Resources/$(basename "$r")" ;;
+    esac
   done
   sed -e "s/@BUNDLE_ID@/$id/" -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build_no/" \
       -e "s/@MIN_MACOS@/$min_macos/" "$pkg/$plist" >"$app/Contents/Info.plist"
@@ -114,10 +117,11 @@ make_app() {
 
 rm -rf "$out"
 mkdir -p "$out"
-make_app "RDMachine.app" rdmachine-client org.rdmachine.client client-Info.plist.in
+# Icons: packaging/macos/icons (made by make_icons.swift there).
+make_app "RDMachine.app" rdmachine-client org.rdmachine.client client-Info.plist.in "$pkg/icons/RDMachine.icns"
 # rdmachine-service travels inside the server app (the installer runs it, and
 # it is there for status, stop and uninstall).
-make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Info.plist.in "$pkg/rdmachine-service"
+make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Info.plist.in "$pkg/rdmachine-service" "$pkg/icons/RDMachineServer.icns"
 
 ditto "$bin/rdmachine-connect" "$out/rdmachine-connect"
 codesign "${sign_args[@]}" --identifier org.rdmachine.connect "$out/rdmachine-connect"
