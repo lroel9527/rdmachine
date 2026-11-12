@@ -262,7 +262,8 @@ json ToAgentJson(const SessionOrigin& o) {
   return {{"peer_ip", o.peer_ip},
           {"method", o.method == AuthMethod::kPairingCode ? "pairing_code" : "password"},
           {"username", o.username},
-          {"account", o.account}};
+          {"account", o.account},
+          {"local_ip", o.local_ip}};
 }
 
 SessionOrigin SessionOriginFromAgentJson(const json& j) {
@@ -272,6 +273,7 @@ SessionOrigin SessionOriginFromAgentJson(const json& j) {
   o.method = j.value("method", "password") == "pairing_code" ? AuthMethod::kPairingCode : AuthMethod::kPassword;
   o.username = j.value("username", "");
   o.account = j.value("account", "");
+  o.local_ip = j.value("local_ip", "");
   return o;
 }
 

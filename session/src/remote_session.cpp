@@ -77,6 +77,15 @@ bool AwaitReady(MessageChannel& ch, int timeout_ms, ConnectResult* result) {
 
 }  // namespace
 
+// The picture goes to the address the control connection reached, not to a
+// new lookup of the host name: a name with several addresses (IPv4 and IPv6,
+// or a computer on several networks) could resolve to another one, from
+// which the server's packets would not come.
+std::string RemoteSession::MediaHostAddress() const {
+  const std::string ip = control_ ? control_->peer_ip() : std::string();
+  return ip.empty() ? options_.control.host : ip;
+}
+
 rda_viewer_config RemoteSession::ViewerConfig() {
   const rda_viewer_config& app = options_.viewer;
   rda_viewer_config c = app;
@@ -145,7 +154,7 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
   for (int attempt = 0;; ++attempt) {
     s->session_ = result->session;
     std::string error;
-    if (CreateSessionViewer(s->options_.control.host, s->session_, s->ViewerConfig(), &s->viewer_, &error) != RDA_OK) {
+    if (CreateSessionViewer(s->MediaHostAddress(), s->session_, s->ViewerConfig(), &s->viewer_, &error) != RDA_OK) {
       result->error = "media_failed";
       result->detail = error;
       return nullptr;
@@ -200,7 +209,7 @@ SessionReady RemoteSession::session() const {
 bool RemoteSession::FollowMove(const SessionReady& ready) {
   rda_viewer* fresh = nullptr;
   std::string error;
-  if (CreateSessionViewer(options_.control.host, ready, ViewerConfig(), &fresh, &error) != RDA_OK) {
+  if (CreateSessionViewer(MediaHostAddress(), ready, ViewerConfig(), &fresh, &error) != RDA_OK) {
     if (options_.log) options_.log("moved session: " + error);
     return false;
   }

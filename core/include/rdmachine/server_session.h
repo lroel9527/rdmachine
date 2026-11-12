@@ -29,6 +29,10 @@ struct SessionGrant {
 // displays and logs; not used for any security decision).
 struct SessionOrigin {
   std::string peer_ip;
+  // This computer's address the client's control connection reached: the
+  // picture is served from it too, so the client gets its packets from the
+  // address it expects (several network interfaces: see MediaHost).
+  std::string local_ip;
   AuthMethod method = AuthMethod::kPassword;
   std::string username;  // empty for pairing-code logins
   // The account whose desktop this login is for: the username, or for a
@@ -100,6 +104,7 @@ class ServerSession {
   // ends a session when the delegate says so (CheckSession), and retries the
   // start of a moving session until it succeeds or kMoveTimeout passes.
   Output Tick();
+  void set_local_ip(std::string ip) { local_ip_ = std::move(ip); }
 
   // kMoving: the session ended for a move and starts again elsewhere.
   enum class State { kExpectHello, kExpectAuth, kExpectSessionRequest, kInSession, kMoving, kClosed };
@@ -118,6 +123,7 @@ class ServerSession {
   ServerDelegate& delegate_;
   ServerGuards guards_;
   std::string peer_ip_;
+  std::string local_ip_;
   SessionOrigin origin_;  // filled at login
   std::function<Clock::time_point()> now_;
   State state_ = State::kExpectHello;

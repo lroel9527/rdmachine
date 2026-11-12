@@ -138,6 +138,7 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
       TlsConnection* self = conn.get();
       guards.take_over = [this, self] { return TakeOver(self); };
       ServerSession session(delegate_, guards, conn->peer_ip());
+      session.set_local_ip(conn->local_ip());
       auto last_heard = Clock::now(), last_ping = Clock::now();
       int64_t next_ping = 1;
       bool open = true;

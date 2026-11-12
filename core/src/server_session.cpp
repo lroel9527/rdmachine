@@ -153,6 +153,7 @@ ServerSession::Output ServerSession::OnAuth(const Auth& m) {
   }
   guards_.limiter->RecordSuccess(peer_ip_);
   origin_.peer_ip = peer_ip_;
+  origin_.local_ip = local_ip_;
   origin_.method = m.method;
   origin_.username = m.method == AuthMethod::kPassword ? m.username : std::string();
   origin_.account = m.method == AuthMethod::kPassword ? m.username : delegate_.PairingAccount();

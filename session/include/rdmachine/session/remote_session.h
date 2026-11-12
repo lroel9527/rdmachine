@@ -87,6 +87,7 @@ class RemoteSession {
   // The viewer's callbacks go through these (user = this) so the session can
   // take the clipboard messages; the rest are passed on to options_.viewer.
   rda_viewer_config ViewerConfig();
+  std::string MediaHostAddress() const;
   static void OnStreamInfo(void* user, int32_t width, int32_t height);
   static void OnFrame(void* user, const rda_image* bgra, const rda_rect* changed, size_t changed_count,
                       const rda_frame_info* info);

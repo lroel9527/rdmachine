@@ -49,6 +49,10 @@ class TlsConnection {
   // "ip:port" of the other end, for logs and rate limiting (ip only).
   const std::string& peer_address() const { return peer_address_; }
   const std::string& peer_ip() const { return peer_ip_; }
+  // This end's address of the connection (IPv4 as such, not mapped into
+  // IPv6); empty if unknown. On a computer with several ways out (VPN,
+  // Tailscale, Wi-Fi and Ethernet) it is the address the other end chose.
+  const std::string& local_ip() const { return local_ip_; }
   // Client side: fingerprint of the server's certificate.
   const std::string& peer_fingerprint() const { return peer_fingerprint_; }
 
@@ -60,7 +64,7 @@ class TlsConnection {
   explicit TlsConnection(std::unique_ptr<Impl> impl);
 
   std::unique_ptr<Impl> impl_;
-  std::string peer_address_, peer_ip_, peer_fingerprint_;
+  std::string peer_address_, peer_ip_, local_ip_, peer_fingerprint_;
 };
 
 class TlsListener {

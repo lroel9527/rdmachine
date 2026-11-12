@@ -297,3 +297,11 @@ TEST_F(ControlTest, StoppingTheServerSaysSo) {
   EXPECT_EQ(NextBye(*r.connection), "server_shutdown");
   stop.join();
 }
+
+TEST_F(ControlTest, BothEndsKnowTheAddressPairOfTheConnection) {
+  auto r = ConnectAndStartSession(Options());
+  ASSERT_EQ(r.error, "") << r.detail;
+  EXPECT_EQ(r.connection->peer_ip(), "127.0.0.1");  // where the picture goes
+  std::lock_guard lock(delegate_.mu);
+  EXPECT_EQ(delegate_.last_origin.local_ip, "127.0.0.1");  // where it is served from
+}

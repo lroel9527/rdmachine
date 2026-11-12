@@ -1,5 +1,9 @@
 #include "rdmachine/session/media_host.h"
 
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <vector>
 
@@ -29,6 +33,39 @@ void Wipe(std::string& s) {
 }
 
 constexpr auto kPendingLoginLifetime = std::chrono::seconds(60);
+
+// UDP for the picture, bound to `local_ip`: the address of this computer the
+// client's control connection reached. Bound to every address instead, the
+// replies would leave from whichever address the routing table picks for the
+// client, and on a computer with several ways out (Wi-Fi and Ethernet, a VPN,
+// Tailscale) that may not be the one the client sent to, which then drops
+// them: the login works, the picture never comes. Falls back to every address
+// when the address cannot be bound (unknown, or IPv6 link-local).
+rda_status BindMediaUdp(const std::string& local_ip, uint16_t port, rda_transport** out, std::string* where) {
+  if (!local_ip.empty()) {
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_NUMERICHOST | AI_PASSIVE;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(local_ip.c_str(), std::to_string(port).c_str(), &hints, &res) == 0 && res) {
+      const int fd = socket(res->ai_family, SOCK_DGRAM, 0);
+      if (fd >= 0) {
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (bind(fd, res->ai_addr, res->ai_addrlen) == 0 && rda_udp_from_fd(fd, 0, out) == RDA_OK) {
+          freeaddrinfo(res);
+          *where = local_ip;
+          return RDA_OK;  // the transport owns fd now
+        }
+        close(fd);
+      }
+      freeaddrinfo(res);
+    }
+  }
+  *where = "every address";
+  return rda_udp_bind(port, out);
+}
 
 InputSourceState FromRda(const rda_input_source_info& i) {
   return InputSourceState{i.id, i.name, i.language, i.input_method != 0, i.ascii_capable != 0};
@@ -339,8 +376,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   rda_transport* transport = nullptr;
   grant.transport = request.transport;
   grant.port = request.transport == MediaTransport::kTcp ? options_.tcp_port : options_.udp_port;
-  const rda_status ts = request.transport == MediaTransport::kTcp ? rda_tcp_bind(grant.port, &transport)
-                                                                  : rda_udp_bind(grant.port, &transport);
+  std::string media_where = "every address";
+  const rda_status ts = request.transport == MediaTransport::kTcp
+                            ? rda_tcp_bind(grant.port, &transport)
+                            : BindMediaUdp(origin.local_ip, grant.port, &transport, &media_where);
   if (ts != RDA_OK) {
     Log(std::string("cannot listen for media on port ") + std::to_string(grant.port) + ": " + rda_last_error());
     if (injector) rda_injector_destroy(injector);
@@ -426,7 +465,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   }
   Log("session started on display " + std::to_string(display_index) + (view_only ? " (view only)" : "") +
       (request.text_mode ? " (text mode)" : "") + (options_.login_window ? " (login window)" : "") + ", media " +
-      (grant.transport == MediaTransport::kTcp ? "tcp" : "udp") + " port " + std::to_string(grant.port) +
+      (grant.transport == MediaTransport::kTcp ? "tcp" : "udp on " + media_where) + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
   if (!login.password.empty()) {
     const LoginScreenState ls = options_.login_screen ? options_.login_screen() : QueryLoginScreen();

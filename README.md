@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 12.3+），当前版本 3.2.0。rdmachine 按自用设计：登录过就可信，尽量少打扰。
+第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 12.3+），当前版本 3.2.1。rdmachine 按自用设计：登录过就可信，尽量少打扰。
 
 ## 功能
 
@@ -110,6 +110,8 @@ View → Data Saver (Sharp Text)。静止的和正在打字的文字用更紧凑
 | TCP 4100 | 控制连接 |
 | UDP 4100 | 画面 |
 | TCP 4101 | UDP 不通时的画面 |
+
+被控 Mac 有多个出口（Wi-Fi 和网线、VPN、Tailscale 等）时，画面从客户端连上的那个地址发出，客户端也只往控制连接连到的那个地址发（3.2.1 起）。
 
 ## 命令行
 

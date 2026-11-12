@@ -77,10 +77,13 @@ std::optional<std::string> SpkiFingerprint(const mbedtls_pk_context* pk) {
   return out;
 }
 
-void FormatPeer(int fd, std::string* address, std::string* ip) {
+// The connection's address on the other end (local = false) or this one.
+void FormatAddress(int fd, bool local, std::string* address, std::string* ip) {
   sockaddr_storage ss{};
   socklen_t len = sizeof ss;
-  if (getpeername(fd, reinterpret_cast<sockaddr*>(&ss), &len) != 0) return;
+  const int rc = local ? getsockname(fd, reinterpret_cast<sockaddr*>(&ss), &len)
+                       : getpeername(fd, reinterpret_cast<sockaddr*>(&ss), &len);
+  if (rc != 0) return;
   char host[INET6_ADDRSTRLEN] = {};
   uint16_t port = 0;
   if (ss.ss_family == AF_INET) {
@@ -238,7 +241,9 @@ struct TlsConnection::Impl {
 };
 
 TlsConnection::TlsConnection(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {
-  FormatPeer(impl_->net.fd, &peer_address_, &peer_ip_);
+  FormatAddress(impl_->net.fd, false, &peer_address_, &peer_ip_);
+  std::string local_address;
+  FormatAddress(impl_->net.fd, true, &local_address, &local_ip_);
 }
 
 TlsConnection::~TlsConnection() { Close(); }

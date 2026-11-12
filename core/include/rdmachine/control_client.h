@@ -31,6 +31,9 @@ class ClientConnection {
   ~ClientConnection() { Close("user_closed"); }
 
   MessageChannel& channel() { return channel_; }
+  // The server's address this connection reached (the picture connection
+  // goes to the same one, not to a fresh lookup of the host name).
+  const std::string& peer_ip() const { return conn_->peer_ip(); }
   // Sends bye (once) and closes.
   void Close(const std::string& reason);
 
