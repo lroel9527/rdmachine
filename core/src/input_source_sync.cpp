@@ -41,9 +41,20 @@ std::string Primary(const std::string& lang) { return lang.substr(0, lang.find('
 }  // namespace
 
 std::optional<std::string> ChooseInputSource(const InputSourceState& wanted,
-                                             const std::vector<InputSourceState>& available) {
+                                             const std::vector<InputSourceState>& available, bool layouts_only) {
+  if (layouts_only && wanted.input_method) {
+    for (const char* id : {"com.apple.keylayout.ABC", "com.apple.keylayout.US"}) {
+      for (const auto& a : available) {
+        if (a.id == id && !a.input_method) return a.id;
+      }
+    }
+    for (const auto& a : available) {
+      if (!a.input_method && a.ascii_capable) return a.id;
+    }
+    return std::nullopt;
+  }
   for (const auto& a : available) {
-    if (a.id == wanted.id) return a.id;
+    if (a.id == wanted.id && !(layouts_only && a.input_method)) return a.id;
   }
   // Candidates of the same kind; the best language match wins.
   auto pick = [&](auto kind_ok) -> std::optional<std::string> {

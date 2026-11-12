@@ -278,6 +278,7 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 - 消息：rdaccel 应用消息，类型 `0x10001`（`RDA_MSG_USER_FIRST + 1`，`kInputSourceMessageType`），客户端到服务端，内容是 JSON：`{"id":"com.apple.inputmethod.SCIM.ITABC","name":"简体拼音","language":"zh-Hans","input_method":true,"ascii_capable":false}`。`id` 必填，其余可缺。
 - 客户端在会话开始、系统发出“输入源已改变”通知（`kTISNotifySelectedKeyboardInputSourceChanged`）、远程窗口回到前台时发送；和上次发的一样就不重复发。菜单 View → Sync Keyboard Language 可以关掉（默认打开）。
 - 服务端按 `ChooseInputSource`（`core/include/rdmachine/input_source_sync.h`）在本机已启用的输入源里挑：同一个 `id` 优先；输入法找同一语言的输入法（先精确匹配 `zh-Hans`，再看主语言 `zh`）；普通键盘布局找能直接打 ASCII 的布局（同语言优先）；都没有就不动。只看会话不跟随。当前已经是它就不重复切换。
+- 登录窗口只选键盘布局，不选输入法（3.2.3 起）：登录窗口的用户列表和密码框只接收键盘布局打出的键，选了拼音之类的输入法时打的字全被输入法吞掉。客户端在用输入法时，登录窗口用 ASCII 布局（先 ABC，再 U.S.，再任何 ASCII 布局）；客户端用普通布局时照常匹配。
 - 读取和切换输入源用 rdaccel 1.2 的 `rda_current_input_source`、`rda_list_input_sources`、`rda_injector_select_input_source`（macOS Text Input Sources）。服务端菜单和客户端浮窗（勾选“Input Source”时）显示同步结果。
 
 ## 会话统计

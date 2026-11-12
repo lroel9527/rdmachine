@@ -224,7 +224,8 @@ void MediaHost::SyncInputSource(const InputSourceState& wanted) {
     rda_input_source_info cur{};
     cur.struct_size = sizeof(cur);
     const bool have_cur = rda_current_input_source(&cur) == RDA_OK;
-    if (auto id = ChooseInputSource(wanted, available)) {
+    // At the login window only keyboard layouts (see ChooseInputSource).
+    if (auto id = ChooseInputSource(wanted, available, options_.login_window)) {
       for (const auto& a : available) {
         if (a.id == *id) selected = a.name.empty() ? a.id : a.name;
       }

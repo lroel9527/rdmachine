@@ -38,7 +38,13 @@ std::optional<InputSourceState> DecodeInputSource(const std::string& payload);
 // the same language (exact, then the same primary language: "zh-Hans" is
 // not "zh-Hant"); else, for a plain layout, an ASCII-capable layout (the
 // same language first). nullopt when nothing fits.
+//
+// layouts_only (the login window): never an input method. Its user list and
+// password field take keys only from a keyboard layout; with Pinyin selected
+// everything typed vanishes into the input method. A client on an input
+// method gets an ASCII layout here (ABC, then U.S., then any).
 std::optional<std::string> ChooseInputSource(const InputSourceState& wanted,
-                                             const std::vector<InputSourceState>& available);
+                                             const std::vector<InputSourceState>& available,
+                                             bool layouts_only = false);
 
 }  // namespace rdm

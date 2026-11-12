@@ -67,3 +67,34 @@ TEST(InputSourceSync, NonAsciiLayoutNeedsItsLanguage) {
   EXPECT_EQ(ChooseInputSource(kRussian, {kAbc, russian2}), russian2.id);
   EXPECT_EQ(ChooseInputSource(kRussian, {kAbc, kPinyin}), std::nullopt);
 }
+
+namespace {
+
+rdm::InputSourceState Src(std::string id, std::string lang, bool ime, bool ascii) {
+  rdm::InputSourceState s;
+  s.id = std::move(id);
+  s.language = std::move(lang);
+  s.input_method = ime;
+  s.ascii_capable = ascii;
+  return s;
+}
+
+}  // namespace
+
+TEST(InputSourceSync, TheLoginWindowGetsALayoutForAClientOnPinyin) {
+  const auto pinyin = Src("com.apple.inputmethod.SCIM.ITABC", "zh-Hans", true, true);
+  const std::vector<rdm::InputSourceState> here = {
+      pinyin, Src("com.apple.keylayout.US", "en", false, true), Src("com.apple.keylayout.ABC", "en", false, true)};
+  // In a user's session the same input method, as before.
+  EXPECT_EQ(rdm::ChooseInputSource(pinyin, here), "com.apple.inputmethod.SCIM.ITABC");
+  // At the login window: ABC, never the input method.
+  EXPECT_EQ(rdm::ChooseInputSource(pinyin, here, true), "com.apple.keylayout.ABC");
+  // No ABC: U.S.; neither: any ASCII layout; none at all: nothing.
+  EXPECT_EQ(rdm::ChooseInputSource(pinyin, {pinyin, here[1]}, true), "com.apple.keylayout.US");
+  const auto dvorak = Src("com.apple.keylayout.Dvorak", "en", false, true);
+  EXPECT_EQ(rdm::ChooseInputSource(pinyin, {pinyin, dvorak}, true), "com.apple.keylayout.Dvorak");
+  EXPECT_EQ(rdm::ChooseInputSource(pinyin, {pinyin}, true), std::nullopt);
+  // A client on a plain layout keeps it at the login window too.
+  EXPECT_EQ(rdm::ChooseInputSource(dvorak, {pinyin, here[1], dvorak}, true), "com.apple.keylayout.Dvorak");
+}
+
