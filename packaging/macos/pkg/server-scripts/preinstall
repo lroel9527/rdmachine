@@ -1,0 +1,14 @@
+#!/bin/sh
+# Installer (root), before RDMachine Server.app is replaced: stop what runs
+# from the old copy, so nothing holds the port or the old binary. A
+# connection open through it drops; the new server starts right after.
+LOG_PREFIX="rdmachine preinstall:"
+uid=$(stat -f %u /dev/console)
+launchctl bootout system/org.rdmachine.daemon 2>/dev/null && echo "$LOG_PREFIX stopped the daemon"
+if [ "$uid" != 0 ]; then
+  launchctl bootout "gui/$uid/org.rdmachine.server" 2>/dev/null && echo "$LOG_PREFIX stopped the session agent"
+fi
+# A server started by hand (standalone, 2.x) and the login window agent.
+pkill -TERM -f 'Contents/MacOS/rdmachine-server' 2>/dev/null && echo "$LOG_PREFIX stopped running servers"
+sleep 1
+exit 0

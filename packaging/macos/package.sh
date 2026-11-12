@@ -9,7 +9,7 @@
 #                                start at login, restart by launchd (sudo)
 #
 #   packaging/macos/package.sh [--build-dir DIR] [--out DIR] [--identity NAME]
-#                              [--keychain PATH] [--build] [--zip] [--dmg]
+#                              [--keychain PATH] [--build] [--zip] [--dmg] [--pkg]
 #
 #   --build-dir  CMake build directory with bin/ (default: build)
 #   --out        output directory, replaced on each run (default: dist)
@@ -23,6 +23,11 @@
 #   --dmg        also write dist/RDMachine-VERSION.dmg: both apps next to an
 #                Applications shortcut (drag to install), the command-line
 #                tools in a folder of their own; signed like the apps
+#   --pkg        also write dist/RDMachine-VERSION.pkg, the installer: the
+#                server (app, daemon and agents, started at once: what
+#                rdmachine-service install does) and the client, each a
+#                choice; unsigned (that needs a Developer ID Installer
+#                certificate), the apps inside keep their signatures
 #
 # Bundle identifiers are fixed (org.rdmachine.client, org.rdmachine.server).
 # Together with the fixed certificate they are what macOS remembers the
@@ -38,6 +43,7 @@ keychain=""
 do_build=0
 do_zip=0
 do_dmg=0
+do_pkg=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --build-dir) build_dir=${2:?}; shift 2 ;;
@@ -51,7 +57,8 @@ while [ $# -gt 0 ]; do
     --build) do_build=1; shift ;;
     --zip) do_zip=1; shift ;;
     --dmg) do_dmg=1; shift ;;
-    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --pkg) do_pkg=1; shift ;;
+    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -85,11 +92,16 @@ elif ! security find-identity -v -p codesigning ${keychain:+"$keychain"} | grep 
   exit 1
 fi
 
-# make_app NAME.app EXECUTABLE BUNDLE_ID PLIST_TEMPLATE
+# make_app NAME.app EXECUTABLE BUNDLE_ID PLIST_TEMPLATE [RESOURCE...]
 make_app() {
   local app="$out/$1" exe=$2 id=$3 plist=$4
+  shift 4
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   ditto "$bin/$exe" "$app/Contents/MacOS/$exe"
+  local r
+  for r in "$@"; do
+    install -m 755 "$r" "$app/Contents/Resources/$(basename "$r")"
+  done
   sed -e "s/@BUNDLE_ID@/$id/" -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build_no/" \
       -e "s/@MIN_MACOS@/$min_macos/" "$pkg/$plist" >"$app/Contents/Info.plist"
   printf 'APPL????' >"$app/Contents/PkgInfo"
@@ -103,7 +115,9 @@ make_app() {
 rm -rf "$out"
 mkdir -p "$out"
 make_app "RDMachine.app" rdmachine-client org.rdmachine.client client-Info.plist.in
-make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Info.plist.in
+# rdmachine-service travels inside the server app (the installer runs it, and
+# it is there for status, stop and uninstall).
+make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Info.plist.in "$pkg/rdmachine-service"
 
 ditto "$bin/rdmachine-connect" "$out/rdmachine-connect"
 codesign "${sign_args[@]}" --identifier org.rdmachine.connect "$out/rdmachine-connect"
@@ -148,3 +162,34 @@ if [ "$do_dmg" = 1 ]; then
   hdiutil verify -quiet "$dmg"
   echo "$dmg"
 fi
+
+if [ "$do_pkg" = 1 ]; then
+  installer_pkg="$out/RDMachine-$version.pkg"
+  stage=$(mktemp -d)
+  # component PKG_ID APP [SCRIPTS_DIR]: one app installed to /Applications,
+  # always there (not relocated to some other copy of the app on the disk).
+  component() {
+    local id=$1 app=$2 scripts=${3:-}
+    mkdir -p "$stage/root-$id"
+    # Only the signed bundle, no quarantine or resource forks. (macOS tags
+    # every new file with com.apple.provenance, which cannot be removed;
+    # pkgbuild lists it as ._ entries that become attributes again on
+    # install, not files, and are not part of the signature.)
+    ditto --norsrc --noextattr --noqtn "$out/$app" "$stage/root-$id/$app"
+    codesign --verify --strict "$stage/root-$id/$app"
+    pkgbuild --analyze --root "$stage/root-$id" "$stage/$id.plist" >/dev/null
+    plutil -replace 0.BundleIsRelocatable -bool NO "$stage/$id.plist"
+    plutil -replace 0.BundleOverwriteAction -string upgrade "$stage/$id.plist"
+    pkgbuild --quiet --root "$stage/root-$id" --component-plist "$stage/$id.plist" \
+      --identifier "$id" --version "$version" --install-location /Applications \
+      ${scripts:+--scripts "$scripts"} "$stage/$id.pkg"
+  }
+  component org.rdmachine.server.pkg "RDMachine Server.app" "$pkg/pkg/server-scripts"
+  component org.rdmachine.client.pkg "RDMachine.app"
+  sed -e "s/@VERSION@/$version/g" -e "s/@MIN_MACOS@/$min_macos/g" "$pkg/pkg/distribution.xml.in" >"$stage/distribution.xml"
+  productbuild --quiet --distribution "$stage/distribution.xml" --resources "$pkg/pkg/resources" \
+    --package-path "$stage" "$installer_pkg"
+  rm -rf "$stage"
+  echo "$installer_pkg"
+fi
+

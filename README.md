@@ -50,7 +50,7 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
 2. **编译并打包**（通用二进制，Intel 和 Apple Silicon 通用）：
 
    ```bash
-   packaging/macos/package.sh --build --zip --dmg
+   packaging/macos/package.sh --build --pkg --zip --dmg
    ```
 
    产物在 `dist/`：
@@ -62,11 +62,12 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
    | `rdmachine-server.sh` | 在终端里启动服务端，输出和配对码显示在终端 |
    | `rdmachine-connect` | 命令行测试客户端 |
    | `rdmachine-版本号-macos.zip` | 以上全部，拷到另一台 Mac 用 |
-   | `RDMachine-版本号.dmg` | 安装盘：打开后把两个应用拖进“应用程序”，命令行工具在 `Command Line Tools` 文件夹里 |
+   | `RDMachine-版本号.pkg` | **安装程序**（推荐）：可选服务端、客户端；服务端装完就作为服务运行（守护进程 + agent） |
+| `RDMachine-版本号.dmg` | 安装盘：把应用拖进“应用程序”；服务端这样装只能独立运行，要装成服务再跑 `rdmachine-service install` |
 
    已经编译过的话去掉 `--build`，默认从 `build/bin` 取二进制（`--build-dir` 可改）。`--identity -` 是临时签名，只适合一次性试试。
 
-3. **拷到另一台 Mac**：用 U 盘、`scp` 或 AirDrop 拷 dmg 过去，打开后把应用拖进“应用程序”；或者拷 zip 过去解压。自签证书不被别的 Mac 认可，第一次打开会被拦下：macOS 12–14 在应用上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。也可以直接 `xattr -dr com.apple.quarantine RDMachine*.app` 去掉下载标记。
+3. **装到 Mac 上**：用 U 盘、`scp` 或 AirDrop 把 pkg 拷过去，双击安装：被控的 Mac 勾“RDMachine Server”，用来连接的 Mac 勾“RDMachine”（两个都勾也行），输一次管理员密码。pkg 没有签名（签 pkg 要 Apple Developer 的安装器证书），第一次打开会被拦下：macOS 12–14 在 pkg 上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。里面的应用照旧用固定的自签证书签名，升级后屏幕录制、辅助功能权限不用重新授予。也可以在终端里装：`sudo installer -pkg RDMachine-版本号.pkg -target /`。不想装成服务时用 dmg 或 zip，自签应用第一次打开同样会被拦下，处理方法相同，或者 `xattr -dr com.apple.quarantine RDMachine*.app` 去掉下载标记。
 
 ## 试用（M0）
 
@@ -100,17 +101,19 @@ Mac 客户端也能从命令行带地址启动：`RDMachine.app/Contents/MacOS/r
 
 ## 服务、登录窗口和锁屏
 
-想让被控 Mac 开机、退出登录或锁屏时也能连，并在崩溃后自动重启，把服务端装成服务（参照 NoMachine 的 `nxserver --install`）。先把 `RDMachine Server.app` 拖进“应用程序”并打开一次（生成身份、授予权限），然后在被控 Mac 上：
+用 pkg 安装服务端时，它就作为服务运行（参照 NoMachine）：开机就能连，退出登录、锁屏时也能连，崩溃后自动重启。用 dmg 装的或者手动打开的服务端，可以之后再装成服务：
 
 ```bash
-sudo "/Volumes/RDMachine 3.0.0/Command Line Tools/rdmachine-service" install
+sudo "/Applications/RDMachine Server.app/Contents/Resources/rdmachine-service" install
 ```
 
-它装三样东西，都由 launchd 启动、出错后重启：
+服务由三样东西组成，都由 launchd 启动、出错后重启：
 
 - **守护进程**（root，开机运行）：监听端口、负责登录，把会话交给当前占着屏幕的那一方；你的服务端身份会复制给它，客户端看到的指纹不变。
 - **登录窗口 agent**：没人登录时显示登录窗口。
 - **你会话里的菜单栏应用**：显示你的桌面，现在作为守护进程的 agent 运行。
+
+`rdmachine-service` 在服务端应用里（`/Applications/RDMachine Server.app/Contents/Resources/`，DMG 的 Command Line Tools 里也有一份）：
 
 | 命令 | 作用 |
 | --- | --- |

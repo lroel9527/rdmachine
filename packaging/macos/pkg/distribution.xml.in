@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>RDMachine @VERSION@</title>
+  <welcome file="welcome.html" mime-type="text/html"/>
+  <conclusion file="conclusion.html" mime-type="text/html"/>
+  <options customize="always" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <volume-check>
+    <allowed-os-versions>
+      <os-version min="@MIN_MACOS@"/>
+    </allowed-os-versions>
+  </volume-check>
+  <choices-outline>
+    <line choice="server"/>
+    <line choice="client"/>
+  </choices-outline>
+  <choice id="server" title="RDMachine Server（被控端）"
+          description="让别的 Mac 连到这台 Mac：服务端应用，加上开机运行的守护进程和登录窗口、用户会话里的 agent。装完立即启动；登录窗口和锁屏时也能连。">
+    <pkg-ref id="org.rdmachine.server.pkg"/>
+  </choice>
+  <choice id="client" title="RDMachine（客户端）"
+          description="从这台 Mac 连到别的 Mac。">
+    <pkg-ref id="org.rdmachine.client.pkg"/>
+  </choice>
+  <pkg-ref id="org.rdmachine.server.pkg" version="@VERSION@" onConclusion="none">org.rdmachine.server.pkg.pkg</pkg-ref>
+  <pkg-ref id="org.rdmachine.client.pkg" version="@VERSION@" onConclusion="none">org.rdmachine.client.pkg.pkg</pkg-ref>
+</installer-gui-script>

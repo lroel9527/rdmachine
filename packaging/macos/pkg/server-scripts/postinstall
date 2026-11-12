@@ -1,0 +1,16 @@
+#!/bin/sh
+# Installer (root), after RDMachine Server.app is in place: install and start
+# it as a service, exactly as "sudo rdmachine-service install" does (the
+# daemon, the login window agent and the session agent; the logged-in user's
+# server identity is copied so clients see the fingerprint they trust).
+# $2 is where the package put the app (/Applications).
+APP="${2:-/Applications}/RDMachine Server.app"
+SERVICE="$APP/Contents/Resources/rdmachine-service"
+if [ ! -x "$SERVICE" ]; then
+  echo "rdmachine postinstall: $SERVICE missing" >&2
+  exit 1
+fi
+"$SERVICE" install --app "$APP"
+# Installs do not fail over this: the app is in place either way, and
+# "sudo rdmachine-service install" can be run again.
+exit 0

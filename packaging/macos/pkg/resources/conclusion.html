@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><style>
+body { font: 13px -apple-system, "PingFang SC", sans-serif; line-height: 1.5; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+li { margin-bottom: 4px; }
+code { font: 12px Menlo, monospace; }
+</style></head>
+<body>
+<h2>装好了</h2>
+<p><b>装了服务端的话</b>，还要在“系统设置 → 隐私与安全性”里给 <b>RDMachine Server</b> 打开两项权限（第一次连接时 macOS 也会提示）：</p>
+<ul>
+<li><b>屏幕录制</b>：没有它连上也看不到画面；</li>
+<li><b>辅助功能</b>：没有它只能看，不能操作。</li>
+</ul>
+<p>如果“系统设置 → 通用 → 登录项与扩展 → 允许在后台”里列出了 RDMachine Server，保持打开。</p>
+<p>以后管理服务（状态、停止、卸载）用应用里带的命令，例如：<br>
+<code>"/Applications/RDMachine Server.app/Contents/Resources/rdmachine-service" status</code></p>
+<p><b>装了客户端的话</b>，在“应用程序”里打开 RDMachine，输入被控 Mac 的地址即可。</p>
+</body>
+</html>
