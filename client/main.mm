@@ -386,6 +386,9 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 @interface RemoteWindowController : NSObject <NSWindowDelegate>
 @property(nonatomic, readonly) NSWindow* window;
 @property(nonatomic, copy) void (^onClose)(void);
+// The server this window shows: the address as typed, and the name it gave.
+@property(nonatomic, copy) NSString* target;
+@property(nonatomic, copy) NSString* serverName;
 - (instancetype)initWithTitle:(NSString*)title;
 // The desktop to ask the server for: this window's picture area at its
 // largest comfortable size on its screen, in that screen's pixels.
@@ -1295,7 +1298,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSTextField* _code;
   NSButton* _connectButton;
   NSProgressIndicator* _spinner;
-  RemoteWindowController* _remote;
+  // One window per connected computer (several at once are fine), and the
+  // connection being made (one at a time).
+  NSMutableArray<RemoteWindowController*>* _remotes;
+  RemoteWindowController* _connecting;
   std::unique_ptr<rdm::KnownHosts> _knownHosts;
   // The connection under way: started by the app (at launch, or again after
   // a drop) rather than the Connect button, and the window it goes into
@@ -1305,10 +1311,6 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   // The login being tried, remembered once it works (SaveLogin).
   std::string _pendingKey, _pendingUser, _pendingPassword;
   NSString* _pendingTarget;
-  // The running session's server and its login (empty for pairing codes).
-  std::string _currentKey;
-  NSString* _currentTarget;
-  NSString* _currentServerName;
   std::chrono::steady_clock::time_point _reconnectUntil;
 }
 
@@ -1320,6 +1322,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
+  _remotes = [NSMutableArray array];
   _knownHosts = std::make_unique<rdm::KnownHosts>(rdm::DefaultConfigDir() + "/known_hosts");
   [self buildMenu];
   _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 230)
@@ -1401,13 +1404,26 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       [self connect:nil];
       started = YES;
     }
-  } else if (!(NSEvent.modifierFlags & NSEventModifierFlagOption)) {
+  } else if (!(NSEvent.modifierFlags & NSEventModifierFlagOption) && ![self anotherCopyRunning]) {
     // Straight back to the last computer with its remembered login; hold
     // Option while opening the app to get the list instead.
     NSArray* machines = LoadMachines();
     if (machines.count > 0) started = [self connectWithSavedLoginTo:machines[0][@"target"] remote:nil];
   }
   if (!started) [self showMachines];
+}
+
+// Another copy of this app runs already (opened with open -n, say): it has
+// the last computer, so this one starts at the list rather than taking that
+// session over.
+- (BOOL)anotherCopyRunning {
+  NSString* bundle_id = NSBundle.mainBundle.bundleIdentifier;
+  if (bundle_id.length == 0) return NO;
+  const pid_t me = NSProcessInfo.processInfo.processIdentifier;
+  for (NSRunningApplication* app in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle_id]) {
+    if (app.processIdentifier != me && !app.terminated) return YES;
+  }
+  return NO;
 }
 
 // The list; the new-computer form when there is nothing in it yet.
@@ -1442,7 +1458,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
 - (void)windowWillClose:(NSNotification*)note {
   // The form closed without connecting: back to the list.
-  if (note.object == _connectWindow && !_remote && LoadMachines().count > 0) {
+  if (note.object == _connectWindow && !_connecting && LoadMachines().count > 0) {
     dispatch_async(dispatch_get_main_queue(), ^{
       [self showMachines];
     });
@@ -1564,6 +1580,22 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   return cell;
 }
 
+- (RemoteWindowController*)windowForTarget:(NSString*)target {
+  const std::string key = MachineKey(target);
+  for (RemoteWindowController* r in _remotes) {
+    if (!key.empty() && MachineKey(r.target) == key) return r;
+  }
+  return nil;
+}
+
+// The window in front, if it is a remote one.
+- (RemoteWindowController*)frontRemote {
+  for (RemoteWindowController* r in _remotes) {
+    if (r.window.isKeyWindow || r.window.isMainWindow) return r;
+  }
+  return _remotes.lastObject;
+}
+
 // The row a context-menu item or button acts on.
 - (NSDictionary*)chosenMachine {
   NSInteger row = _machinesTable.clickedRow >= 0 ? _machinesTable.clickedRow : _machinesTable.selectedRow;
@@ -1573,7 +1605,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
 - (void)connectSelected:(id)sender {
   NSDictionary* m = [self chosenMachine];
-  if (!m || _remote) return;
+  if (!m || _connecting) return;
+  if (RemoteWindowController* open = [self windowForTarget:m[@"target"]]) {
+    [_machinesWindow orderOut:nil];
+    [open.window makeKeyAndOrderFront:nil];  // already connected: no second session to the same Mac
+    return;
+  }
   if ([self connectWithSavedLoginTo:m[@"target"] remote:nil]) return;
   // No saved password: the form, filled in, asking only for the password.
   _host.stringValue = m[@"target"];
@@ -1674,22 +1711,32 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 // After a drop: the same window, the same server, until it works or a
 // minute has passed.
 - (void)reconnect:(RemoteWindowController*)remote {
-  if (remote != _remote || !remote.window.visible) return;  // closed meanwhile
-  if (![self connectWithSavedLoginTo:_currentTarget remote:remote]) {
+  if (![_remotes containsObject:remote] || !remote.window.visible) return;  // closed meanwhile
+  if (_connecting) {  // another connection is being made: wait for it
+    [self performSelector:@selector(reconnect:) withObject:remote afterDelay:1.0];
+    return;
+  }
+  if (![self connectWithSavedLoginTo:remote.target remote:remote]) {
     [remote.window close];
     [self alert:@"Disconnected" text:@"The connection was lost, and there is no saved login to connect again with."];
   }
 }
 
 - (void)connectToAnother:(id)sender {
-  if (_remote) [_remote.window close];  // brings back the list
-  else [self showMachines];
+  [self showMachines];  // the windows already open stay connected
+}
+
+// The app opened again (Dock icon, Finder) while it runs: the list, to pick
+// another computer; the connected windows stay as they are.
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)app hasVisibleWindows:(BOOL)visible {
+  if (!_machinesWindow.visible && !_connectWindow.visible) [self showMachines];
+  return NO;
 }
 
 - (void)forgetSavedPassword:(id)sender {
   std::string host;
   uint16_t port = 0;
-  NSString* target = _currentTarget ?: [NSUserDefaults.standardUserDefaults stringForKey:@"lastHost"];
+  NSString* target = [self frontRemote].target ?: [NSUserDefaults.standardUserDefaults stringForKey:@"lastHost"];
   if (!target || !ParseTarget(target, &host, &port)) return;
   ForgetLogin(rdm::KnownHosts::Key(host, port));
   [_machinesTable reloadData];
@@ -1911,7 +1958,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     _automatic = NO;  // the Connect button
     _reuseRemote = nil;
   }
-  if (_remote && _remote != _reuseRemote) return;
+  if (_connecting) return;
   NSString* target = [_host.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
   std::string host;
   uint16_t port = 0;
@@ -2010,7 +2057,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   };
 
   [self setBusy:YES];
-  _remote = remote;
+  _connecting = remote;
   // Blocks copy what they capture, so the move-only pieces travel in
   // shared holders.
   auto boxed = std::make_shared<rdm::RemoteSession::Options>(std::move(opts));
@@ -2034,6 +2081,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   RemoteWindowController* reused = _reuseRemote;
   _automatic = NO;
   _reuseRemote = nil;
+  _connecting = nil;
   if (!session) {
     std::fill(_pendingPassword.begin(), _pendingPassword.end(), '\0');
     _pendingPassword.clear();
@@ -2051,7 +2099,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       [self alert:@"Disconnected" text:[@"Could not connect again.\n\n" stringByAppendingString:DescribeError(result)]];
       return;
     }
-    _remote = nil;
     if (automatic && result.error == "bad_credentials") {
       // The password changed on that Mac: ask for the new one once.
       ForgetLogin(_pendingKey);
@@ -2075,29 +2122,30 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     }
     return;
   }
-  if (remote != _remote) return;  // closed meanwhile; the session closes here
+  if (reused && ![_remotes containsObject:remote]) return;  // closed meanwhile; the session closes here
+  if (!reused) [_remotes addObject:remote];
   if (!_pendingPassword.empty()) SaveLogin(_pendingKey, _pendingUser, _pendingPassword);
   std::fill(_pendingPassword.begin(), _pendingPassword.end(), '\0');
   _pendingPassword.clear();
-  _currentKey = _pendingKey;
-  _currentTarget = _pendingTarget;
-  _currentServerName = NS(result.server.server_name);
-  RememberMachine(_currentTarget, NS(_pendingUser), _currentServerName);
+  remote.target = _pendingTarget;
+  remote.serverName = NS(result.server.server_name);
+  RememberMachine(remote.target, NS(_pendingUser), remote.serverName);
   [remote attachSession:std::move(session)];
-  remote.window.title = [NSString stringWithFormat:@"%@ (%@)", _currentServerName, _currentTarget];
+  remote.window.title = [NSString stringWithFormat:@"%@ (%@)", remote.serverName, remote.target];
   if (!reused && [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey] &&
       !(remote.window.styleMask & NSWindowStyleMaskFullScreen)) {
     [remote.window toggleFullScreen:nil];  // as it was left last time
   }
   __weak AppDelegate* weakSelf = self;
+  __weak RemoteWindowController* weakClosing = remote;
   remote.onClose = ^{
     // Called from the controller's own windowWillClose: release it on the
     // next turn of the run loop, not while it is still running.
     dispatch_async(dispatch_get_main_queue(), ^{
       AppDelegate* me = weakSelf;
       if (!me) return;
-      me->_remote = nil;
-      [me showMachines];  // closed: back to the list
+      if (weakClosing) [me->_remotes removeObject:weakClosing];
+      if (me->_remotes.count == 0) [me showMachines];  // the last one closed: back to the list
     });
   };
   // The password field must not stay the hidden window's first responder:
@@ -2109,7 +2157,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (void)sessionEnded:(RemoteWindowController*)remote reason:(NSString*)reason {
-  if (!remote || remote != _remote) return;
+  if (!remote || ![_remotes containsObject:remote]) return;
   // The network or the server went away: connect again by itself, into the
   // same window, with the remembered login. Not when someone took over
   // (another client of this user's) or someone else logged in there.
@@ -2117,10 +2165,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
                     [reason isEqualToString:@"server_shutdown"] || [reason isEqualToString:@"server_closed"] ||
                     [reason isEqualToString:@"idle_timeout"];
   std::string saved_user, saved_password;
-  if (lost && !_currentKey.empty() && LoadLogin(_currentKey, &saved_user, &saved_password)) {
+  const std::string key = MachineKey(remote.target);
+  if (lost && !key.empty() && LoadLogin(key, &saved_user, &saved_password)) {
     std::fill(saved_password.begin(), saved_password.end(), '\0');
     [remote endSession];
-    remote.window.title = [NSString stringWithFormat:@"%@ (%@) — reconnecting…", _currentServerName, _currentTarget];
+    remote.window.title = [NSString stringWithFormat:@"%@ (%@) — reconnecting…", remote.serverName, remote.target];
     [remote showStatus:[reason isEqualToString:@"server_shutdown"]
                            ? @"The server on that Mac stopped — reconnecting when it is back…"
                            : @"Connection lost — reconnecting…"];
@@ -2144,12 +2193,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app {
-  return _remote == nil;
+  return _remotes.count == 0;
 }
 
 - (void)applicationWillTerminate:(NSNotification*)note {
-  [_remote saveWindowMode];  // quitting with the window open counts too
-  [_remote endSession];
+  for (RemoteWindowController* r in _remotes) {
+    [r saveWindowMode];  // quitting with the window open counts too
+    [r endSession];
+  }
 }
 
 @end
