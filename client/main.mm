@@ -1511,6 +1511,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _online[@"home.example"] = @NO;
   [_machinesTable reloadData];
   [self updateMachinesSummary];
+  // The once-a-second refresh must keep the selection.
+  [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+  for (int i = 0; i < 3; ++i) [self refreshRows];
+  fprintf(stderr, "snapshot: selected row after refresh = %ld\n", static_cast<long>(_machinesTable.selectedRow));
   auto write = [](NSWindow* w, NSString* path) {
     NSView* v = w.contentView.superview ?: w.contentView;
     [v layoutSubtreeIfNeeded];
@@ -1812,7 +1816,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 // The list's live parts (durations, statuses), once a second while it shows.
 - (void)refreshMachines {
   if (!_machinesWindow.visible) return;
-  [_machinesTable reloadData];
+  [self refreshRows];
+}
+
+- (void)refreshRows {
+  // In place: reloadData would rebuild the rows every second, which drops a
+  // click in progress and the selection with it.
+  for (NSInteger row = 0; row < _machinesTable.numberOfRows; ++row) {
+    if (auto* cell = static_cast<MachineCell*>([_machinesTable viewAtColumn:0 row:row makeIfNecessary:NO])) {
+      [self configureCell:cell row:row];
+    }
+  }
   [self updateMachinesSummary];
 }
 
@@ -1856,6 +1870,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     cell = [[MachineCell alloc] initWithFrame:NSMakeRect(0, 0, column.width, 64)];
     cell.identifier = @"machineCell";
   }
+  [self configureCell:cell row:row];
+  return cell;
+}
+
+// Fills a row's cell from the list and the live state.
+- (void)configureCell:(MachineCell*)cell row:(NSInteger)row {
+  if (row < 0 || static_cast<NSUInteger>(row) >= _machines.count) return;
   cell.action.target = self;
   cell.action.action = @selector(rowAction:);
   NSDictionary* m = _machines[static_cast<NSUInteger>(row)];
@@ -1891,7 +1912,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     cell.action.title = @"连接";
   }
   cell.needsLayout = YES;
-  return cell;
 }
 
 - (RemoteWindowController*)windowForTarget:(NSString*)target {
