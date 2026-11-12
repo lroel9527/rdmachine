@@ -347,11 +347,28 @@ void RememberMachine(NSString* target, NSString* user, NSString* name) {
   NSIndexSet* same = [list indexesOfObjectsPassingTest:^BOOL(NSDictionary* m, NSUInteger, BOOL*) {
     return [m[@"target"] caseInsensitiveCompare:target] == NSOrderedSame;
   }];
+  // What the user gave it (alias, group) stays across connections.
+  NSDictionary* before = same.count ? list[same.firstIndex] : nil;
   [list removeObjectsAtIndexes:same];
-  [list insertObject:@{@"target" : target, @"user" : user ?: @"", @"name" : name.length ? name : target, @"last" : NSDate.date}
-             atIndex:0];
+  NSMutableDictionary* m = [@{@"target" : target, @"user" : user ?: @"", @"name" : name.length ? name : target,
+                              @"last" : NSDate.date} mutableCopy];
+  if ([before[@"alias"] length]) m[@"alias"] = before[@"alias"];
+  if ([before[@"group"] length]) m[@"group"] = before[@"group"];
+  [list insertObject:m atIndex:0];
   SaveMachines(list);
 }
+
+// The name a computer is listed under: the alias the user gave it, else the
+// name its server reported, else its address.
+NSString* MachineTitle(NSDictionary* m) {
+  if ([m[@"alias"] length]) return m[@"alias"];
+  if ([m[@"name"] length]) return m[@"name"];
+  return m[@"target"] ?: @"";
+}
+
+// The list in groups (View > Group Computers; off unless the user turns it on).
+NSString* const kMachinesGroupedKey = @"machinesGrouped";
+bool MachinesGrouped() { return [NSUserDefaults.standardUserDefaults boolForKey:kMachinesGroupedKey]; }
 
 std::string MachineKey(NSString* target) {
   std::string host;
@@ -1537,6 +1554,10 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSButton* _machinesConnect;
   NSProgressIndicator* _machinesSpinner;
   NSArray<NSDictionary*>* _machines;
+  // What the table shows: the computers, with a header row (@{@"header":
+  // name, @"count": n}) before each group when the list is grouped.
+  NSArray<NSDictionary*>* _rows;
+  NSButton* _groupToggle;
   NSTextField* _machinesSummary;
   NSScrollView* _machinesScroll;
   // A bar at the top of the list after a connection ended or failed (instead
@@ -1600,6 +1621,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   ];
   _online[@"192.168.1.20"] = @YES;
   _online[@"home.example"] = @NO;
+  _rows = _machines;
   [_machinesTable reloadData];
   [self updateMachinesSummary];
   // The once-a-second refresh must keep the selection.
@@ -1615,6 +1637,32 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
   };
   write(_machinesWindow, [dir stringByAppendingPathComponent:@"list.png"]);
+  {
+    // Aliases and groups, the list grouped.
+    NSMutableArray* grouped = [NSMutableArray array];
+    for (NSDictionary* m in _machines) {
+      NSMutableDictionary* x = [m mutableCopy];
+      if ([m[@"target"] isEqualToString:@"10.0.0.3"]) {
+        x[@"alias"] = @"书房";
+        x[@"group"] = @"家里";
+      }
+      if ([m[@"target"] isEqualToString:@"192.168.1.20"]) x[@"group"] = @"公司";
+      [grouped addObject:x];
+    }
+    NSArray* saved = _machines;
+    _machines = grouped;
+    const bool was = MachinesGrouped();
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:kMachinesGroupedKey];
+    [self buildRows];
+    _groupToggle.state = NSControlStateValueOn;
+    [_machinesTable reloadData];
+    write(_machinesWindow, [dir stringByAppendingPathComponent:@"list-groups.png"]);
+    [NSUserDefaults.standardUserDefaults setBool:was forKey:kMachinesGroupedKey];
+    _machines = saved;
+    _rows = saved;
+    _groupToggle.state = NSControlStateValueOff;
+    [_machinesTable reloadData];
+  }
   [self showNotice:@"与 Mac mini 的连接已断开" detail:@"那台 Mac 的服务停止了。" target:@"10.0.0.3" warning:NO];
   write(_machinesWindow, [dir stringByAppendingPathComponent:@"list-notice.png"]);
   RemoteWindowController* demo = [[RemoteWindowController alloc] initWithTitle:@"Mac mini（10.0.0.3）"];
@@ -1868,14 +1916,20 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _machinesSummary = [NSTextField labelWithString:@""];
   _machinesSummary.font = [NSFont systemFontOfSize:11];
   _machinesSummary.textColor = NSColor.secondaryLabelColor;
-  _machinesSummary.frame = NSMakeRect(16, 8, 250, 16);
+  _machinesSummary.frame = NSMakeRect(16, 8, 200, 16);
   _machinesSummary.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
   [v addSubview:_machinesSummary];
-  NSTextField* tips = [NSTextField labelWithString:@"双击连接 · 右键编辑、忘记密码、删除"];
+  _groupToggle = [NSButton checkboxWithTitle:@"按分组显示" target:self action:@selector(toggleGrouped:)];
+  _groupToggle.controlSize = NSControlSizeSmall;
+  _groupToggle.font = [NSFont systemFontOfSize:11];
+  _groupToggle.frame = NSMakeRect(214, 6, 110, 20);
+  _groupToggle.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+  [v addSubview:_groupToggle];
+  NSTextField* tips = [NSTextField labelWithString:@"双击连接 · 右键改别名、分组"];
   tips.font = [NSFont systemFontOfSize:11];
   tips.textColor = NSColor.tertiaryLabelColor;
   tips.alignment = NSTextAlignmentRight;
-  tips.frame = NSMakeRect(270, 8, 274, 16);
+  tips.frame = NSMakeRect(330, 8, 214, 16);
   tips.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
   [v addSubview:tips];
 
@@ -1961,6 +2015,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // In place: reloadData would rebuild the rows every second, which drops a
   // click in progress and the selection with it.
   for (NSInteger row = 0; row < _machinesTable.numberOfRows; ++row) {
+    if (![self machineAtRow:row]) continue;  // group headers do not change
     if (auto* cell = static_cast<MachineCell*>([_machinesTable viewAtColumn:0 row:row makeIfNecessary:NO])) {
       [self configureCell:cell row:row];
     }
@@ -2030,25 +2085,103 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 // The row's button: the window of a connected computer, or connect.
 - (void)rowAction:(NSButton*)sender {
   const NSInteger row = [_machinesTable rowForView:sender];
-  if (row < 0 || static_cast<NSUInteger>(row) >= _machines.count) return;
+  if (![self machineAtRow:row]) return;
   [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:static_cast<NSUInteger>(row)] byExtendingSelection:NO];
   [self connectSelected:nil];
 }
 
 - (void)reloadMachines {
   _machines = LoadMachines();
+  [self buildRows];
   [_machinesTable reloadData];
   [self updateMachinesSummary];
-  if (_machines.count > 0 && _machinesTable.selectedRow < 0) {
-    [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+  if (_machinesTable.selectedRow < 0) {
+    for (NSUInteger i = 0; i < _rows.count; ++i) {
+      if (!_rows[i][@"header"]) {
+        [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:i] byExtendingSelection:NO];
+        break;
+      }
+    }
   }
+  _groupToggle.state = MachinesGrouped() ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+// Flat, most recent first; or grouped: groups by name, "未分组" last, each
+// most recent first.
+- (void)buildRows {
+  if (!MachinesGrouped()) {
+    _rows = _machines;
+    return;
+  }
+  NSMutableDictionary<NSString*, NSMutableArray*>* groups = [NSMutableDictionary dictionary];
+  NSMutableArray* ungrouped = [NSMutableArray array];
+  for (NSDictionary* m in _machines) {
+    NSString* g = [m[@"group"] length] ? m[@"group"] : nil;
+    if (!g) {
+      [ungrouped addObject:m];
+      continue;
+    }
+    if (!groups[g]) groups[g] = [NSMutableArray array];
+    [groups[g] addObject:m];
+  }
+  NSMutableArray* rows = [NSMutableArray array];
+  for (NSString* g in [groups.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+    [rows addObject:@{@"header" : g, @"count" : @(groups[g].count)}];
+    [rows addObjectsFromArray:groups[g]];
+  }
+  if (ungrouped.count) {
+    [rows addObject:@{@"header" : @"未分组", @"count" : @(ungrouped.count)}];
+    [rows addObjectsFromArray:ungrouped];
+  }
+  _rows = rows;
+}
+
+- (NSDictionary*)machineAtRow:(NSInteger)row {
+  if (row < 0 || static_cast<NSUInteger>(row) >= _rows.count) return nil;
+  NSDictionary* r = _rows[static_cast<NSUInteger>(row)];
+  return r[@"header"] ? nil : r;
+}
+
+- (void)toggleGrouped:(id)sender {
+  [NSUserDefaults.standardUserDefaults setBool:!MachinesGrouped() forKey:kMachinesGroupedKey];
+  [_machinesTable deselectAll:nil];
+  [self reloadMachines];
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView*)tableView {
-  return static_cast<NSInteger>(_machines.count);
+  return static_cast<NSInteger>(_rows.count);
+}
+
+- (BOOL)tableView:(NSTableView*)tableView isGroupRow:(NSInteger)row {
+  return row >= 0 && static_cast<NSUInteger>(row) < _rows.count && _rows[static_cast<NSUInteger>(row)][@"header"] != nil;
+}
+
+- (CGFloat)tableView:(NSTableView*)tableView heightOfRow:(NSInteger)row {
+  return [self tableView:tableView isGroupRow:row] ? 28 : 64;
+}
+
+- (BOOL)tableView:(NSTableView*)tableView shouldSelectRow:(NSInteger)row {
+  return ![self tableView:tableView isGroupRow:row];
 }
 
 - (NSView*)tableView:(NSTableView*)tableView viewForTableColumn:(NSTableColumn*)column row:(NSInteger)row {
+  if ([self tableView:tableView isGroupRow:row]) {
+    NSTableCellView* header = [tableView makeViewWithIdentifier:@"groupHeader" owner:self];
+    if (!header) {
+      header = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableView.bounds.size.width, 28)];
+      header.identifier = @"groupHeader";
+      NSTextField* t = [NSTextField labelWithString:@""];
+      t.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+      t.textColor = NSColor.secondaryLabelColor;
+      t.frame = NSMakeRect(14, 5, 400, 17);
+      t.autoresizingMask = NSViewWidthSizable;
+      header.textField = t;
+      [header addSubview:t];
+    }
+    NSDictionary* h = _rows[static_cast<NSUInteger>(row)];
+    header.textField.stringValue = [NSString stringWithFormat:@"%@  %@", h[@"header"], h[@"count"]];
+    return header;
+  }
   MachineCell* cell = [tableView makeViewWithIdentifier:@"machineCell" owner:self];
   if (!cell) {
     cell = [[MachineCell alloc] initWithFrame:NSMakeRect(0, 0, column.width, 64)];
@@ -2060,12 +2193,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
 // Fills a row's cell from the list and the live state.
 - (void)configureCell:(MachineCell*)cell row:(NSInteger)row {
-  if (row < 0 || static_cast<NSUInteger>(row) >= _machines.count) return;
+  NSDictionary* m = [self machineAtRow:row];
+  if (!m) return;
   cell.action.target = self;
   cell.action.action = @selector(rowAction:);
-  NSDictionary* m = _machines[static_cast<NSUInteger>(row)];
   NSString* target = m[@"target"];
-  cell.name.stringValue = [m[@"name"] length] ? m[@"name"] : target;
+  cell.name.stringValue = MachineTitle(m);
+  // An alias hides the server's own name: keep that one at hand.
+  cell.name.toolTip = [m[@"alias"] length] && [m[@"name"] length] ? [@"服务端名称：" stringByAppendingString:m[@"name"]] : nil;
   NSString* user = [m[@"user"] length] ? m[@"user"] : @"配对码";
   RemoteWindowController* open = [self windowForTarget:target];
   if (open && open.isLive) {
@@ -2117,8 +2252,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 // The row a context-menu item or button acts on.
 - (NSDictionary*)chosenMachine {
   NSInteger row = _machinesTable.clickedRow >= 0 ? _machinesTable.clickedRow : _machinesTable.selectedRow;
-  if (row < 0 || static_cast<NSUInteger>(row) >= _machines.count) return nil;
-  return _machines[static_cast<NSUInteger>(row)];
+  return [self machineAtRow:row];
 }
 
 - (void)connectSelected:(id)sender {
@@ -2166,20 +2300,35 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSDictionary* m = [self chosenMachine];
   if (!m) return;
   NSAlert* a = [[NSAlert alloc] init];
-  a.messageText = [NSString stringWithFormat:@"编辑 %@", m[@"name"] ?: m[@"target"]];
+  a.messageText = [NSString stringWithFormat:@"编辑 %@", MachineTitle(m)];
   [a addButtonWithTitle:@"保存"];
   [a addButtonWithTitle:@"取消"];
-  NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 60)];
+  NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 128)];
+  NSTextField* alias = [NSTextField textFieldWithString:m[@"alias"] ?: @""];
+  alias.frame = NSMakeRect(80, 102, 220, 24);
+  alias.placeholderString = [m[@"name"] length] ? m[@"name"] : @"列表里显示的名字";
+  NSComboBox* group = [[NSComboBox alloc] initWithFrame:NSMakeRect(80, 68, 220, 26)];
+  group.placeholderString = @"不分组";
+  group.stringValue = m[@"group"] ?: @"";
+  NSMutableOrderedSet* known = [NSMutableOrderedSet orderedSet];
+  for (NSDictionary* x in LoadMachines()) {
+    if ([x[@"group"] length]) [known addObject:x[@"group"]];
+  }
+  [group addItemsWithObjectValues:[known.array sortedArrayUsingSelector:@selector(localizedStandardCompare:)]];
   NSTextField* target = [NSTextField textFieldWithString:m[@"target"]];
   target.frame = NSMakeRect(80, 34, 220, 24);
   NSTextField* user = [NSTextField textFieldWithString:m[@"user"] ?: @""];
   user.frame = NSMakeRect(80, 2, 220, 24);
+  [box addSubview:Label(@"别名", NSMakeRect(0, 104, 74, 20))];
+  [box addSubview:alias];
+  [box addSubview:Label(@"分组", NSMakeRect(0, 71, 74, 20))];
+  [box addSubview:group];
   [box addSubview:Label(@"电脑", NSMakeRect(0, 36, 74, 20))];
   [box addSubview:target];
   [box addSubview:Label(@"账号", NSMakeRect(0, 4, 74, 20))];
   [box addSubview:user];
   a.accessoryView = box;
-  a.window.initialFirstResponder = target;
+  a.window.initialFirstResponder = alias;
   if ([a runModal] != NSAlertFirstButtonReturn) return;
   NSString* newTarget = [target.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
   NSString* newUser = [user.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
@@ -2198,6 +2347,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSMutableDictionary* edited = [m mutableCopy];
   edited[@"target"] = newTarget;
   edited[@"user"] = newUser;
+  NSCharacterSet* ws = NSCharacterSet.whitespaceCharacterSet;
+  NSString* newAlias = [alias.stringValue stringByTrimmingCharactersInSet:ws];
+  NSString* newGroup = [group.stringValue stringByTrimmingCharactersInSet:ws];
+  if (newAlias.length) edited[@"alias"] = newAlias;
+  else [edited removeObjectForKey:@"alias"];
+  if (newGroup.length) edited[@"group"] = newGroup;
+  else [edited removeObjectForKey:@"group"];
   list[i] = edited;
   SaveMachines(list);
   [self reloadMachines];
@@ -2288,6 +2444,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
+  if (item.action == @selector(toggleGrouped:)) {
+    item.state = MachinesGrouped() ? NSControlStateValueOn : NSControlStateValueOff;
+    return YES;
+  }
   if (item.action == @selector(toggleStatsShown:)) {
     item.state = StatsShown() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleStatsField:)) {
@@ -2375,6 +2535,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   textRes.indentationLevel = 1;
   textRes.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
   textRes.toolTip = @"开着省流量时，用 1 倍的桌面代替 Retina（2 倍）：像素只有四分之一，流量少很多；字会粗糙一些。";
+  [view addItem:NSMenuItem.separatorItem];
+  [view addItemWithTitle:@"按分组显示电脑" action:@selector(toggleGrouped:) keyEquivalent:@""].target = self;
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* statsItem = [view addItemWithTitle:@"统计信息" action:nil keyEquivalent:@""];
   NSMenu* stats = [[NSMenu alloc] initWithTitle:@"统计信息"];
