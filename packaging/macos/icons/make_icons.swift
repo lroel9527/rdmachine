@@ -4,8 +4,8 @@
 //   swiftc -O packaging/macos/icons/make_icons.swift -o /tmp/make_icons
 //   /tmp/make_icons packaging/macos/icons
 //
-// writes RDMachine.icns (client: blue, a display with a pointer) and
-// RDMachineServer.icns (server: graphite, a display sending out a signal),
+// writes RDMachine.icns (client: blue, a display outline) and
+// RDMachineServer.icns (server: graphite, the same display with a green dot),
 // on Apple's icon grid (an 824-point rounded square in a 1024 canvas).
 import AppKit
 
@@ -43,68 +43,19 @@ func drawIcon(_ s: Style, size: CGFloat) -> NSBitmapImageRep {
   bodyPath.fill()
   NSGraphicsContext.restoreGraphicsState()
   NSGradient(starting: s.top, ending: s.bottom)!.draw(in: bodyPath, angle: -90)
-  // A light rim along the top edge.
-  NSGraphicsContext.saveGraphicsState()
-  bodyPath.addClip()
-  NSGradient(starting: NSColor.white.withAlphaComponent(0.18), ending: NSColor.white.withAlphaComponent(0))!
-    .draw(in: NSRect(x: 100, y: 600, width: 824, height: 324), angle: -90)
-  NSGraphicsContext.restoreGraphicsState()
-
-  // The display: a white bezel with a dark screen, on a stand.
+  // The mark: a display outlined in white, and its base. The server adds
+  // one dot, its "on" light.
   let white = NSColor.white
-  let screenOuter = NSRect(x: 232, y: 372, width: 560, height: 380)
-  let bezel = NSBezierPath(roundedRect: screenOuter, xRadius: 46, yRadius: 46)
+  let screen = NSBezierPath(roundedRect: NSRect(x: 262, y: 400, width: 500, height: 330), xRadius: 54, yRadius: 54)
+  screen.lineWidth = 52
+  white.setStroke()
+  screen.stroke()
+  let base = NSBezierPath(roundedRect: NSRect(x: 392, y: 286, width: 240, height: 48), xRadius: 24, yRadius: 24)
   white.setFill()
-  bezel.fill()
-  let screen = screenOuter.insetBy(dx: 28, dy: 28)
-  let screenPath = NSBezierPath(roundedRect: screen, xRadius: 22, yRadius: 22)
-  NSGradient(starting: s.top.blended(withFraction: 0.55, of: .black)!,
-             ending: s.bottom.blended(withFraction: 0.7, of: .black)!)!.draw(in: screenPath, angle: -90)
-  let neck = NSBezierPath(roundedRect: NSRect(x: 466, y: 300, width: 92, height: 80), xRadius: 10, yRadius: 10)
-  white.withAlphaComponent(0.92).setFill()
-  neck.fill()
-  let foot = NSBezierPath(roundedRect: NSRect(x: 372, y: 270, width: 280, height: 42), xRadius: 21, yRadius: 21)
-  white.setFill()
-  foot.fill()
-
+  base.fill()
   if s.server {
-    // A signal going out: a dot and three arcs, in the accent colour.
-    let c = NSPoint(x: 512, y: 500)
     s.accent.setFill()
-    NSBezierPath(ovalIn: NSRect(x: c.x - 26, y: c.y - 26, width: 52, height: 52)).fill()
-    for (i, r) in [70.0, 118.0, 166.0].enumerated() {
-      let arc = NSBezierPath()
-      arc.appendArc(withCenter: c, radius: CGFloat(r), startAngle: 38, endAngle: 142)
-      arc.lineWidth = 26
-      arc.lineCapStyle = .round
-      s.accent.withAlphaComponent(1 - CGFloat(i) * 0.22).setStroke()
-      arc.stroke()
-    }
-  } else {
-    // A window on the remote desktop, and the pointer that reaches it.
-    let win = NSRect(x: 318, y: 470, width: 250, height: 170)
-    let winPath = NSBezierPath(roundedRect: win, xRadius: 16, yRadius: 16)
-    s.accent.withAlphaComponent(0.95).setFill()
-    winPath.fill()
-    NSColor.white.withAlphaComponent(0.85).setFill()
-    NSBezierPath(roundedRect: NSRect(x: win.minX, y: win.maxY - 34, width: win.width, height: 34),
-                 xRadius: 16, yRadius: 16).fill()
-    let pointer = NSBezierPath()
-    let p = NSPoint(x: 560, y: 610)  // tip
-    pointer.move(to: p)
-    pointer.line(to: NSPoint(x: p.x, y: p.y - 190))
-    pointer.line(to: NSPoint(x: p.x + 46, y: p.y - 146))
-    pointer.line(to: NSPoint(x: p.x + 82, y: p.y - 222))
-    pointer.line(to: NSPoint(x: p.x + 116, y: p.y - 206))
-    pointer.line(to: NSPoint(x: p.x + 82, y: p.y - 132))
-    pointer.line(to: NSPoint(x: p.x + 142, y: p.y - 132))
-    pointer.close()
-    pointer.lineJoinStyle = .round
-    pointer.lineWidth = 18
-    NSColor.black.withAlphaComponent(0.85).setStroke()
-    pointer.stroke()
-    white.setFill()
-    pointer.fill()
+    NSBezierPath(ovalIn: NSRect(x: 512 - 44, y: 565 - 44, width: 88, height: 88)).fill()
   }
   NSGraphicsContext.restoreGraphicsState()
   return rep
