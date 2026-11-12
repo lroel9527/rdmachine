@@ -33,6 +33,10 @@ void ControlServer::Stop() {
   stop_ = true;
   if (accept_thread_.joinable()) accept_thread_.join();
   listener_->Close();
+  // The connection loops notice stop_ within a tick and send bye
+  // "server_shutdown" (the client then knows to connect again); give them
+  // that moment before cutting what is left.
+  for (int i = 0; i < 20 && active_.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
   {
     std::lock_guard lock(conns_mu_);
     for (const Open& o : conns_) o.conn->Shutdown();
@@ -47,7 +51,7 @@ Clock::duration ControlServer::PairingCodeRemaining() {
 
 void ControlServer::CloseConnections() {
   std::lock_guard lock(conns_mu_);
-  for (const Open& o : conns_) o.conn->Shutdown();
+  for (const Open& o : conns_) o.disconnected->store(true);  // each loop says bye and closes
 }
 
 uint16_t ControlServer::port() const { return listener_ ? listener_->port() : 0; }
@@ -111,9 +115,10 @@ bool ControlServer::TakeOver(TlsConnection* self) {
 void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
   ++active_;
   auto replaced = std::make_shared<std::atomic<bool>>(false);
+  auto disconnected = std::make_shared<std::atomic<bool>>(false);
   {
     std::lock_guard lock(conns_mu_);
-    conns_.push_back(Open{conn.get(), replaced});
+    conns_.push_back(Open{conn.get(), replaced, disconnected});
   }
   // Stop() may have shut everything down just before this connection was
   // registered; check again so it does not linger.
@@ -164,6 +169,9 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
         if (!out.close && replaced->load()) {
           // A newer connection takes over (TakeOver waits for this close).
           out.send.push_back(Bye{"session_replaced"});
+          out.close = true;
+        } else if (!out.close && disconnected->load()) {
+          out.send.push_back(Bye{"server_disconnected"});
           out.close = true;
         }
         if (!out.close) {

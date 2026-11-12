@@ -23,7 +23,12 @@ void AgentHost::Stop() {
   if (stop_.exchange(true)) return;
   {
     std::lock_guard lock(mu_);
-    if (channel_) channel_->Shutdown();
+    if (channel_) {
+      // Quitting on purpose: the daemon ends the session at once instead of
+      // waiting for this agent to come back.
+      channel_->Send({{"type", "leaving"}});
+      channel_->Shutdown();
+    }
   }
   cv_.notify_all();
   if (thread_.joinable()) thread_.join();

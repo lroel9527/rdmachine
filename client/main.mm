@@ -394,6 +394,10 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 - (void)saveWindowMode;
 - (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session;
 - (void)sessionMoved:(const rdm::SessionReady&)ready;
+// A message over the picture (interrupted, switching, reconnecting) with a
+// Disconnect button; hidden again when the picture is back.
+- (void)showStatus:(NSString*)text;
+- (void)hideStatus;
 - (void)endSession;
 - (void)send:(const rda_input_event&)ev;
 - (BOOL)streamPoint:(NSPoint)p x:(int32_t*)x y:(int32_t*)y;
@@ -540,6 +544,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   std::vector<rda_rect> _owed[2];
   int _front;
   std::atomic<bool> _presentPending;
+  NSVisualEffectView* _statusView;
+  NSTextField* _statusLabel;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -606,6 +612,34 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   return d;
 }
 
+- (void)showStatus:(NSString*)text {
+  if (!_statusView) {
+    _statusView = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, 380, 96)];
+    _statusView.material = NSVisualEffectMaterialHUDWindow;
+    _statusView.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    _statusView.state = NSVisualEffectStateActive;
+    _statusView.wantsLayer = YES;
+    _statusView.layer.cornerRadius = 10;
+    _statusView.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin;
+    _statusLabel = [NSTextField wrappingLabelWithString:@""];
+    _statusLabel.frame = NSMakeRect(16, 44, 348, 40);
+    _statusLabel.alignment = NSTextAlignmentCenter;
+    _statusLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    [_statusView addSubview:_statusLabel];
+    NSButton* stop = [NSButton buttonWithTitle:@"Disconnect" target:_window action:@selector(performClose:)];
+    stop.frame = NSMakeRect(140, 10, 100, 28);
+    [_statusView addSubview:stop];
+  }
+  _statusLabel.stringValue = text;
+  const NSSize b = _view.bounds.size;
+  [_statusView setFrameOrigin:NSMakePoint(std::round((b.width - 380) / 2), std::round((b.height - 96) / 2))];
+  if (!_statusView.superview) [_view addSubview:_statusView];
+}
+
+- (void)hideStatus {
+  [_statusView removeFromSuperview];
+}
+
 - (void)saveWindowMode {
   NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
   const BOOL full = (_window.styleMask & NSWindowStyleMaskFullScreen) != 0;
@@ -662,6 +696,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 }
 
 - (void)attachSession:(std::unique_ptr<rdm::RemoteSession>)session {
+  [self hideStatus];
   _session = std::move(session);
   _viewer = _session->viewer();
   _desktopWanted = _session->session().desktop;
@@ -711,6 +746,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // connection, which has to hear again what this window wants.
 - (void)sessionMoved:(const rdm::SessionReady&)ready {
   if (!_session) return;
+  [self hideStatus];
   [self releaseHeld];  // the new session never saw those keys go down
   _desktopWanted = ready.desktop;
   _desktopBuilt = ready.desktop.has_value();
@@ -1943,6 +1979,23 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.clipboard = rdm::SystemClipboard();
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
+  opts.on_moving = [weakRemote](const std::string& reason) {
+    NSString* text = reason == "user_logged_in"    ? @"Logged in on that Mac — switching to the desktop…"
+                     : reason == "user_logged_out" ? @"Logged out on that Mac — switching to the login window…"
+                     : reason == "user_switched"   ? @"Switching to the desktop of the user now logged in…"
+                     : reason == "agent_restarted" ? @"The server on that Mac restarted — reconnecting…"
+                     : reason == "server_stopping" ? @"The server on that Mac stopped — waiting for it to come back…"
+                                                   : @"Switching to that Mac's new desktop…";
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakRemote showStatus:text];
+    });
+  };
+  opts.on_stalled = [weakRemote](bool stalled) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (stalled) [weakRemote showStatus:@"Connection interrupted — waiting for that Mac…"];
+      else [weakRemote hideStatus];
+    });
+  };
   opts.on_moved = [weakRemote](const rdm::SessionReady& ready) {
     rdm::SessionReady copy = ready;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2068,12 +2121,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     std::fill(saved_password.begin(), saved_password.end(), '\0');
     [remote endSession];
     remote.window.title = [NSString stringWithFormat:@"%@ (%@) — reconnecting…", _currentServerName, _currentTarget];
+    [remote showStatus:[reason isEqualToString:@"server_shutdown"]
+                           ? @"The server on that Mac stopped — reconnecting when it is back…"
+                           : @"Connection lost — reconnecting…"];
     _reconnectUntil = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     [self performSelector:@selector(reconnect:) withObject:remote afterDelay:1.0];
     return;
   }
   [remote.window close];  // ends the session and brings back the connect window
-  NSString* text = [reason isEqualToString:@"session_replaced"]
+  NSString* text = [reason isEqualToString:@"server_disconnected"]
+                       ? @"Someone at that Mac chose Disconnect in its menu."
+                   : [reason isEqualToString:@"session_replaced"]
                        ? @"You connected to that Mac from another computer, which took over the session."
                    : [reason isEqualToString:@"console_changed"]
                        ? @"Someone else logged in on that Mac, so the session ended."

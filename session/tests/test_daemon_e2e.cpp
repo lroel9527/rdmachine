@@ -47,6 +47,11 @@ struct Seen {
   std::atomic<bool> moved_to_login_window{true};
   std::mutex mu;
   std::string ended;
+  std::string moving;
+  std::string moving_reason() {
+    std::lock_guard l(mu);
+    return moving;
+  }
   std::string Ended() {
     std::lock_guard l(mu);
     return ended;
@@ -140,6 +145,10 @@ class DaemonE2E : public ::testing::Test {
     o.on_moved = [this](const SessionReady& r) {
       seen_.moved_to_login_window = r.login_window;
       ++seen_.moves;
+    };
+    o.on_moving = [this](const std::string& reason) {
+      std::lock_guard l(seen_.mu);
+      seen_.moving = reason;
     };
     o.on_ended = [this](const std::string& reason) {
       std::lock_guard l(seen_.mu);
@@ -239,4 +248,33 @@ TEST_F(DaemonE2E, APairingCodeLoginStaysOnTheDesktopItWasShownOn) {
   SetConsole(getuid(), "bob");
   ASSERT_TRUE(WaitFor([&] { return !seen_.Ended().empty(); }, 10s));
   EXPECT_EQ(seen_.Ended(), "console_changed");
+}
+
+TEST_F(DaemonE2E, QuittingTheServerOfTheSessionEndsItAtOnce) {
+  SetConsole(getuid(), "alice");
+  ConnectResult r;
+  session_ = RemoteSession::Start(Options("alice"), &r);
+  ASSERT_TRUE(session_) << r.error << ": " << r.detail;
+  const auto t0 = std::chrono::steady_clock::now();
+  user_agent_->Stop();  // the menu bar app quit (the console stays alice's)
+  ASSERT_TRUE(WaitFor([&] { return !seen_.Ended().empty(); }, 15s));
+  EXPECT_EQ(seen_.Ended(), "server_shutdown");
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 9s);  // not the 60 s a move may take
+  EXPECT_EQ(seen_.moving_reason(), "server_stopping");  // told at once, before the picture dropped
+  EXPECT_EQ(seen_.moves.load(), 0);
+}
+
+TEST_F(DaemonE2E, AServerThatComesBackKeepsTheSession) {
+  SetConsole(getuid(), "alice");
+  ConnectResult r;
+  session_ = RemoteSession::Start(Options("alice"), &r);
+  ASSERT_TRUE(session_) << r.error << ": " << r.detail;
+  user_agent_->Stop();  // rdmachine-service restart: stopped...
+  ASSERT_TRUE(WaitFor([&] { return seen_.moving_reason() == "server_stopping"; }, 5s));
+  user_agent_ = std::make_unique<AgentHost>(*user_media_, AgentHostOptions{socket_, "aqua", {}});
+  user_agent_->Start();  // ...and back within the grace
+  ASSERT_TRUE(WaitFor([&] { return seen_.moves.load() == 1; }, 15s)) << "ended: " << seen_.Ended();
+  EXPECT_EQ(seen_.Ended(), "");
+  const int before = seen_.frames;
+  EXPECT_TRUE(WaitFor([&] { return seen_.frames > before; }));
 }

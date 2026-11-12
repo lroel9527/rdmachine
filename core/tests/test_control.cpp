@@ -243,9 +243,11 @@ TEST_F(ControlTest, CloseConnectionsEndsSessionAndKeepsListening) {
     std::lock_guard lock(delegate_.mu);
     EXPECT_EQ(delegate_.ends, 1);
   }
-  // The client notices: its connection is gone.
+  // The client is told why, then the connection is gone.
   auto got = r.connection->channel().Receive(2000);
-  EXPECT_EQ(got.status, MessageChannel::Received::kClosed);
+  ASSERT_EQ(got.status, MessageChannel::Received::kMessage);
+  EXPECT_EQ(std::get<Bye>(*got.message).reason, "server_disconnected");
+  EXPECT_EQ(r.connection->channel().Receive(2000).status, MessageChannel::Received::kClosed);
   // And the next client gets in.
   auto again = ConnectAndStartSession(Options());
   EXPECT_EQ(again.error, "") << again.detail;
@@ -263,4 +265,35 @@ TEST(ControlServer, PortInUse) {
   ControlServer b(d, Identity(), opts);
   EXPECT_FALSE(b.Start(&error));
   EXPECT_NE(error.find("listen"), std::string::npos);
+}
+
+namespace {
+
+// The bye reason the client hears next (empty if the connection just closes).
+std::string NextBye(rdm::ClientConnection& c) {
+  for (int i = 0; i < 40; ++i) {
+    auto r = c.channel().Receive(100);
+    if (r.status == rdm::MessageChannel::Received::kClosed) return "";
+    if (r.status == rdm::MessageChannel::Received::kMessage) {
+      if (auto* bye = std::get_if<rdm::Bye>(&*r.message)) return bye->reason;
+    }
+  }
+  return "(nothing)";
+}
+
+}  // namespace
+
+TEST_F(ControlTest, DisconnectFromTheServerSaysSo) {
+  auto r = ConnectAndStartSession(Options());
+  ASSERT_EQ(r.error, "") << r.detail;
+  server_->CloseConnections();
+  EXPECT_EQ(NextBye(*r.connection), "server_disconnected");
+}
+
+TEST_F(ControlTest, StoppingTheServerSaysSo) {
+  auto r = ConnectAndStartSession(Options());
+  ASSERT_EQ(r.error, "") << r.detail;
+  std::thread stop([&] { server_->Stop(); });
+  EXPECT_EQ(NextBye(*r.connection), "server_shutdown");
+  stop.join();
 }

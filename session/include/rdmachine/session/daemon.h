@@ -89,6 +89,8 @@ class Daemon : public ServerDelegate {
     std::unique_ptr<AgentChannel> channel;
     std::thread reader;
     std::atomic<bool> gone{false};
+    std::atomic<bool> leaving{false};  // said it is quitting (not a crash)
+    std::chrono::steady_clock::time_point gone_at{};  // guarded by mu_
   };
   void AcceptLoop();
   void ReadLoop(std::shared_ptr<Agent> agent);
@@ -112,6 +114,14 @@ class Daemon : public ServerDelegate {
   int64_t next_request_id_ = 1;
   std::map<int64_t, nlohmann::json> replies_;  // request id -> reply
   std::shared_ptr<Agent> session_agent_;       // where the running session is
+  // The session's server was stopped on purpose (see CheckSession).
+  struct Stopped {
+    bool active = false;
+    bool login_window = false;
+    uint32_t uid = 0;
+    std::chrono::steady_clock::time_point at{};
+  };
+  Stopped stopped_;
   // The password of the last login, for the agent to type into the login
   // window or lock screen (first start after the login only; wiped after).
   struct PendingLogin {

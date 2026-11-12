@@ -133,11 +133,11 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ### ping / pong（双向）
 
-`{"type":"ping","id":<整数>}`，对方回同样 `id` 的 `pong`。控制连接空闲时每 15 秒一次，45 秒收不到任何消息就认为断开。画面连接的保活由 rdaccel 自己负责。
+`{"type":"ping","id":<整数>}`，对方回同样 `id` 的 `pong`。心跳（3.1.0 起加快）：客户端每 2 秒发一次 ping，4 秒没收到服务端的任何消息就在画面上显示“连接中断”，12 秒就认为断开并自动重连；服务端 5 秒没收到消息就发 ping，15 秒收不到任何消息就断开。画面连接的保活由 rdaccel 自己负责。
 
 ### bye（双向）
 
-`{"type":"bye","reason":"<原因>"}`，发完关闭。原因：`user_closed`（用户主动断开）、`server_shutdown`、`session_replaced`（另一个客户端登录后接管了会话，见下文“接管”）、`idle_timeout`、`console_changed`（被控 Mac 上换了另一个人登录，见“会话迁移”）。
+`{"type":"bye","reason":"<原因>"}`，发完关闭。原因：`user_closed`（用户主动断开）、`server_shutdown`、`session_replaced`（另一个客户端登录后接管了会话，见下文“接管”）、`idle_timeout`、`console_changed`（被控 Mac 上换了另一个人登录，见“会话迁移”）、`server_disconnected`（被控端菜单里点了“断开当前连接”，客户端不自动重连）。服务端停止时先发 `bye`（`server_shutdown`）再关连接，客户端据此自动重连。
 
 ### 接管
 
@@ -145,7 +145,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ### session_moving（服务端 → 客户端）
 
-`{"type":"session_moving","reason":"<原因>"}`，会话进行中才发：画面要换到被控 Mac 的另一个图形会话（有人在登录窗口登录、退出登录、切换用户）。旧的 rdaccel 连接随后断开，控制连接保持；之后同一条连接上会再来一条 `session_ready`（新的端口、密钥、令牌，`login_window` 表示新画面是不是登录窗口），客户端用它建新的画面连接，也可能是 `bye` / `error`（迁移失败）。原因：`user_logged_in`、`user_logged_out`、`user_switched`、`agent_restarted`。见下文“会话迁移”。
+`{"type":"session_moving","reason":"<原因>"}`，会话进行中才发：画面要换到被控 Mac 的另一个图形会话（有人在登录窗口登录、退出登录、切换用户）。旧的 rdaccel 连接随后断开，控制连接保持；之后同一条连接上会再来一条 `session_ready`（新的端口、密钥、令牌，`login_window` 表示新画面是不是登录窗口），客户端用它建新的画面连接，也可能是 `bye` / `error`（迁移失败）。原因：`user_logged_in`、`user_logged_out`、`user_switched`、`agent_restarted`、`server_stopping`（这个会话的服务端被主动退出或停止：5 秒内回来就接着迁移过去，比如 `rdmachine-service restart`；不回来就发 `bye`（`server_shutdown`））。见下文“会话迁移”。
 
 ### error（双向）
 

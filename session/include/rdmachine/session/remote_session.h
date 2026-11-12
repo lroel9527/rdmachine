@@ -53,6 +53,13 @@ class RemoteSession {
     // the old one (desktop size, input source, picture mode) has to be said
     // again. Runs on the session's own thread.
     std::function<void(const SessionReady& session)> on_moved;
+    // The server said the session is moving (session_moving, with its
+    // reason); on_moved or on_ended follows. Session thread.
+    std::function<void(const std::string& reason)> on_moving;
+    // true: nothing heard from the server for a few seconds (the network or
+    // the server may be gone; on_ended follows if it stays silent); false:
+    // heard again. Session thread.
+    std::function<void(bool stalled)> on_stalled;
   };
 
   // Connects and waits until the picture's connection is up. On failure

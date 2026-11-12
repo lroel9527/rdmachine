@@ -21,8 +21,10 @@ struct ControlServerOptions {
   std::string bind_address;            // empty = all interfaces
   uint16_t port = kDefaultPort;        // 0 = any free port
   int handshake_timeout_ms = 10000;
-  int idle_timeout_ms = 45000;         // no message for this long: close
-  int ping_interval_ms = 15000;        // send a ping after this long without traffic
+  // Heartbeat (docs/protocol.md, "ping / pong"): a client pings every 2
+  // seconds; a client that has gone without a word is let go after 15.
+  int idle_timeout_ms = 15000;         // no message for this long: close
+  int ping_interval_ms = 5000;         // send a ping after this long without traffic
   bool offer_pairing_codes = true;
 };
 
@@ -41,8 +43,10 @@ class ControlServer {
   // expired (or pairing is off).
   Clock::duration PairingCodeRemaining();
 
-  // Closes every open control connection, which ends a running session
-  // (the client sees the connection drop). The server keeps listening.
+  // Ends every open control connection, which ends a running session: the
+  // client hears bye "server_disconnected" (the user at this computer chose
+  // Disconnect) and does not connect again by itself. The server keeps
+  // listening.
   void CloseConnections();
 
   // Number of connections being served (for tests and status).
@@ -74,6 +78,7 @@ class ControlServer {
   struct Open {
     TlsConnection* conn;
     std::shared_ptr<std::atomic<bool>> replaced;
+    std::shared_ptr<std::atomic<bool>> disconnected;  // CloseConnections
   };
   // Asks every other open connection to give up its session and waits
   // (up to 5 seconds) until they have closed.

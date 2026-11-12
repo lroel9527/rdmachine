@@ -121,6 +121,10 @@ void Daemon::ReadLoop(std::shared_ptr<Agent> agent) {
     if (r.status != AgentChannel::Received::kMessage) break;
     Handle(agent, r.message);
   }
+  {
+    std::lock_guard lock(mu_);
+    agent->gone_at = std::chrono::steady_clock::now();
+  }
   agent->gone = true;
   if (!agent->kind.empty()) Log("agent left: " + agent->kind + (agent->user.empty() ? "" : " of " + agent->user));
   std::lock_guard lock(mu_);
@@ -197,6 +201,8 @@ void Daemon::Handle(const std::shared_ptr<Agent>& agent, const json& m) {
       const int64_t port = m["port"].get<int64_t>();
       if (port > 0 && port < 65535) options_.settings_changed(static_cast<uint16_t>(port), m.value("offer_pairing_codes", true));
     }
+  } else if (type == "leaving") {
+    agent->leaving = true;  // quit or stopped on purpose; see CheckSession
   } else if (type == "ended") {
     // The agent's session ended by itself (the viewer left); the control
     // connection notices through its own checks.
@@ -317,6 +323,7 @@ std::optional<SessionGrant> Daemon::StartSession(const SessionRequest& request, 
   {
     std::lock_guard lock(mu_);
     session_agent_ = agent;
+    stopped_.active = false;
   }
   Log("session started in " + (agent->kind == "loginwindow" ? std::string("the login window") : agent->user + "'s session"));
   return grant;
@@ -341,12 +348,34 @@ SessionCheck Daemon::CheckSession(const SessionOrigin& origin) {
   // no one (the login window shows nothing of anyone's).
   const bool allowed = console.login_window() || (!origin.account.empty() && origin.account == console.user);
   if (!allowed) return {SessionCheck::Action::kEnd, "console_changed"};
-  if (!session_agent_) return {};  // moving: StartSession finds the new agent
+  if (!session_agent_) {
+    // Moving. If the server of the session was stopped on purpose and the
+    // console still has the same owner, give it a few seconds to come back
+    // (rdmachine-service restart), then end with "server_shutdown" so the
+    // client knows (Quit in the menu stays quit).
+    if (stopped_.active) {
+      const bool same_owner = stopped_.login_window ? console.login_window() : console.uid == stopped_.uid;
+      if (same_owner && !ActiveAgentLocked(console) &&
+          std::chrono::steady_clock::now() - stopped_.at >= std::chrono::seconds(5)) {
+        stopped_.active = false;
+        return {SessionCheck::Action::kEnd, "server_shutdown"};
+      }
+    }
+    return {};  // StartSession finds the new agent
+  }
   const std::shared_ptr<Agent> active = ActiveAgentLocked(console);
   if (!session_agent_->gone && active == session_agent_) return {};
   if (!session_agent_->gone && !active) {
     // The new session's agent is not there yet (it starts with the login):
     // move now anyway, the restart waits for it.
+  }
+  const bool same_owner = session_agent_->kind == "loginwindow" ? console.login_window()
+                                                                : console.uid == session_agent_->uid;
+  if (session_agent_->gone && session_agent_->leaving && same_owner) {
+    // Quit or stopped on purpose: tell the client now (so it does not take
+    // the dropped picture for a lost connection), then see above.
+    stopped_ = Stopped{true, session_agent_->kind == "loginwindow", session_agent_->uid, session_agent_->gone_at};
+    return {SessionCheck::Action::kMove, "server_stopping"};
   }
   std::string reason = console.login_window() ? "user_logged_out"
                        : session_agent_->kind == "loginwindow" ? "user_logged_in"

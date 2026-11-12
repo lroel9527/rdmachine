@@ -206,7 +206,13 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
   }
   const int wait_ms = ready.transport == MediaTransport::kUdp && options_.udp_wait_ms > 0 ? options_.udp_wait_ms
                                                                                          : options_.control.timeout_ms;
-  if (WaitConnected(fresh, wait_ms) != RDA_STATE_CONNECTED) {
+  rda_state st = RDA_STATE_CONNECTING;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  while (!stop_ && (st = rda_viewer_get_state(fresh)) == RDA_STATE_CONNECTING &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));  // Close() may be waiting: check stop_
+  }
+  if (stop_ || st != RDA_STATE_CONNECTED) {
     rda_viewer_destroy(fresh);
     return false;
   }
@@ -225,8 +231,13 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
 
 void RemoteSession::KeepAlive() {
   using Clock = std::chrono::steady_clock;
-  constexpr auto kPingEvery = std::chrono::seconds(15);
-  constexpr auto kSilenceLimit = std::chrono::seconds(45);
+  // Pings often enough that a server which vanished without a word (power
+  // off, network gone) is noticed in seconds: the user sees "interrupted"
+  // after kStallAfter and the session ends after kSilenceLimit.
+  constexpr auto kPingEvery = std::chrono::seconds(2);
+  constexpr auto kStallAfter = std::chrono::seconds(4);
+  constexpr auto kSilenceLimit = std::chrono::seconds(12);
+  bool stalled = false;
   // The server gives a move 60 seconds (ServerSession::kMoveTimeout).
   constexpr auto kMoveLimit = std::chrono::seconds(75);
   MessageChannel& ch = control_->channel();
@@ -246,6 +257,10 @@ void RemoteSession::KeepAlive() {
     switch (r.status) {
       case MessageChannel::Received::kMessage:
         last_heard = now;
+        if (stalled) {
+          stalled = false;
+          if (options_.on_stalled) options_.on_stalled(false);
+        }
         if (auto* ping = std::get_if<Ping>(&*r.message)) {
           ch.Send(Pong{ping->id});
           last_sent = now;
@@ -255,6 +270,7 @@ void RemoteSession::KeepAlive() {
           ended = err->code.empty() ? "server_closed" : err->code;
         } else if (auto* mv = std::get_if<SessionMoving>(&*r.message)) {
           if (options_.log) options_.log("session moving: " + mv->reason);
+          if (options_.on_moving) options_.on_moving(mv->reason);
           moving = true;
           tcp_asked = false;
           moving_since = now;
@@ -284,6 +300,9 @@ void RemoteSession::KeepAlive() {
     if (!ended.empty() || stop_) break;
     if (now - last_heard >= kSilenceLimit) {
       ended = "connection_lost";
+    } else if (!stalled && now - last_heard >= kStallAfter) {
+      stalled = true;
+      if (options_.on_stalled) options_.on_stalled(true);
     } else if (moving && now - moving_since >= kMoveLimit) {
       ended = "media_lost";
     } else if (!moving && rda_viewer_get_state(viewer()) == RDA_STATE_DISCONNECTED) {
