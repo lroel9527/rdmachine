@@ -315,6 +315,56 @@ bool LoadLogin(const std::string& key, std::string* user, std::string* password)
   return true;
 }
 
+// The computers connected to before, most recent first (docs/decisions.md,
+// "便捷优先"): address, account, the name the server gave, when. Passwords
+// are not in here but in the keychain (SaveLogin), by address.
+NSString* const kMachinesKey = @"machines";
+
+NSArray<NSDictionary*>* LoadMachines() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  NSArray* list = [d arrayForKey:kMachinesKey];
+  if (!list) {
+    // Before the list (3.1.0 builds): the last computer, if any.
+    NSString* last = [d stringForKey:@"lastHost"];
+    if (last.length == 0) return @[];
+    list = @[ @{@"target" : last, @"user" : [d stringForKey:@"lastUser"] ?: @"", @"name" : last, @"last" : NSDate.date} ];
+    [d setObject:list forKey:kMachinesKey];
+  }
+  NSMutableArray* ok = [NSMutableArray array];
+  for (id m in list) {
+    if ([m isKindOfClass:NSDictionary.class] && [m[@"target"] isKindOfClass:NSString.class]) [ok addObject:m];
+  }
+  return ok;
+}
+
+void SaveMachines(NSArray<NSDictionary*>* list) { [NSUserDefaults.standardUserDefaults setObject:list forKey:kMachinesKey]; }
+
+// After a connection worked: to the top of the list, added if new.
+void RememberMachine(NSString* target, NSString* user, NSString* name) {
+  NSMutableArray* list = [LoadMachines() mutableCopy];
+  NSIndexSet* same = [list indexesOfObjectsPassingTest:^BOOL(NSDictionary* m, NSUInteger, BOOL*) {
+    return [m[@"target"] caseInsensitiveCompare:target] == NSOrderedSame;
+  }];
+  [list removeObjectsAtIndexes:same];
+  [list insertObject:@{@"target" : target, @"user" : user ?: @"", @"name" : name.length ? name : target, @"last" : NSDate.date}
+             atIndex:0];
+  SaveMachines(list);
+}
+
+std::string MachineKey(NSString* target) {
+  std::string host;
+  uint16_t port = 0;
+  return ParseTarget(target, &host, &port) ? rdm::KnownHosts::Key(host, port) : std::string();
+}
+
+bool HasSavedLogin(NSString* target) {
+  std::string user, password;
+  const std::string key = MachineKey(target);
+  const bool has = !key.empty() && LoadLogin(key, &user, &password);
+  std::fill(password.begin(), password.end(), '\0');
+  return has;
+}
+
 // How the remote window was left (full screen, or its size), for the next
 // connection.
 NSString* const kRemoteFullScreenKey = @"remoteWindowFullScreen";
@@ -1190,10 +1240,17 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // ---------------------------------------------------------------------------
 // Connect window and application
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @end
 
 @implementation AppDelegate {
+  // The main window: the computers connected to before.
+  NSWindow* _machinesWindow;
+  NSTableView* _machinesTable;
+  NSButton* _machinesConnect;
+  NSProgressIndicator* _machinesSpinner;
+  NSArray<NSDictionary*>* _machines;
+  // The form for a new computer (or one whose password is not saved).
   NSWindow* _connectWindow;
   NSTextField* _host;
   NSTextField* _user;
@@ -1277,6 +1334,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [v addSubview:_connectButton];
 
   [_connectWindow center];
+  _connectWindow.delegate = self;  // closing the form goes back to the list
+  [self buildMachinesWindow];
   [NSApp activateIgnoringOtherApps:YES];
 
   // rdmachine-client HOST[:PORT] [--code=PAIRING_CODE]: the address filled
@@ -1308,18 +1367,250 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     }
   } else if (!(NSEvent.modifierFlags & NSEventModifierFlagOption)) {
     // Straight back to the last computer with its remembered login; hold
-    // Option while opening the app to get the connect window instead.
-    started = [self connectWithSavedLoginTo:[NSUserDefaults.standardUserDefaults stringForKey:@"lastHost"]
-                                     remote:nil];
+    // Option while opening the app to get the list instead.
+    NSArray* machines = LoadMachines();
+    if (machines.count > 0) started = [self connectWithSavedLoginTo:machines[0][@"target"] remote:nil];
   }
-  if (!started) [self showConnectWindow];
+  if (!started) [self showMachines];
 }
 
+// The list; the new-computer form when there is nothing in it yet.
+- (void)showMachines {
+  [self reloadMachines];
+  if (_machines.count == 0) {
+    [self showConnectWindow];
+    return;
+  }
+  [_connectWindow orderOut:nil];
+  [_machinesWindow makeKeyAndOrderFront:nil];
+  [_machinesWindow makeFirstResponder:_machinesTable];
+}
+
+// The form, for a new computer or one whose password is needed.
 - (void)showConnectWindow {
   [_connectWindow makeKeyAndOrderFront:nil];
   // Not the password field: macOS shows its Passwords AutoFill popup under a
   // focused password field, which flashed up with the window at every start.
   if (_connectWindow.firstResponder != _password) [_connectWindow makeFirstResponder:_host];
+}
+
+- (void)newConnection:(id)sender {
+  _host.stringValue = @"";
+  _user.stringValue = NSUserName();
+  _password.stringValue = @"";
+  _usePairing.state = NSControlStateValueOff;
+  [self pairingToggled:nil];
+  [self showConnectWindow];
+  [_connectWindow makeFirstResponder:_host];
+}
+
+- (void)windowWillClose:(NSNotification*)note {
+  // The form closed without connecting: back to the list.
+  if (note.object == _connectWindow && !_remote && LoadMachines().count > 0) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self showMachines];
+    });
+  }
+}
+
+- (void)buildMachinesWindow {
+  _machinesWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 460, 340)
+                                                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                                          NSWindowStyleMaskResizable
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+  _machinesWindow.title = @"rdmachine";
+  _machinesWindow.releasedWhenClosed = NO;
+  _machinesWindow.animationBehavior = NSWindowAnimationBehaviorNone;
+  _machinesWindow.contentMinSize = NSMakeSize(360, 220);
+  NSView* v = _machinesWindow.contentView;
+
+  NSScrollView* scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 56, 460, 284)];
+  scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  scroll.hasVerticalScroller = YES;
+  scroll.borderType = NSNoBorder;
+  _machinesTable = [[NSTableView alloc] initWithFrame:scroll.bounds];
+  NSTableColumn* col = [[NSTableColumn alloc] initWithIdentifier:@"machine"];
+  col.resizingMask = NSTableColumnAutoresizingMask;
+  [_machinesTable addTableColumn:col];
+  _machinesTable.headerView = nil;
+  _machinesTable.rowHeight = 46;
+  _machinesTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+  if (@available(macOS 11.0, *)) _machinesTable.style = NSTableViewStyleInset;
+  _machinesTable.dataSource = self;
+  _machinesTable.delegate = self;
+  _machinesTable.target = self;
+  _machinesTable.doubleAction = @selector(connectSelected:);
+  NSMenu* menu = [[NSMenu alloc] init];
+  [menu addItemWithTitle:@"Connect" action:@selector(connectSelected:) keyEquivalent:@""].target = self;
+  [menu addItemWithTitle:@"Edit…" action:@selector(editMachine:) keyEquivalent:@""].target = self;
+  [menu addItemWithTitle:@"Forget Password" action:@selector(forgetMachinePassword:) keyEquivalent:@""].target = self;
+  [menu addItem:NSMenuItem.separatorItem];
+  [menu addItemWithTitle:@"Remove from List" action:@selector(removeMachine:) keyEquivalent:@""].target = self;
+  _machinesTable.menu = menu;
+  scroll.documentView = _machinesTable;
+  [v addSubview:scroll];
+
+  NSButton* add = [NSButton buttonWithTitle:@"New Connection…" target:self action:@selector(newConnection:)];
+  add.frame = NSMakeRect(14, 12, 150, 32);
+  add.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+  [v addSubview:add];
+  _machinesSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(310, 18, 20, 20)];
+  _machinesSpinner.style = NSProgressIndicatorStyleSpinning;
+  _machinesSpinner.displayedWhenStopped = NO;
+  _machinesSpinner.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+  [v addSubview:_machinesSpinner];
+  _machinesConnect = [NSButton buttonWithTitle:@"Connect" target:self action:@selector(connectSelected:)];
+  _machinesConnect.frame = NSMakeRect(340, 12, 106, 32);
+  _machinesConnect.keyEquivalent = @"\r";
+  _machinesConnect.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
+  [v addSubview:_machinesConnect];
+  [_machinesWindow center];
+}
+
+- (void)reloadMachines {
+  _machines = LoadMachines();
+  [_machinesTable reloadData];
+  if (_machines.count > 0 && _machinesTable.selectedRow < 0) {
+    [_machinesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+  }
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView*)tableView {
+  return static_cast<NSInteger>(_machines.count);
+}
+
+- (NSView*)tableView:(NSTableView*)tableView viewForTableColumn:(NSTableColumn*)column row:(NSInteger)row {
+  NSTableCellView* cell = [tableView makeViewWithIdentifier:@"machineCell" owner:self];
+  NSTextField *name, *detail, *status;
+  if (!cell) {
+    cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, column.width, 46)];
+    cell.identifier = @"machineCell";
+    name = [NSTextField labelWithString:@""];
+    name.font = [NSFont boldSystemFontOfSize:13];
+    name.frame = NSMakeRect(6, 23, column.width - 130, 18);
+    name.autoresizingMask = NSViewWidthSizable;
+    name.lineBreakMode = NSLineBreakByTruncatingTail;
+    name.tag = 1;
+    detail = [NSTextField labelWithString:@""];
+    detail.font = [NSFont systemFontOfSize:11];
+    detail.textColor = NSColor.secondaryLabelColor;
+    detail.frame = NSMakeRect(6, 5, column.width - 12, 16);
+    detail.autoresizingMask = NSViewWidthSizable;
+    detail.lineBreakMode = NSLineBreakByTruncatingTail;
+    detail.tag = 2;
+    status = [NSTextField labelWithString:@""];
+    status.font = [NSFont systemFontOfSize:11];
+    status.alignment = NSTextAlignmentRight;
+    status.frame = NSMakeRect(column.width - 124, 24, 118, 16);
+    status.autoresizingMask = NSViewMinXMargin;
+    status.tag = 3;
+    [cell addSubview:name];
+    [cell addSubview:detail];
+    [cell addSubview:status];
+  } else {
+    name = [cell viewWithTag:1];
+    detail = [cell viewWithTag:2];
+    status = [cell viewWithTag:3];
+  }
+  NSDictionary* m = _machines[static_cast<NSUInteger>(row)];
+  name.stringValue = m[@"name"] ?: m[@"target"];
+  NSString* when = @"";
+  if ([m[@"last"] isKindOfClass:NSDate.class]) {
+    NSRelativeDateTimeFormatter* f = [[NSRelativeDateTimeFormatter alloc] init];
+    when = [f localizedStringForDate:m[@"last"] relativeToDate:NSDate.date];
+  }
+  NSString* user = [m[@"user"] length] ? m[@"user"] : @"pairing code";
+  detail.stringValue = [NSString stringWithFormat:@"%@ · %@%@%@", m[@"target"], user, when.length ? @" · " : @"", when];
+  const bool saved = HasSavedLogin(m[@"target"]);
+  status.stringValue = saved ? @"● Password saved" : @"○ Needs password";
+  status.textColor = saved ? NSColor.systemGreenColor : NSColor.secondaryLabelColor;
+  return cell;
+}
+
+// The row a context-menu item or button acts on.
+- (NSDictionary*)chosenMachine {
+  NSInteger row = _machinesTable.clickedRow >= 0 ? _machinesTable.clickedRow : _machinesTable.selectedRow;
+  if (row < 0 || static_cast<NSUInteger>(row) >= _machines.count) return nil;
+  return _machines[static_cast<NSUInteger>(row)];
+}
+
+- (void)connectSelected:(id)sender {
+  NSDictionary* m = [self chosenMachine];
+  if (!m || _remote) return;
+  if ([self connectWithSavedLoginTo:m[@"target"] remote:nil]) return;
+  // No saved password: the form, filled in, asking only for the password.
+  _host.stringValue = m[@"target"];
+  _user.stringValue = [m[@"user"] length] ? m[@"user"] : NSUserName();
+  _password.stringValue = @"";
+  _usePairing.state = NSControlStateValueOff;
+  [self pairingToggled:nil];
+  [self showConnectWindow];
+  [_connectWindow makeFirstResponder:_password];
+}
+
+- (void)forgetMachinePassword:(id)sender {
+  NSDictionary* m = [self chosenMachine];
+  if (!m) return;
+  ForgetLogin(MachineKey(m[@"target"]));
+  [_machinesTable reloadData];
+}
+
+- (void)removeMachine:(id)sender {
+  NSDictionary* m = [self chosenMachine];
+  if (!m) return;
+  // Its password and its remembered fingerprint go too: next time it is a
+  // new computer.
+  const std::string key = MachineKey(m[@"target"]);
+  ForgetLogin(key);
+  std::string error;
+  if (!key.empty()) _knownHosts->Forget(key, &error);
+  NSMutableArray* list = [LoadMachines() mutableCopy];
+  [list removeObject:m];
+  SaveMachines(list);
+  [self reloadMachines];
+  if (_machines.count == 0) [self showMachines];  // the form
+}
+
+- (void)editMachine:(id)sender {
+  NSDictionary* m = [self chosenMachine];
+  if (!m) return;
+  NSAlert* a = [[NSAlert alloc] init];
+  a.messageText = [NSString stringWithFormat:@"Edit %@", m[@"name"] ?: m[@"target"]];
+  [a addButtonWithTitle:@"Save"];
+  [a addButtonWithTitle:@"Cancel"];
+  NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 60)];
+  NSTextField* target = [NSTextField textFieldWithString:m[@"target"]];
+  target.frame = NSMakeRect(80, 34, 220, 24);
+  NSTextField* user = [NSTextField textFieldWithString:m[@"user"] ?: @""];
+  user.frame = NSMakeRect(80, 2, 220, 24);
+  [box addSubview:Label(@"Server:", NSMakeRect(0, 36, 74, 20))];
+  [box addSubview:target];
+  [box addSubview:Label(@"Account:", NSMakeRect(0, 4, 74, 20))];
+  [box addSubview:user];
+  a.accessoryView = box;
+  a.window.initialFirstResponder = target;
+  if ([a runModal] != NSAlertFirstButtonReturn) return;
+  NSString* newTarget = [target.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+  NSString* newUser = [user.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+  if (MachineKey(newTarget).empty()) return;
+  // The saved password follows the computer to its new address or account.
+  std::string old_user, password;
+  const std::string old_key = MachineKey(m[@"target"]);
+  if (LoadLogin(old_key, &old_user, &password)) {
+    ForgetLogin(old_key);
+    if ([newUser isEqualToString:NS(old_user)]) SaveLogin(MachineKey(newTarget), old_user, password);
+    std::fill(password.begin(), password.end(), '\0');
+  }
+  NSMutableArray* list = [LoadMachines() mutableCopy];
+  const NSUInteger i = [list indexOfObject:m];
+  if (i == NSNotFound) return;
+  NSMutableDictionary* edited = [m mutableCopy];
+  edited[@"target"] = newTarget;
+  edited[@"user"] = newUser;
+  list[i] = edited;
+  SaveMachines(list);
+  [self reloadMachines];
 }
 
 // Connects to `target` with the login remembered for it, into `remote` (a
@@ -1355,11 +1646,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (void)connectToAnother:(id)sender {
-  if (_remote) [_remote.window close];  // brings back the connect window
-  _usePairing.state = NSControlStateValueOff;
-  [self pairingToggled:nil];
-  [self showConnectWindow];
-  [_connectWindow makeFirstResponder:_host];
+  if (_remote) [_remote.window close];  // brings back the list
+  else [self showMachines];
 }
 
 - (void)forgetSavedPassword:(id)sender {
@@ -1368,6 +1656,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSString* target = _currentTarget ?: [NSUserDefaults.standardUserDefaults stringForKey:@"lastHost"];
   if (!target || !ParseTarget(target, &host, &port)) return;
   ForgetLogin(rdm::KnownHosts::Key(host, port));
+  [_machinesTable reloadData];
   NSAlert* a = [[NSAlert alloc] init];
   a.messageText = [NSString stringWithFormat:@"Forgot the saved password for %@", target];
   a.informativeText = @"The next connection asks for it again.";
@@ -1524,15 +1813,24 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 - (void)setBusy:(BOOL)busy {
   _connectButton.enabled = !busy;
   _host.enabled = !busy;
-  if (busy) [_spinner startAnimation:nil];
-  else [_spinner stopAnimation:nil];
+  _machinesConnect.enabled = !busy;
+  if (busy) {
+    [_spinner startAnimation:nil];
+    [_machinesSpinner startAnimation:nil];
+  } else {
+    [_spinner stopAnimation:nil];
+    [_machinesSpinner stopAnimation:nil];
+  }
 }
 
 - (void)alert:(NSString*)title text:(NSString*)text {
   NSAlert* a = [[NSAlert alloc] init];
   a.messageText = title;
   a.informativeText = text;
-  [a beginSheetModalForWindow:_connectWindow completionHandler:nil];
+  NSWindow* w = _connectWindow.visible ? _connectWindow : _machinesWindow;
+  if (!w.visible) [self showMachines];
+  w = _connectWindow.visible ? _connectWindow : _machinesWindow;
+  [a beginSheetModalForWindow:w completionHandler:nil];
 }
 
 // Background thread: asks on the main thread whether to trust a first-time
@@ -1701,15 +1999,18 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       return;
     }
     _remote = nil;
-    [self showConnectWindow];
     if (automatic && result.error == "bad_credentials") {
       // The password changed on that Mac: ask for the new one once.
       ForgetLogin(_pendingKey);
+      _host.stringValue = _pendingTarget ?: @"";
+      _user.stringValue = NS(_pendingUser);
+      [self showConnectWindow];
       [_connectWindow makeFirstResponder:_password];
       [self alert:@"The saved password no longer works"
              text:@"It was probably changed on that Mac. Enter the new one; it is remembered again."];
       return;
     }
+    if (!_connectWindow.visible) [self showMachines];
     if (changed) {
       [self alert:@"The server's identity has changed"
              text:[NSString stringWithFormat:@"The fingerprint is not the one remembered for this server, so "
@@ -1728,6 +2029,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _currentKey = _pendingKey;
   _currentTarget = _pendingTarget;
   _currentServerName = NS(result.server.server_name);
+  RememberMachine(_currentTarget, NS(_pendingUser), _currentServerName);
   [remote attachSession:std::move(session)];
   remote.window.title = [NSString stringWithFormat:@"%@ (%@)", _currentServerName, _currentTarget];
   if (!reused && [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey] &&
@@ -1742,13 +2044,14 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       AppDelegate* me = weakSelf;
       if (!me) return;
       me->_remote = nil;
-      [me->_connectWindow makeKeyAndOrderFront:nil];
+      [me showMachines];  // closed: back to the list
     });
   };
   // The password field must not stay the hidden window's first responder:
   // it is what turns secure input on.
   [_connectWindow makeFirstResponder:nil];
   [_connectWindow orderOut:nil];
+  [_machinesWindow orderOut:nil];
   ReleaseSecureInput();
 }
 
