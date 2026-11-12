@@ -445,8 +445,14 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 - (void)sessionMoved:(const rdm::SessionReady&)ready;
 // A message over the picture (interrupted, switching, reconnecting) with a
 // Disconnect button; hidden again when the picture is back.
-- (void)showStatus:(NSString*)text;
+- (void)showStatus:(NSString*)title
+            detail:(NSString*)detail
+            symbol:(NSString*)symbol
+             until:(NSDate*)deadline
+          canRetry:(BOOL)canRetry;
 - (void)hideStatus;
+// "立即重试" on the status card (a reconnect waiting for its next try).
+@property(nonatomic, copy) void (^onRetry)(void);
 - (void)endSession;
 - (void)send:(const rda_input_event&)ev;
 - (BOOL)streamPoint:(NSPoint)p x:(int32_t*)x y:(int32_t*)y;
@@ -593,8 +599,16 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   std::vector<rda_rect> _owed[2];
   int _front;
   std::atomic<bool> _presentPending;
-  NSVisualEffectView* _statusView;
-  NSTextField* _statusLabel;
+  NSView* _statusDim;               // darkens the frozen picture behind the card
+  NSVisualEffectView* _statusView;  // the card
+  NSImageView* _statusIcon;
+  NSTextField* _statusTitle;
+  NSTextField* _statusDetail;
+  NSTextField* _statusCountdown;
+  NSProgressIndicator* _statusSpinner;
+  NSButton* _statusRetry;
+  NSDate* _statusDeadline;
+  NSTimer* _statusTimer;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -678,32 +692,100 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   return [parts componentsJoinedByString:@" · "];
 }
 
-- (void)showStatus:(NSString*)text {
+// A card over the picture while it is not live: what happened, what it is
+// doing about it (and until when), and the way out.
+- (void)showStatus:(NSString*)title
+            detail:(NSString*)detail
+            symbol:(NSString*)symbol
+             until:(NSDate*)deadline
+          canRetry:(BOOL)canRetry {
   if (!_statusView) {
-    _statusView = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, 380, 96)];
+    _statusDim = [[NSView alloc] initWithFrame:_view.bounds];
+    _statusDim.wantsLayer = YES;
+    _statusDim.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.45].CGColor;
+    _statusDim.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    _statusView = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, 420, 148)];
     _statusView.material = NSVisualEffectMaterialHUDWindow;
     _statusView.blendingMode = NSVisualEffectBlendingModeWithinWindow;
     _statusView.state = NSVisualEffectStateActive;
+    _statusView.appearance = [NSAppearance appearanceNamed:NSAppearanceNameVibrantDark];
     _statusView.wantsLayer = YES;
-    _statusView.layer.cornerRadius = 10;
+    _statusView.layer.cornerRadius = 14;
+    _statusView.layer.borderWidth = 0.5;
+    _statusView.layer.borderColor = [NSColor colorWithWhite:1 alpha:0.12].CGColor;
     _statusView.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin;
-    _statusLabel = [NSTextField wrappingLabelWithString:@""];
-    _statusLabel.frame = NSMakeRect(16, 44, 348, 40);
-    _statusLabel.alignment = NSTextAlignmentCenter;
-    _statusLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-    [_statusView addSubview:_statusLabel];
+
+    _statusIcon = [[NSImageView alloc] initWithFrame:NSMakeRect(22, 86, 36, 36)];
+    _statusIcon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:26 weight:NSFontWeightMedium];
+    _statusIcon.contentTintColor = NSColor.systemOrangeColor;
+    [_statusView addSubview:_statusIcon];
+    _statusTitle = [NSTextField labelWithString:@""];
+    _statusTitle.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
+    _statusTitle.textColor = NSColor.labelColor;
+    _statusTitle.frame = NSMakeRect(72, 102, 330, 20);
+    _statusTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_statusView addSubview:_statusTitle];
+    _statusDetail = [NSTextField wrappingLabelWithString:@""];
+    _statusDetail.font = [NSFont systemFontOfSize:12];
+    _statusDetail.textColor = NSColor.secondaryLabelColor;
+    _statusDetail.frame = NSMakeRect(72, 64, 330, 34);
+    [_statusView addSubview:_statusDetail];
+
+    _statusSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(22, 20, 16, 16)];
+    _statusSpinner.style = NSProgressIndicatorStyleSpinning;
+    _statusSpinner.controlSize = NSControlSizeSmall;
+    _statusSpinner.displayedWhenStopped = NO;
+    [_statusView addSubview:_statusSpinner];
+    _statusCountdown = [NSTextField labelWithString:@""];
+    _statusCountdown.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _statusCountdown.textColor = NSColor.tertiaryLabelColor;
+    _statusCountdown.frame = NSMakeRect(44, 20, 160, 16);
+    [_statusView addSubview:_statusCountdown];
+
     NSButton* stop = [NSButton buttonWithTitle:@"断开" target:_window action:@selector(performClose:)];
-    stop.frame = NSMakeRect(140, 10, 100, 28);
+    stop.frame = NSMakeRect(318, 12, 88, 30);
     [_statusView addSubview:stop];
+    _statusRetry = [NSButton buttonWithTitle:@"立即重试" target:self action:@selector(retryNow:)];
+    _statusRetry.frame = NSMakeRect(222, 12, 92, 30);
+    [_statusView addSubview:_statusRetry];
   }
-  _statusLabel.stringValue = text;
+  _statusIcon.image = [NSImage imageWithSystemSymbolName:symbol ?: @"wifi.exclamationmark" accessibilityDescription:nil];
+  _statusTitle.stringValue = title ?: @"";
+  _statusDetail.stringValue = detail ?: @"";
+  _statusDeadline = deadline;
+  _statusRetry.hidden = !canRetry;
+  [_statusSpinner startAnimation:nil];
+  [self updateStatusCountdown];
+  [_statusTimer invalidate];
+  _statusTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(updateStatusCountdown)
+                                                userInfo:nil repeats:YES];
   const NSSize b = _view.bounds.size;
-  [_statusView setFrameOrigin:NSMakePoint(std::round((b.width - 380) / 2), std::round((b.height - 96) / 2))];
+  _statusDim.frame = _view.bounds;
+  [_statusView setFrameOrigin:NSMakePoint(std::round((b.width - 420) / 2), std::round((b.height - 148) / 2))];
+  if (!_statusDim.superview) [_view addSubview:_statusDim];
   if (!_statusView.superview) [_view addSubview:_statusView];
 }
 
+- (void)updateStatusCountdown {
+  if (!_statusDeadline) {
+    _statusCountdown.stringValue = @"等待中…";
+    return;
+  }
+  const long left = std::lround(std::max(0.0, _statusDeadline.timeIntervalSinceNow));
+  _statusCountdown.stringValue = left > 0 ? [NSString stringWithFormat:@"最多再等 %ld 秒", left] : @"马上放弃…";
+}
+
+- (void)retryNow:(id)sender {
+  if (self.onRetry) self.onRetry();
+}
+
 - (void)hideStatus {
+  [_statusTimer invalidate];
+  _statusTimer = nil;
+  [_statusSpinner stopAnimation:nil];
   [_statusView removeFromSuperview];
+  [_statusDim removeFromSuperview];
 }
 
 - (void)saveWindowMode {
@@ -1456,6 +1538,15 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSProgressIndicator* _machinesSpinner;
   NSArray<NSDictionary*>* _machines;
   NSTextField* _machinesSummary;
+  NSScrollView* _machinesScroll;
+  // A bar at the top of the list after a connection ended or failed (instead
+  // of a dialog): what happened, reconnect, dismiss.
+  NSView* _notice;
+  NSImageView* _noticeIcon;
+  NSTextField* _noticeTitle;
+  NSTextField* _noticeDetail;
+  NSButton* _noticeAction;
+  NSString* _noticeTarget;
   // Which listed computers answered on their control port lately (target ->
   // @YES/@NO); probed every 15 seconds while the app runs.
   NSMutableDictionary<NSString*, NSNumber*>* _online;
@@ -1524,6 +1615,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
   };
   write(_machinesWindow, [dir stringByAppendingPathComponent:@"list.png"]);
+  [self showNotice:@"与 lroel的Mac Mini 的连接已断开" detail:@"那台 Mac 的服务停止了。" target:@"10.0.0.3" warning:NO];
+  write(_machinesWindow, [dir stringByAppendingPathComponent:@"list-notice.png"]);
+  RemoteWindowController* demo = [[RemoteWindowController alloc] initWithTitle:@"lroel的Mac Mini（10.0.0.3）"];
+  [demo.window setContentSize:NSMakeSize(900, 560)];
+  [demo showStatus:@"正在重新连接"
+            detail:@"和那台 Mac 的连接断了，正在自动重新连接。"
+            symbol:@"arrow.clockwise"
+             until:[NSDate dateWithTimeIntervalSinceNow:52]
+          canRetry:YES];
+  write(demo.window, [dir stringByAppendingPathComponent:@"status.png"]);
+  [demo hideStatus];
   write(_connectWindow, [dir stringByAppendingPathComponent:@"form.png"]);
 }
 
@@ -1728,6 +1830,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [_machinesWindow addTitlebarAccessoryViewController:acc];
 
   NSScrollView* scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 32, 560, 388)];
+  _machinesScroll = scroll;
   scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   scroll.hasVerticalScroller = YES;
   scroll.borderType = NSNoBorder;
@@ -1775,6 +1878,41 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   tips.frame = NSMakeRect(270, 8, 274, 16);
   tips.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
   [v addSubview:tips];
+
+  // The notice bar (hidden until something happens).
+  _notice = [[NSView alloc] initWithFrame:NSMakeRect(12, 420 - 70, 536, 62)];
+  _notice.wantsLayer = YES;
+  _notice.layer.cornerRadius = 10;
+  _notice.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+  _notice.hidden = YES;
+  _noticeIcon = [[NSImageView alloc] initWithFrame:NSMakeRect(14, 17, 28, 28)];
+  _noticeIcon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:20 weight:NSFontWeightMedium];
+  [_notice addSubview:_noticeIcon];
+  _noticeTitle = [NSTextField labelWithString:@""];
+  _noticeTitle.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+  _noticeTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+  _noticeTitle.frame = NSMakeRect(52, 33, 330, 18);
+  _noticeTitle.autoresizingMask = NSViewWidthSizable;
+  [_notice addSubview:_noticeTitle];
+  _noticeDetail = [NSTextField labelWithString:@""];
+  _noticeDetail.font = [NSFont systemFontOfSize:12];
+  _noticeDetail.textColor = NSColor.secondaryLabelColor;
+  _noticeDetail.lineBreakMode = NSLineBreakByTruncatingTail;
+  _noticeDetail.frame = NSMakeRect(52, 13, 330, 16);
+  _noticeDetail.autoresizingMask = NSViewWidthSizable;
+  [_notice addSubview:_noticeDetail];
+  _noticeAction = [NSButton buttonWithTitle:@"重新连接" target:self action:@selector(noticeReconnect:)];
+  _noticeAction.frame = NSMakeRect(392, 15, 100, 30);
+  _noticeAction.autoresizingMask = NSViewMinXMargin;
+  [_notice addSubview:_noticeAction];
+  NSButton* close = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"关闭"]
+                                       target:self
+                                       action:@selector(hideNotice:)];
+  close.bordered = NO;
+  close.frame = NSMakeRect(500, 19, 24, 24);
+  close.autoresizingMask = NSViewMinXMargin;
+  [_notice addSubview:close];
+  [v addSubview:_notice];
 
   _machinesSpinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];  // kept for setBusy
   _machinesConnect = [NSButton buttonWithTitle:@"连接" target:self action:@selector(connectSelected:)];
@@ -1841,6 +1979,52 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   if (live) [parts addObject:[NSString stringWithFormat:@"已连接 %d 台", live]];
   if (retrying) [parts addObject:[NSString stringWithFormat:@"正在重连 %d 台", retrying]];
   _machinesSummary.stringValue = [parts componentsJoinedByString:@" · "];
+}
+
+// The notice bar: `target` (may be nil) is what "重新连接" connects to.
+- (void)showNotice:(NSString*)title detail:(NSString*)detail target:(NSString*)target warning:(BOOL)warning {
+  _noticeTarget = target;
+  _noticeTitle.stringValue = title ?: @"";
+  _noticeDetail.stringValue = detail ?: @"";
+  _noticeDetail.toolTip = detail;
+  _noticeAction.hidden = target.length == 0;
+  NSColor* tint = warning ? NSColor.systemOrangeColor : NSColor.systemRedColor;
+  _noticeIcon.image = [NSImage imageWithSystemSymbolName:warning ? @"exclamationmark.triangle.fill" : @"exclamationmark.circle.fill"
+                                accessibilityDescription:nil];
+  _noticeIcon.contentTintColor = tint;
+  [_notice.effectiveAppearance performAsCurrentDrawingAppearance:^{
+    self->_notice.layer.backgroundColor = [tint colorWithAlphaComponent:0.12].CGColor;
+    self->_notice.layer.borderColor = [tint colorWithAlphaComponent:0.35].CGColor;
+  }];
+  _notice.layer.borderWidth = 0.5;
+  const NSSize c = _machinesWindow.contentView.bounds.size;
+  _notice.frame = NSMakeRect(12, c.height - 70, c.width - 24, 62);
+  _notice.hidden = NO;
+  _machinesScroll.frame = NSMakeRect(0, 32, c.width, c.height - 32 - 76);
+  [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideNotice:) object:nil];
+  [self performSelector:@selector(hideNotice:) withObject:nil afterDelay:60];
+}
+
+- (void)hideNotice:(id)sender {
+  if (_notice.hidden) return;
+  _notice.hidden = YES;
+  const NSSize c = _machinesWindow.contentView.bounds.size;
+  _machinesScroll.frame = NSMakeRect(0, 32, c.width, c.height - 32);
+}
+
+- (void)noticeReconnect:(id)sender {
+  NSString* target = _noticeTarget;
+  [self hideNotice:nil];
+  if (target.length == 0 || _connecting) return;
+  if (RemoteWindowController* open = [self windowForTarget:target]) {
+    [open.window makeKeyAndOrderFront:nil];
+    return;
+  }
+  if (![self connectWithSavedLoginTo:target remote:nil]) {
+    _host.stringValue = target;
+    [self setUsingPairing:NO];
+    [self showConnectWindow];
+  }
 }
 
 // The row's button: the window of a connected computer, or connect.
@@ -2250,6 +2434,19 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 }
 
 - (void)alert:(NSString*)title text:(NSString*)text {
+  [self alert:title text:text target:nil];
+}
+
+- (void)alert:(NSString*)title text:(NSString*)text target:(NSString*)target {
+  if (!_connectWindow.visible) {
+    [self showMachines];
+    if (_machinesWindow.visible) {
+      [self showNotice:title detail:[text stringByReplacingOccurrencesOfString:@"\n\n" withString:@" "]
+                target:target
+               warning:NO];
+      return;
+    }
+  }
   NSAlert* a = [[NSAlert alloc] init];
   a.messageText = title;
   a.informativeText = text;
@@ -2367,20 +2564,34 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
   opts.on_moving = [weakRemote](const std::string& reason) {
-    NSString* text = reason == "user_logged_in"    ? @"那台 Mac 已登录，正在切换到桌面…"
-                     : reason == "user_logged_out" ? @"那台 Mac 已退出登录，正在切换到登录窗口…"
-                     : reason == "user_switched"   ? @"正在切换到新登录用户的桌面…"
-                     : reason == "agent_restarted" ? @"那台 Mac 的服务重启了，正在重新连接…"
-                     : reason == "server_stopping" ? @"那台 Mac 的服务停了，正在等它恢复…"
-                                                   : @"正在切换到那台 Mac 的新桌面…";
+    NSString* title = reason == "user_logged_in"    ? @"正在切换到桌面"
+                      : reason == "user_logged_out" ? @"正在切换到登录窗口"
+                      : reason == "user_switched"   ? @"正在切换用户"
+                      : reason == "agent_restarted" ? @"服务重启了"
+                      : reason == "server_stopping" ? @"那台 Mac 的服务停了"
+                                                    : @"正在切换桌面";
+    NSString* detail = reason == "user_logged_in"    ? @"那台 Mac 已经登录，画面马上换成登录后的桌面。"
+                       : reason == "user_logged_out" ? @"那台 Mac 退出了登录，画面马上换成登录窗口。"
+                       : reason == "user_switched"   ? @"那台 Mac 换成了另一个用户的桌面。"
+                       : reason == "agent_restarted" ? @"那台 Mac 上的服务重新启动了，正在接上。"
+                       : reason == "server_stopping" ? @"有人退出或重启了那台 Mac 上的服务，正在等它回来。"
+                                                     : @"那台 Mac 的桌面变了，正在接上。";
+    NSString* symbol = reason == "server_stopping" ? @"pause.circle" : @"arrow.triangle.2.circlepath";
     dispatch_async(dispatch_get_main_queue(), ^{
-      [weakRemote showStatus:text];
+      [weakRemote showStatus:title detail:detail symbol:symbol until:[NSDate dateWithTimeIntervalSinceNow:60] canRetry:NO];
     });
   };
   opts.on_stalled = [weakRemote](bool stalled) {
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (stalled) [weakRemote showStatus:@"连接中断，正在等待那台 Mac…"];
-      else [weakRemote hideStatus];
+      if (stalled) {
+        [weakRemote showStatus:@"连接中断"
+                        detail:@"几秒钟没收到那台 Mac 的消息：网络可能断了，或者那台 Mac 睡眠、关机了。"
+                        symbol:@"wifi.exclamationmark"
+                         until:[NSDate dateWithTimeIntervalSinceNow:8]
+                      canRetry:NO];
+      } else {
+        [weakRemote hideStatus];
+      }
     });
   };
   opts.on_moved = [weakRemote](const rdm::SessionReady& ready) {
@@ -2436,7 +2647,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
         return;
       }
       [remote.window close];  // brings back the connect window
-      [self alert:@"连接已断开" text:[@"没能重新连上。\n\n" stringByAppendingString:DescribeError(result)]];
+      [self alert:[NSString stringWithFormat:@"没能重新连上 %@", remote.serverName ?: remote.target]
+             text:DescribeError(result)
+           target:remote.target];
       return;
     }
     if (automatic && result.error == "bad_credentials") {
@@ -2511,14 +2724,29 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     [remote endSession];
     remote.reconnectingSince = NSDate.date;
     remote.window.title = [NSString stringWithFormat:@"%@（%@）— 正在重连…", remote.serverName, remote.target];
-    [remote showStatus:[reason isEqualToString:@"server_shutdown"]
-                           ? @"那台 Mac 的服务停了，恢复后会自动重新连接…"
-                           : @"连接断了，正在重新连接…"];
+    const BOOL stopped = [reason isEqualToString:@"server_shutdown"];
+    [remote showStatus:@"正在重新连接"
+                detail:stopped ? @"那台 Mac 的服务停了，它一回来就会自动连上。"
+                               : @"和那台 Mac 的连接断了，正在自动重新连接。"
+                symbol:stopped ? @"pause.circle" : @"arrow.clockwise"
+                 until:[NSDate dateWithTimeIntervalSinceNow:60]
+              canRetry:YES];
+    __weak AppDelegate* weakSelf = self;
+    __weak RemoteWindowController* weakRetry = remote;
+    remote.onRetry = ^{
+      AppDelegate* me = weakSelf;
+      RemoteWindowController* r = weakRetry;
+      if (!me || !r) return;
+      [NSObject cancelPreviousPerformRequestsWithTarget:me selector:@selector(reconnect:) object:r];
+      [me reconnect:r];
+    };
     _reconnectUntil = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     [self performSelector:@selector(reconnect:) withObject:remote afterDelay:1.0];
     return;
   }
-  [remote.window close];  // ends the session and brings back the connect window
+  NSString* who = remote.serverName ?: remote.target;
+  NSString* where = remote.target;
+  [remote.window close];  // ends the session and brings back the list
   NSString* text = [reason isEqualToString:@"server_disconnected"]
                        ? @"那台 Mac 上有人在菜单里点了“断开当前连接”。"
                    : [reason isEqualToString:@"session_replaced"]
@@ -2530,7 +2758,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
                    : [reason isEqualToString:@"connection_lost"]
                        ? @"和那台电脑的连接断了。"
                        : [NSString stringWithFormat:@"会话结束了（%@）。", reason];
-  [self alert:@"连接已断开" text:text];
+  // Someone took over or someone else logged in: reconnecting would undo
+  // that, so no button for it.
+  const BOOL offer = ![reason isEqualToString:@"session_replaced"] && ![reason isEqualToString:@"console_changed"];
+  [self alert:[NSString stringWithFormat:@"与 %@ 的连接已断开", who] text:text target:offer ? where : nil];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app {
