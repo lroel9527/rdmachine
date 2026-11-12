@@ -1592,8 +1592,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 // without showing a window, then quits. For checking the layout.
 - (void)writeSnapshotsTo:(NSString*)dir {
   _machines = @[
-    @{@"target" : @"10.0.0.3", @"user" : @"lroel", @"name" : @"lroel的Mac Mini", @"last" : NSDate.date},
-    @{@"target" : @"192.168.1.20", @"user" : @"lroel", @"name" : @"Office-iMac",
+    @{@"target" : @"10.0.0.3", @"user" : @"me", @"name" : @"Mac mini", @"last" : NSDate.date},
+    @{@"target" : @"192.168.1.20", @"user" : @"me", @"name" : @"Office-iMac",
       @"last" : [NSDate dateWithTimeIntervalSinceNow:-3 * 86400]},
     @{@"target" : @"home.example", @"user" : @"", @"name" : @"家里的 Mac",
       @"last" : [NSDate dateWithTimeIntervalSinceNow:-14 * 86400]},
@@ -1615,9 +1615,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
   };
   write(_machinesWindow, [dir stringByAppendingPathComponent:@"list.png"]);
-  [self showNotice:@"与 lroel的Mac Mini 的连接已断开" detail:@"那台 Mac 的服务停止了。" target:@"10.0.0.3" warning:NO];
+  [self showNotice:@"与 Mac mini 的连接已断开" detail:@"那台 Mac 的服务停止了。" target:@"10.0.0.3" warning:NO];
   write(_machinesWindow, [dir stringByAppendingPathComponent:@"list-notice.png"]);
-  RemoteWindowController* demo = [[RemoteWindowController alloc] initWithTitle:@"lroel的Mac Mini（10.0.0.3）"];
+  RemoteWindowController* demo = [[RemoteWindowController alloc] initWithTitle:@"Mac mini（10.0.0.3）"];
   [demo.window setContentSize:NSMakeSize(900, 560)];
   [demo showStatus:@"正在重新连接"
             detail:@"和那台 Mac 的连接断了，正在自动重新连接。"
