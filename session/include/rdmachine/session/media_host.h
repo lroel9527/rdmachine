@@ -124,6 +124,7 @@ class MediaHost : public ServerDelegate {
   // screen, once the viewer is connected (its own thread; see type_login).
   void TypeLogin(std::string username, std::string password, bool type_name, bool at_login_window);
   void StopTypeLogin();
+  void LogInput();  // the input summary line, if anything came since the last
   void Inject(const rda_input_event& ev);
   void Log(const std::string& line);
 
@@ -167,6 +168,12 @@ class MediaHost : public ServerDelegate {
   std::condition_variable type_cv_;
   bool type_stop_ = false;
   std::mutex inject_mu_;  // the client's input and TypeLogin take turns
+  // The client's input as it arrives (guarded by inject_mu_), logged every
+  // few seconds while it changes: whether it gets here, and whether
+  // injecting it works (the login window: docs/decisions.md).
+  uint64_t input_events_ = 0, input_failed_ = 0, input_logged_ = 0;
+  uint32_t input_kinds_ = 0;  // bit per rda_input_kind seen
+  std::string input_error_;
   std::thread stats_thread_;
   std::mutex stats_mu_;
   std::condition_variable stats_cv_;

@@ -158,9 +158,12 @@ void MediaHost::OnInput(void* user, const rda_input_event* ev) {
   // injector_ is set before the host exists and cleared after it is
   // destroyed (no callback runs after rda_host_destroy), so no lock here.
   auto* self = static_cast<MediaHost*>(user);
-  if (self->injector_) {
-    std::lock_guard lock(self->inject_mu_);
-    rda_injector_inject(self->injector_, ev);
+  std::lock_guard lock(self->inject_mu_);
+  ++self->input_events_;
+  if (ev && ev->kind < 32) self->input_kinds_ |= 1u << ev->kind;
+  if (self->injector_ && rda_injector_inject(self->injector_, ev) != RDA_OK) {
+    ++self->input_failed_;
+    self->input_error_ = rda_last_error();
   }
 }
 
@@ -473,6 +476,12 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     }
     desktop_thread_ = std::thread(&MediaHost::DesktopLoop, this);
   }
+  {
+    std::lock_guard in(inject_mu_);
+    input_events_ = input_failed_ = input_logged_ = 0;
+    input_kinds_ = 0;
+    input_error_.clear();
+  }
   media_connected_ = false;
   {
     std::lock_guard s(stats_mu_);
@@ -502,6 +511,24 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   return grant;
 }
 
+void MediaHost::LogInput() {
+  std::string line;
+  {
+    std::lock_guard in(inject_mu_);
+    if (input_events_ == input_logged_) return;
+    std::string kinds;
+    const char* names[] = {"", "move", "down", "up", "scroll", "key-down", "key-up", "text"};
+    for (int k = 1; k < 8; ++k) {
+      if (input_kinds_ & (1u << k)) kinds += std::string(kinds.empty() ? "" : ",") + names[k];
+    }
+    line = "input from the client: " + std::to_string(input_events_) + " events (" + kinds + "), " +
+           std::to_string(input_failed_) + " not injected" +
+           (input_error_.empty() ? std::string() : ": " + input_error_) + (injector_ ? "" : ", no injector");
+    input_logged_ = input_events_;
+  }
+  Log(line);
+}
+
 void MediaHost::StopStats() {
   {
     std::lock_guard s(stats_mu_);
@@ -516,6 +543,11 @@ void MediaHost::StatsLoop() {
   std::unique_lock s(stats_mu_);
   while (!stats_cv_.wait_for(s, std::chrono::seconds(1), [this] { return stats_stop_; })) {
     s.unlock();
+    {
+      // The client's input since the last line, every 5 seconds while some came.
+      static thread_local int tick = 0;
+      if (++tick % 5 == 0) LogInput();
+    }
     {
       std::lock_guard lock(mu_);  // host_ stays alive while it is held
       if (!host_) break;
@@ -680,6 +712,7 @@ void MediaHost::TypeLogin(std::string username, std::string password, bool type_
 void MediaHost::EndSession() {
   // Not under mu_: the stats and desktop threads take mu_ for their work.
   StopTypeLogin();  // it injects through injector_, destroyed below
+  LogInput();
   StopStats();
   StopDesktopLoop();
   rda_host* host;
