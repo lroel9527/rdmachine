@@ -191,6 +191,12 @@ ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
   last_request_ = m;
   std::string error;
   std::optional<SessionReady> ready = TryStart(m, &error);
+  if (!ready && error == "busy" && guards_.take_over && guards_.take_over()) {
+    // The newer connection wins (docs/protocol.md, "接管"): the other one
+    // was told and has let go.
+    error.clear();
+    ready = TryStart(m, &error);
+  }
   if (!ready) return Fail(error.c_str(), "could not start the session");
   state_ = State::kInSession;
   started_ = true;

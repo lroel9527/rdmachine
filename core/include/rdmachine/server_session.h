@@ -77,6 +77,10 @@ class ServerDelegate {
 struct ServerGuards {
   FailureLimiter* limiter = nullptr;      // required
   PairingCodes* pairing = nullptr;        // null: pairing codes not offered
+  // A logged-in client asks for a session while another connection holds
+  // one: end that one (it hears bye "session_replaced") and wait until it
+  // has; false if it did not go. Empty: the newcomer gets "busy".
+  std::function<bool()> take_over;
 };
 
 class ServerSession {

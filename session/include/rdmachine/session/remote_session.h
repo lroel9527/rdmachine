@@ -18,11 +18,14 @@
 namespace rdm {
 
 // A trust_server callback backed by known_hosts: a pinned fingerprint must
-// match (a changed one is refused and reported through *changed); an unknown
-// one is passed to `ask_first_time`, and remembered if it returns true.
+// match; an unknown one is passed to `ask_first_time`, and remembered if it
+// returns true. A changed one is reported through *changed and refused,
+// unless `ask_changed` (old, new) accepts it: then the new one replaces the
+// old (the user trusts the server's new identity, e.g. after a reinstall).
 std::function<bool(const std::string&)> TrustWithKnownHosts(
     KnownHosts* known_hosts, std::string key, std::function<bool(const std::string& fingerprint)> ask_first_time,
-    std::shared_ptr<bool> changed);
+    std::shared_ptr<bool> changed,
+    std::function<bool(const std::string& old_fingerprint, const std::string& new_fingerprint)> ask_changed = {});
 
 class RemoteSession {
  public:

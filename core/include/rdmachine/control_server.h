@@ -3,6 +3,7 @@
 // its own thread. M0 serves one session at a time (the delegate answers
 // `busy` to the rest).
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -68,8 +69,18 @@ class ControlServer {
 
   std::mutex threads_mu_;
   std::list<Worker> threads_;
+  // Open connections, closed by Stop(); `replaced` tells a connection's loop
+  // that a newer one takes over its session.
+  struct Open {
+    TlsConnection* conn;
+    std::shared_ptr<std::atomic<bool>> replaced;
+  };
+  // Asks every other open connection to give up its session and waits
+  // (up to 5 seconds) until they have closed.
+  bool TakeOver(TlsConnection* self);
   std::mutex conns_mu_;
-  std::list<TlsConnection*> conns_;  // open connections, closed by Stop()
+  std::condition_variable conns_cv_;
+  std::list<Open> conns_;
 };
 
 }  // namespace rdm

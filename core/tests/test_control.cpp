@@ -144,11 +144,21 @@ TEST_F(ControlTest, PairingCode) {
   EXPECT_EQ(ConnectAndStartSession(o).error, "code_expired");
 }
 
-TEST_F(ControlTest, SecondClientIsBusy) {
+TEST_F(ControlTest, ASecondClientTakesTheSessionOver) {
   auto first = ConnectAndStartSession(Options());
   ASSERT_EQ(first.error, "") << first.detail;
   auto second = ConnectAndStartSession(Options());
-  EXPECT_EQ(second.error, "busy");
+  EXPECT_EQ(second.error, "") << second.detail;
+  // The first one was told why before its connection closed.
+  std::string reason;
+  for (int i = 0; i < 20 && reason.empty(); ++i) {
+    auto r = first.connection->channel().Receive(250);
+    if (r.status == MessageChannel::Received::kClosed) break;
+    if (r.status == MessageChannel::Received::kMessage) {
+      if (auto* bye = std::get_if<Bye>(&*r.message)) reason = bye->reason;
+    }
+  }
+  EXPECT_EQ(reason, "session_replaced");
 }
 
 TEST_F(ControlTest, GarbageFrameGetsBadMessage) {

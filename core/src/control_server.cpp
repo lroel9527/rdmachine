@@ -1,5 +1,8 @@
 #include "rdmachine/control_server.h"
 
+#include <algorithm>
+#include <vector>
+
 #include <chrono>
 #include <cstdio>
 
@@ -32,7 +35,7 @@ void ControlServer::Stop() {
   listener_->Close();
   {
     std::lock_guard lock(conns_mu_);
-    for (TlsConnection* c : conns_) c->Shutdown();
+    for (const Open& o : conns_) o.conn->Shutdown();
   }
   ReapWorkers(true);
   listener_.reset();
@@ -44,7 +47,7 @@ Clock::duration ControlServer::PairingCodeRemaining() {
 
 void ControlServer::CloseConnections() {
   std::lock_guard lock(conns_mu_);
-  for (TlsConnection* c : conns_) c->Shutdown();
+  for (const Open& o : conns_) o.conn->Shutdown();
 }
 
 uint16_t ControlServer::port() const { return listener_ ? listener_->port() : 0; }
@@ -88,11 +91,29 @@ void ControlServer::AcceptLoop() {
   }
 }
 
+bool ControlServer::TakeOver(TlsConnection* self) {
+  std::unique_lock lock(conns_mu_);
+  std::vector<TlsConnection*> others;
+  for (const Open& o : conns_) {
+    if (o.conn == self) continue;
+    o.replaced->store(true);
+    others.push_back(o.conn);
+  }
+  if (others.empty()) return false;
+  return conns_cv_.wait_for(lock, std::chrono::seconds(5), [&] {
+    for (const Open& o : conns_) {
+      if (std::find(others.begin(), others.end(), o.conn) != others.end()) return false;
+    }
+    return true;
+  });
+}
+
 void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
   ++active_;
+  auto replaced = std::make_shared<std::atomic<bool>>(false);
   {
     std::lock_guard lock(conns_mu_);
-    conns_.push_back(conn.get());
+    conns_.push_back(Open{conn.get(), replaced});
   }
   // Stop() may have shut everything down just before this connection was
   // registered; check again so it does not linger.
@@ -105,6 +126,8 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
       ServerGuards guards;
       guards.limiter = &limiter_;
       guards.pairing = options_.offer_pairing_codes ? &pairing_ : nullptr;
+      TlsConnection* self = conn.get();
+      guards.take_over = [this, self] { return TakeOver(self); };
       ServerSession session(delegate_, guards, conn->peer_ip());
       auto last_heard = Clock::now(), last_ping = Clock::now();
       int64_t next_ping = 1;
@@ -138,6 +161,11 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
             }
             break;
         }
+        if (!out.close && replaced->load()) {
+          // A newer connection takes over (TakeOver waits for this close).
+          out.send.push_back(Bye{"session_replaced"});
+          out.close = true;
+        }
         if (!out.close) {
           ServerSession::Output tick = session.Tick();
           for (Message& m : tick.send) out.send.push_back(std::move(m));
@@ -156,8 +184,9 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
   }
   {
     std::lock_guard lock(conns_mu_);
-    conns_.remove(conn.get());
+    conns_.remove_if([&](const Open& o) { return o.conn == conn.get(); });
   }
+  conns_cv_.notify_all();
   conn->Close();
   --active_;
 }

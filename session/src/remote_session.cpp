@@ -8,14 +8,23 @@ namespace rdm {
 
 std::function<bool(const std::string&)> TrustWithKnownHosts(
     KnownHosts* known_hosts, std::string key, std::function<bool(const std::string& fingerprint)> ask_first_time,
-    std::shared_ptr<bool> changed) {
-  return [known_hosts, key = std::move(key), ask = std::move(ask_first_time), changed](const std::string& fp) {
+    std::shared_ptr<bool> changed,
+    std::function<bool(const std::string& old_fingerprint, const std::string& new_fingerprint)> ask_changed) {
+  return [known_hosts, key = std::move(key), ask = std::move(ask_first_time), changed,
+          ask_changed = std::move(ask_changed)](const std::string& fp) {
     switch (known_hosts->Check(key, fp)) {
       case KnownHosts::Verdict::kTrusted:
         return true;
-      case KnownHosts::Verdict::kChanged:
+      case KnownHosts::Verdict::kChanged: {
+        const std::string old = known_hosts->Lookup(key).value_or("");
+        if (ask_changed && ask_changed(old, fp)) {
+          std::string error;
+          known_hosts->Remember(key, fp, &error);
+          return true;
+        }
         if (changed) *changed = true;
         return false;
+      }
       case KnownHosts::Verdict::kUnknown:
         break;
     }

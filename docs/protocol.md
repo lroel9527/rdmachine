@@ -137,7 +137,11 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ### bye（双向）
 
-`{"type":"bye","reason":"<原因>"}`，发完关闭。原因：`user_closed`（用户主动断开）、`server_shutdown`、`session_replaced`（同一用户从别处连进来）、`idle_timeout`、`console_changed`（被控 Mac 上换了另一个人登录，见“会话迁移”）。
+`{"type":"bye","reason":"<原因>"}`，发完关闭。原因：`user_closed`（用户主动断开）、`server_shutdown`、`session_replaced`（另一个客户端登录后接管了会话，见下文“接管”）、`idle_timeout`、`console_changed`（被控 Mac 上换了另一个人登录，见“会话迁移”）。
+
+### 接管
+
+会话进行中又有一个客户端登录并发 `session_request`：服务端给旧连接发 `bye`（`session_replaced`）并关闭，等它的会话结束（最多 5 秒），再为新连接开始会话；新连接不会收到 `busy`。自用场景下，这多半是同一个人换了一台电脑连。
 
 ### session_moving（服务端 → 客户端）
 

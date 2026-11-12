@@ -393,13 +393,27 @@ TEST_F(MediaE2E, ViewerWithoutTheTokenIsRefused) {
   rda_viewer_destroy(v);
 }
 
-TEST_F(MediaE2E, SecondClientIsBusyWhileSessionRuns) {
+TEST_F(MediaE2E, ASecondClientTakesTheSessionOver) {
   Frames frames;
   ConnectResult r;
-  auto s = RemoteSession::Start(Options(&frames), &r);
+  auto o = Options(&frames);
+  std::mutex mu;
+  std::string ended;
+  o.on_ended = [&](const std::string& reason) {
+    std::lock_guard l(mu);
+    ended = reason;
+  };
+  auto s = RemoteSession::Start(std::move(o), &r);
   ASSERT_TRUE(s) << r.error;
-  ConnectResult second = ConnectAndStartSession(Options(nullptr).control);
-  EXPECT_EQ(second.error, "busy");
+  Frames frames2;
+  ConnectResult r2;
+  auto s2 = RemoteSession::Start(Options(&frames2), &r2);
+  ASSERT_TRUE(s2) << r2.error << ": " << r2.detail;
+  EXPECT_TRUE(WaitFor([&] { return frames2.count > 0; }));
+  EXPECT_TRUE(WaitFor([&] {
+    std::lock_guard l(mu);
+    return ended == "session_replaced";
+  }));
 }
 
 TEST_F(MediaE2E, ServerStopEndsClientSession) {
