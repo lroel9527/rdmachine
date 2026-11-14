@@ -340,16 +340,31 @@ std::optional<std::vector<std::string>> MacFileTarget::Publish(uint64_t announce
     std::vector<std::string> paths;
     const std::string root = Std(h.root.path);
     for (const auto& e : items) paths.push_back(root + "/" + copy_id + "/" + e.path);
-    // The copy's folder shows its items on disk only once it is listed
-    // (until then they wait for their parent): list it now, so they are
-    // there before anything pastes.
+    // The copy's folder shows its items on disk only once it is populated
+    // (until then they wait for their parent). Listing it does that from a
+    // Terminal, but not from the server running as a launchd agent: without
+    // Full Disk Access the system will not populate a folder in
+    // ~/Library/CloudStorage for it, and the paste then gets a file URL that
+    // does not exist (Finder pastes the names as a text clipping). Asking the
+    // File Provider to download the folder populates it whoever asks.
     NSString* folder = NS(root + "/" + copy_id);
+    NSString* folder_id = NS(copy_id);
+    NSFileProviderDomain* domain = h.domain;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      if (@available(macOS 13.0, *)) {
+        [[NSFileProviderManager managerForDomain:domain]
+            requestDownloadForItemWithIdentifier:folder_id
+                                  requestedRange:NSMakeRange(NSNotFound, 0)
+                               completionHandler:^(NSError* e) {
+                                 if (e) Log("populating the copy's folder: " + Std(e.localizedDescription));
+                               }];
+      }
       for (int i = 0; i < 50; ++i) {
         NSArray* names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:folder error:nil];
         if (names.count > 0) return;
         usleep(100000);
       }
+      Log("the copy's items did not appear on disk within 5 s");
     });
     return paths;
   }
