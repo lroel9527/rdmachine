@@ -104,6 +104,7 @@ class RemoteSession {
   mutable std::mutex mu_;  // guards viewer_ and session_ once the session runs
   SessionReady session_;
   rda_viewer* viewer_ = nullptr;
+  int udp_wait_ms_ = 0;  // options_.udp_wait_ms, longer on a far link (Start)
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};
   std::thread thread_;

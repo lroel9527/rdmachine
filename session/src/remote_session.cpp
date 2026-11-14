@@ -130,11 +130,23 @@ void RemoteSession::OnMessage(void* user, uint32_t type, const uint8_t* payload,
 }
 
 std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResult* result) {
+  const auto connect_start = std::chrono::steady_clock::now();
   *result = ConnectAndStartSession(options.control);
   if (!result->error.empty()) return nullptr;
+  const auto connect_took = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - connect_start)
+                                .count();
 
   std::unique_ptr<RemoteSession> s(new RemoteSession());
   s->options_ = std::move(options);
+  // How long UDP gets before the picture falls back to TCP: on a far link
+  // (a 500 ms round trip) its handshake alone takes about as long as the
+  // default, so it grows with what logging in took (a few round trips),
+  // up to 15 s.
+  if (s->options_.udp_wait_ms > 0) {
+    s->udp_wait_ms_ = static_cast<int>(
+        std::clamp<long long>(2 * connect_took, s->options_.udp_wait_ms, std::max(s->options_.udp_wait_ms, 15000)));
+  }
   s->control_ = std::move(result->connection);
   const int connect_ms = s->options_.control.timeout_ms;
   if (s->options_.clipboard && s->options_.clipboard_mode != ClipboardMode::kOff) {
@@ -161,9 +173,8 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
       result->detail = error;
       return nullptr;
     }
-    const bool can_fall_back =
-        attempt == 0 && s->session_.transport == MediaTransport::kUdp && s->options_.udp_wait_ms > 0;
-    const rda_state st = WaitConnected(s->viewer_, can_fall_back ? s->options_.udp_wait_ms : connect_ms);
+    const bool can_fall_back = attempt == 0 && s->session_.transport == MediaTransport::kUdp && s->udp_wait_ms_ > 0;
+    const rda_state st = WaitConnected(s->viewer_, can_fall_back ? s->udp_wait_ms_ : connect_ms);
     if (st == RDA_STATE_CONNECTED) break;
     rda_viewer_destroy(s->viewer_);
     s->viewer_ = nullptr;
@@ -215,8 +226,8 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
     if (options_.log) options_.log("moved session: " + error);
     return false;
   }
-  const int wait_ms = ready.transport == MediaTransport::kUdp && options_.udp_wait_ms > 0 ? options_.udp_wait_ms
-                                                                                         : options_.control.timeout_ms;
+  const int wait_ms = ready.transport == MediaTransport::kUdp && udp_wait_ms_ > 0 ? udp_wait_ms_
+                                                                                 : options_.control.timeout_ms;
   rda_state st = RDA_STATE_CONNECTING;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
   while (!stop_ && (st = rda_viewer_get_state(fresh)) == RDA_STATE_CONNECTING &&

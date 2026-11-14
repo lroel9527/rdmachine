@@ -382,6 +382,7 @@ struct FileTransfer::OutStream {
   TransferPacer pacer;
   uint64_t congestion_seen = 0;
   uint64_t congestion_checked_us = 0;
+  uint64_t reported_us = 0;
 
   explicit OutStream(const TransferPacer::Options& o) : pacer(o) {}
   ~OutStream() {
@@ -642,6 +643,17 @@ uint64_t FileTransfer::Pump(uint64_t now) {
     const uint64_t c = options_.congestion_events();
     if (o.congestion_seen != 0 && c > o.congestion_seen) o.pacer.OnCongestion(now);
     o.congestion_seen = std::max<uint64_t>(c, 1);
+  }
+  if (o.reported_us == 0) o.reported_us = now;
+  if (now - o.reported_us >= 5'000'000) {
+    // What holds a slow transfer back: the rate, the window or the path.
+    char line[160];
+    snprintf(line, sizeof line, "sending at %.1f Mbps, %llu KiB in flight (window %llu KiB), base delay %llu ms, %.1f MB sent",
+             o.pacer.rate_bps() / 1e6, static_cast<unsigned long long>((o.sent - o.acked) / 1024),
+             static_cast<unsigned long long>(o.pacer.Window() / 1024),
+             static_cast<unsigned long long>(o.pacer.base_delay_us() / 1000), o.sent / 1e6);
+    Log(line);
+    o.reported_us = now;
   }
   std::string chunk;
   while (!o.all_sent) {
