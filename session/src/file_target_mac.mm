@@ -75,6 +75,10 @@ struct Hub {
   std::set<std::string> requested;            // files the extension waits for
   std::map<std::string, std::string> ready;   // files that arrived first
   uint64_t counter = 0;
+  // After a failed connection (RDMachine turned off in System Settings), no
+  // new try for a while: each try may wait seconds on the clipboard's thread.
+  NSDate* retry_after = nil;
+  std::string last_error;
 };
 
 Hub& TheHub() {
@@ -113,8 +117,24 @@ bool Wait(void (^start)(dispatch_semaphore_t)) {
 }
 
 // Adds the domain and connects to the extension. With the lock held.
+bool ConnectOnce(Hub& h, std::string* error);
+
 bool Connect(Hub& h, std::string* error) {
   if (h.conn) return true;
+  if (h.retry_after && h.retry_after.timeIntervalSinceNow > 0) {
+    *error = h.last_error;
+    return false;
+  }
+  if (ConnectOnce(h, error)) {
+    h.retry_after = nil;
+    return true;
+  }
+  h.last_error = *error;
+  h.retry_after = [NSDate dateWithTimeIntervalSinceNow:30];
+  return false;
+}
+
+bool ConnectOnce(Hub& h, std::string* error) {
   if (!h.domain) {
     NSFileProviderDomain* d = [[NSFileProviderDomain alloc] initWithIdentifier:@"files" displayName:@"RDMachine"];
     __block NSError* err = nil;
