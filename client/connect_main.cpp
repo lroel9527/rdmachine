@@ -6,7 +6,7 @@
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
-//                     [--text-mode] [--set-text-mode=on|off]
+//                     [--text-mode] [--set-text-mode=on|off] [--copy-files=PATH[,PATH...]]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -15,6 +15,10 @@
 // On macOS the clipboard is shared while connected (--clipboard, default
 // both); other systems have no clipboard backend yet.
 //
+// --copy-files=PATH[,PATH...] "copies" these files and folders on the client
+// a second after connecting, on a clipboard of its own (not the system's):
+// for testing a server pasting them in Finder (docs/file-paste.md). Use
+// --seconds to stay connected while it does.
 // --click=X,Y moves the server's pointer to pixel (X, Y) of the shared
 // display and clicks the left button once the pictures arrived, then waits
 // two seconds: for checking input end to end without the window.
@@ -54,6 +58,37 @@
 #include "rdmachine/session/system_clipboard.h"
 
 namespace {
+
+// --copy-files: a clipboard of the tool's own on which files get "copied".
+class CopyingClipboard : public rdm::Clipboard {
+ public:
+  int64_t ChangeCount() override {
+    std::lock_guard lock(mu_);
+    return count_;
+  }
+  std::optional<rdm::ClipboardContent> Read() override {
+    std::lock_guard lock(mu_);
+    return content_;
+  }
+  std::optional<int64_t> Write(const rdm::ClipboardContent& c) override {
+    std::lock_guard lock(mu_);
+    content_ = c;
+    return ++count_;
+  }
+  void Copy(const std::vector<std::string>& files) {
+    std::lock_guard lock(mu_);
+    std::string names;
+    for (const auto& f : files) names += (names.empty() ? "" : "\n") + f.substr(f.rfind('/') + 1);
+    content_ = rdm::ClipboardContent::Text(names);
+    content_.files = files;
+    ++count_;
+  }
+
+ private:
+  std::mutex mu_;
+  int64_t count_ = 1;
+  rdm::ClipboardContent content_;
+};
 
 struct Stats {
   std::atomic<int> frames{0};
@@ -160,6 +195,7 @@ int main(int argc, char** argv) {
   std::string save_frame, input_source_json;
   std::optional<rdm::DesktopSpec> resize_desktop;
   std::optional<bool> set_text_mode;  // --set-text-mode: change it once frames arrive
+  std::vector<std::string> copy_files;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -194,7 +230,16 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--click", &v)) {
       if (std::sscanf(v.c_str(), "%d,%d", &click_x, &click_y) != 2 || click_x < 0 || click_y < 0) return Usage();
     }
-    else if (Flag(a, "--clipboard", &v)) {
+    else if (Flag(a, "--copy-files", &v)) {
+      size_t at = 0;
+      while (at <= v.size()) {
+        const size_t comma = v.find(',', at);
+        const std::string p = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        if (!p.empty()) copy_files.push_back(p);
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+      }
+    } else if (Flag(a, "--clipboard", &v)) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();
       opts.clipboard_mode = *m;
@@ -254,6 +299,11 @@ int main(int argc, char** argv) {
   opts.viewer.on_frame = &OnFrame;
   opts.clipboard = rdm::SystemClipboard();
   opts.clipboard_fetch_on_announce = true;  // no run loop here to answer at paste time
+  std::shared_ptr<CopyingClipboard> copying;
+  if (!copy_files.empty()) {
+    copying = std::make_shared<CopyingClipboard>();
+    opts.clipboard = copying;
+  }
   opts.log = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
   opts.on_ended = [&](const std::string& reason) {
     std::fprintf(stderr, "session ended: %s\n", reason.c_str());
@@ -276,6 +326,14 @@ int main(int argc, char** argv) {
       if (result.retry_after_ms) std::fprintf(stderr, "retry in %lld ms\n", static_cast<long long>(*result.retry_after_ms));
     }
     return 1;
+  }
+  if (copying) {
+    std::thread([copying, copy_files] {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      copying->Copy(copy_files);
+      std::printf("copied %zu items on the client\n", copy_files.size());
+      std::fflush(stdout);
+    }).detach();
   }
   std::printf("connected to %s (%s), media over %s port %u\n", result.server.server_name.c_str(), host.c_str(),
               session->session().transport == rdm::MediaTransport::kTcp ? "tcp" : "udp", session->session().port);

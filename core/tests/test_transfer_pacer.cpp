@@ -115,3 +115,12 @@ TEST(TransferPacer, AFarSlowLinkStillHoldsBackAQueue) {
   EXPECT_GT(mbps, 2.5);
   EXPECT_LT(p.rate_bps(), 4e6 * 2.0) << "rate " << p.rate_bps() / 1e6 << " Mbps";
 }
+
+TEST(TransferPacer, HalfASecondRoundTripStillGoesFast) {
+  // 500 ms round trips wobbling by up to 100 ms (a VPN relayed across
+  // continents): what rdmachine has to cope with at least.
+  TransferPacer p;
+  const uint64_t delivered = Simulate(p, 20e6, 500'000, 30'000'000, 0, 0, 100'000);
+  const double mbps = static_cast<double>(delivered) * 8 / 30 / 1e6;
+  EXPECT_GT(mbps, 8.0) << "rate " << p.rate_bps() / 1e6 << " Mbps";
+}
