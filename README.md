@@ -15,7 +15,7 @@
 - **省流量**：文字画面的流量降到平时的 1/3 到 1/7，体验不变。
 - **弱网**：UDP 传画面，不通时自动改走 TCP；心跳 2 秒，服务端没了 12 秒内就知道。
 
-还没有的：公钥登录、声音、文件传输（以后做单独的传输窗口），见[第一阶段的决定](docs/decisions.md)。控制协议仍是 v0，两端要用同一个版本。
+还没有的：公钥登录、声音、文件复制粘贴（方案见[文件复制粘贴](docs/file-paste.md)），见[第一阶段的决定](docs/decisions.md)。控制协议仍是 v0，两端要用同一个版本。
 
 ## 安装
 
@@ -178,6 +178,7 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
 | --- | --- |
 | [第一阶段的决定](docs/decisions.md) | 范围、语言、界面、认证、端口、会话模型 |
 | [控制协议 v0](docs/protocol.md) | 登录、密钥下发、会话控制的线上格式 |
+| [文件复制粘贴](docs/file-paste.md) | 方案：只在粘贴时才传，File Provider 占位文件；苹果的做法和实验结果 |
 | [NoMachine 功能清单](docs/research/nomachine-features.md) | 调研：NoMachine 有哪些功能，P0/P1/P2 |
 | [rdaccel 能力评估](docs/research/rdaccel-assessment.md) | 调研：rdaccel 能做到什么、缺什么 |
 | [同类开源方案](docs/research/competitive-analysis.md) | 调研：RustDesk、VNC、xrdp、Guacamole、X2Go、Sunshine |
