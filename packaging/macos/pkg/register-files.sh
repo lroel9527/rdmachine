@@ -20,8 +20,4 @@ for i in 1 2 3 4 5; do
   sleep 2
 done
 [ "$ok" = 1 ] || echo "rdmachine postinstall: could not register the RDMachine location (the first paste will)" >&2
-# The switch can only be turned on by the user (without a developer
-# account there is no way around that): open the page it is on. Both
-# components may run this; the page opens once either way.
-as_user open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension" >/dev/null 2>&1
 exit 0
