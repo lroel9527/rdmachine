@@ -545,7 +545,13 @@ static os_log_t Log(void) {
                                           request:(NSFileProviderRequest*)request
                                 completionHandler:(void (^)(NSURL*, NSFileProviderItem, NSError*))completionHandler {
   RDMModel* m = [RDMModel shared];
-  NSProgress* progress = [NSProgress progressWithTotalUnitCount:1];
+  // The size up front, so the system shows a real fraction from the start.
+  __block int64_t size = 1;
+  dispatch_sync(m.queue, ^{
+    RDMItem* it = m.items[itemIdentifier];
+    if (it && it.size > 0) size = (int64_t)it.size;
+  });
+  NSProgress* progress = [NSProgress progressWithTotalUnitCount:size];
   RDMFetch* fetch = [[RDMFetch alloc] init];
   fetch.progress = progress;
   __block BOOL completed = NO;

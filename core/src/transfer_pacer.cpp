@@ -84,10 +84,16 @@ void TransferPacer::OnCongestion(uint64_t now_us) {
 }
 
 void TransferPacer::MaybeEndEpoch(uint64_t now_us) {
-  if (now_us - epoch_start_us_ < o_.epoch_us) return;
+  // An epoch spans at least two round trips, so it holds acknowledgements
+  // of what it sent; on a far link a short one has none, or only unlucky ones.
+  const uint64_t epoch = std::max<uint64_t>(o_.epoch_us, 2 * base_delay_us_);
+  if (now_us - epoch_start_us_ < epoch) return;
   const uint64_t elapsed = now_us - epoch_start_us_;
-  // A queue: even the quickest acknowledgement of the epoch was slow.
-  const bool queue = epoch_min_delay_us_ != UINT64_MAX && epoch_min_delay_us_ > base_delay_us_ + o_.queue_target_us;
+  // A queue: even the quickest acknowledgement of the epoch was slow. A far
+  // path wobbles by more than a near one without any queue (a VPN across
+  // the internet: tens of milliseconds), so the margin grows with the delay.
+  const uint64_t margin = std::max<uint64_t>(o_.queue_target_us, base_delay_us_ / 2);
+  const bool queue = epoch_min_delay_us_ != UINT64_MAX && epoch_min_delay_us_ > base_delay_us_ + margin;
   // Only a sender that used most of what the rate allowed learns anything
   // about the path; one held back by its window or its disk does not.
   const double allowed = rate_bps_ / 8 * static_cast<double>(elapsed) / 1e6;

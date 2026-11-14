@@ -14,7 +14,8 @@ constexpr uint64_t kChunk = 128 * 1024;
 // acknowledges at once: sends as fast as the pacer allows for `us`, returns
 // the bytes delivered. Queueing on the link shows up as longer delays.
 uint64_t Simulate(TransferPacer& p, double link_bps, uint64_t rtt_us, uint64_t us, uint64_t start = 0,
-             uint64_t congestion_every_us = 0) {
+             uint64_t congestion_every_us = 0, uint64_t jitter_us = 0) {
+  uint64_t seed = 12345;
   struct Pending {
     uint64_t sent_at, done_at, bytes;
   };
@@ -39,7 +40,9 @@ uint64_t Simulate(TransferPacer& p, double link_bps, uint64_t rtt_us, uint64_t u
     while (p.CanSend(t, kChunk, in_flight)) {
       p.OnSent(t, kChunk);
       link_free = std::max(link_free, t) + static_cast<uint64_t>(kChunk * 8 / link_bps * 1e6);
-      pending.push_back({t, link_free + rtt_us, kChunk});
+      seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+      const uint64_t jitter = jitter_us ? (seed >> 33) % jitter_us : 0;  // the path's own wobble, no queue
+      pending.push_back({t, link_free + rtt_us + jitter, kChunk});
       in_flight += kChunk;
     }
   }
@@ -92,4 +95,23 @@ TEST(TransferPacer, BacksOffWhenThePictureSkipsFrames) {
 TEST(TransferPacer, AFullWindowWaitsForAcknowledgements) {
   TransferPacer p;
   EXPECT_FALSE(p.CanSend(10'000'000, kChunk, p.Window()));
+}
+
+TEST(TransferPacer, AFarJitteryLinkIsNotMistakenForAQueue) {
+  // 200 ms round trips that wobble by up to 50 ms (a VPN across the
+  // internet): the wobble is not a queue, the rate must not collapse.
+  TransferPacer p;
+  const uint64_t delivered = Simulate(p, 20e6, 200'000, 20'000'000, 0, 0, 50'000);
+  const double mbps = static_cast<double>(delivered) * 8 / 20 / 1e6;
+  EXPECT_GT(mbps, 8.0) << "rate " << p.rate_bps() / 1e6 << " Mbps";
+}
+
+TEST(TransferPacer, AFarSlowLinkStillHoldsBackAQueue) {
+  // The same far, wobbly path, but only 4 Mbps: the rate settles near the
+  // link instead of running far past it.
+  TransferPacer p;
+  const uint64_t delivered = Simulate(p, 4e6, 200'000, 30'000'000, 0, 0, 50'000);
+  const double mbps = static_cast<double>(delivered) * 8 / 30 / 1e6;
+  EXPECT_GT(mbps, 2.5);
+  EXPECT_LT(p.rate_bps(), 4e6 * 2.0) << "rate " << p.rate_bps() / 1e6 << " Mbps";
 }

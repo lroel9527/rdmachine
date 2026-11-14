@@ -26,7 +26,8 @@ using nlohmann::json;
 constexpr size_t kChunk = 128 * 1024;
 constexpr uint64_t kCongestionEveryUs = 50'000;
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
-constexpr uint64_t kProgressEveryBytes = 1 << 20;
+// Often enough for a progress bar to move smoothly on a slow link.
+constexpr uint64_t kProgressEveryBytes = 256 * 1024;
 
 uint64_t SteadyUs() {
   return static_cast<uint64_t>(
