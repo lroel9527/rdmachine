@@ -323,6 +323,17 @@ std::optional<std::vector<std::string>> MacFileTarget::Publish(uint64_t announce
     std::vector<std::string> paths;
     const std::string root = Std(h.root.path);
     for (const auto& e : items) paths.push_back(root + "/" + copy_id + "/" + e.path);
+    // The copy's folder shows its items on disk only once it is listed
+    // (until then they wait for their parent): list it now, so they are
+    // there before anything pastes.
+    NSString* folder = NS(root + "/" + copy_id);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      for (int i = 0; i < 50; ++i) {
+        NSArray* names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:folder error:nil];
+        if (names.count > 0) return;
+        usleep(100000);
+      }
+    });
     return paths;
   }
 }

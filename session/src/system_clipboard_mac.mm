@@ -104,7 +104,11 @@ NSPasteboardType TypeOf(const std::string& mime) {
 
 - (void)pasteboard:(NSPasteboard*)pb item:(NSPasteboardItem*)item provideDataForType:(NSPasteboardType)type {
   NSDate* until = [NSDate dateWithTimeIntervalSinceNow:10];
+  NSString* parent = _path.stringByDeletingLastPathComponent;
   while (![NSFileManager.defaultManager fileExistsAtPath:_path] && [until timeIntervalSinceNow] > 0) {
+    // A File Provider folder shows what is in it only once it is listed.
+    [NSFileManager.defaultManager contentsOfDirectoryAtPath:parent error:nil];
+    if ([NSFileManager.defaultManager fileExistsAtPath:_path]) break;
     if (NSThread.isMainThread) {
       CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false);
     } else {
