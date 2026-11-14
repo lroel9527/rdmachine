@@ -1,6 +1,7 @@
 #include "server_runtime.h"
 
 #include "rdmachine/session/system_clipboard.h"
+#include "rdmachine/session/system_files.h"
 
 namespace rdm {
 
@@ -72,6 +73,11 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   // No one's clipboard at the login window.
   mo.clipboard = options_.login_window ? nullptr : SystemClipboard();
   mo.clipboard_mode = s.clipboard_mode;
+  // Files the client copies, pasted in Finder here (not at the login window).
+  if (!options_.login_window) {
+    mo.file_target = SystemFileTarget();
+    mo.file_staging_dir = FileStagingDir();
+  }
   mo.virtual_desktop = SystemVirtualDesktop();
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;

@@ -57,7 +57,9 @@ std::optional<ClipboardHello> DecodeClipboardHello(std::string_view payload) {
 }
 
 std::string EncodeClipboardAnnounce(const ClipboardAnnounce& a) {
-  return json{{"id", a.id}, {"formats", a.formats}}.dump();
+  json j{{"id", a.id}, {"formats", a.formats}};
+  if (!a.files.empty()) j["files"] = json::parse(EncodeFileEntries(a.files));
+  return j.dump();
 }
 
 std::optional<ClipboardAnnounce> DecodeClipboardAnnounce(std::string_view payload) {
@@ -71,6 +73,10 @@ std::optional<ClipboardAnnounce> DecodeClipboardAnnounce(std::string_view payloa
       if (!f.is_string() || !GoodMime(f.get<std::string>())) return std::nullopt;
       a.formats.push_back(f.get<std::string>());
     }
+  }
+  if (auto it = j.find("files"); it != j.end()) {
+    // Malformed files are dropped, the rest of the announcement stays.
+    if (auto files = DecodeFileEntries(it->dump(), /*names_only=*/true, kMaxAnnouncedFiles)) a.files = std::move(*files);
   }
   return a;
 }

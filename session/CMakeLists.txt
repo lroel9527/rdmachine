@@ -14,10 +14,15 @@ add_library(rdm_session STATIC
   src/daemon.cpp
   src/agent_host.cpp)
 if(APPLE)
-  target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm)
+  target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
+    src/file_target_mac.mm)
   set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
+    src/file_target_mac.mm
     PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-  target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security")
+  # The XPC protocol shared with the File Provider extension.
+  target_include_directories(rdm_session PRIVATE ${PROJECT_SOURCE_DIR}/fileprovider)
+  target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security"
+    "-framework FileProvider")
 else()
   target_sources(rdm_session PRIVATE src/system_clipboard.cpp src/virtual_desktop.cpp src/login_screen.cpp src/code_identity.cpp)
 endif()

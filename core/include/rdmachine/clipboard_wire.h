@@ -3,6 +3,8 @@
 // "剪贴板"): rdaccel application messages, reliable, ordered and encrypted.
 //
 // Version 3: nothing leaves a computer until the other side pastes it.
+// Version 4: copied files and folders too (an announcement lists them,
+// file_transfer.h carries them).
 //   hello    (both ways, first)  {"version":3}
 //   announce (copying side)      something was copied: its formats, nothing else
 //   request  (pasting side)      an application is pasting: send this format
@@ -12,8 +14,7 @@
 //   cancel   (either side)       an offer is given up
 // A peer that never says hello (or says an earlier version) is an older
 // version: the server gives it plain text as kClipboardTextMessageType, as
-// before. Files are not part of the clipboard (a transfer window will carry
-// them).
+// before. A version 3 peer gets no files (their names come as text).
 //
 // Platform independent: encoding and checks only.
 #include <cstdint>
@@ -21,6 +22,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "rdmachine/file_transfer.h"
 
 namespace rdm {
 
@@ -36,7 +39,11 @@ constexpr uint32_t kClipboardCancelMessageType = 0x10009;
 constexpr uint32_t kClipboardAnnounceMessageType = 0x1000A;
 constexpr uint32_t kClipboardRequestMessageType = 0x1000B;
 
-constexpr int kClipboardVersion = 3;
+constexpr int kClipboardVersion = 4;
+// The first version that fetches at paste time (announce, request, ...).
+constexpr int kClipboardPromiseVersion = 3;
+// The first version with files.
+constexpr int kClipboardFilesVersion = 4;
 
 // Formats, as MIME types (the same names on every system).
 inline constexpr std::string_view kMimeText = "text/plain";  // UTF-8
@@ -53,10 +60,13 @@ struct ClipboardHello {
 std::string EncodeClipboardHello(const ClipboardHello& h);
 std::optional<ClipboardHello> DecodeClipboardHello(std::string_view payload);
 
-// announce: {"id":3,"formats":["text/plain","image/png"]}
+// announce: {"id":3,"formats":["text/plain","image/png"]}, and from version
+// 4 "files":[...] (file_transfer.h's entries, a name each) when files or
+// folders were copied.
 struct ClipboardAnnounce {
   uint64_t id = 0;  // the copying side's own numbering
   std::vector<std::string> formats;
+  std::vector<FileEntry> files;
 
   bool operator==(const ClipboardAnnounce&) const = default;
 };

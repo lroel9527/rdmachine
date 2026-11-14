@@ -271,6 +271,23 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 
 实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、宣布、承诺、按请求发送和接收，平台无关，Linux 上用内存剪贴板测试；`ClipboardPromise` 是放在剪贴板上的承诺）、`clipboard_wire.h`（消息）、`transfer_pacer.h`（节奏）；macOS 剪贴板（包括延迟提供数据的 `RDMPromiseProvider`）在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板；`MacPromiseTest` 用 AppKit 读承诺，和别的应用一样），`session/tests/test_media_e2e.cpp`（两端真实连接）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
 
+### 文件（剪贴板版本 4）
+
+复制的是文件或文件夹时，announce 多一个 `"files"`：每一项的名字、类型（`"k"`：`f` 文件、`d` 文件夹、`l` 符号链接）、大小、权限和修改时间，没有内容。对方是版本 3 时不带，它只收到文件名（文本）。粘贴的一方要的时候才问（`core/include/rdmachine/file_transfer.h`）：
+
+| 类型 | 方向 | 内容 |
+| --- | --- | --- |
+| `0x1000C` list request | 粘贴的一方 | JSON `{"announce":3,"id":1,"item":0}`：第 0 项（文件夹）里有什么 |
+| `0x1000D` list | 复制的一方 | JSON `{"request":1,"entries":[...]}`，整棵树，第一项是它自己（路径 `""`）；或 `{"request":1,"error":"gone"}` |
+| `0x1000E` fetch | 粘贴的一方 | 同 list request 的字段：把第 0 项整个发过来 |
+| `0x1000F` data | 复制的一方 | 二进制，同剪贴板的 data，`id` 是 fetch 的 |
+| `0x10010` ack | 粘贴的一方 | 同剪贴板的 ack |
+| `0x10011` cancel | 双向 | 同剪贴板的 cancel |
+
+一项的内容是一个流，像 tar：每条记录是 4 字节小端长度、JSON 头（`{"p":"sub/a.txt","k":"f","s":12,"m":420,"t":1700000000}`，链接带 `"l"`），普通文件的头后面跟 `s` 字节内容；最后一条是 `{"end":true}`。路径相对于这一项，接收方拒绝绝对路径、`.`、`..` 和空的部分。节奏和剪贴板一样（`transfer_pacer.h`），画面优先。
+
+粘贴的一方先写到 `~/Library/Caches/<应用标识>/files/` 下这个会话自己的文件夹，再交给 File Provider 扩展；会话结束、对方又复制了别的、这边复制了别的，都会取消正在传的并删掉暂存的。macOS 上的做法见[文件复制粘贴](file-paste.md)。
+
 ## 键盘语言同步
 
 客户端用 Caps Lock、⌃空格或菜单切换输入源（简体拼音 ↔ ABC 等）时，服务端跟着切到对应的输入源。切换不能当按键传：macOS 只对物理键盘的 Caps Lock 切换输入源，注入的 Caps Lock 不起作用。
@@ -324,5 +341,5 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 - 登录窗口和锁屏时的连接、会话迁移：3.0 已做，见上文“守护进程和 agent”“会话迁移”。
 - 保持登录：`enroll_key`（登录后上传公钥）、`auth` 的 `key` 方式（对服务端随机数签名）、撤销。见[决定](decisions.md)的“保持登录”。
 - 被控端审批弹窗（NoMachine 的 0/1/2 三档）、双因素认证：以后。
-- 切换显示器：以后加消息类型。文件复制粘贴（不做单独的传输窗口）：见[文件复制粘贴](file-paste.md)。断线后自动重连不做（见[决定](decisions.md)的“下一步范围”）。
+- 切换显示器：以后加消息类型。断线后自动重连不做（见[决定](decisions.md)的“下一步范围”）。
 - 请求桌面：Linux 服务端的虚拟屏；多块屏的桌面；会话期间不让被控端的真实屏幕显示画面（隐私屏）。

@@ -50,6 +50,7 @@
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
 #include "rdmachine/session/system_clipboard.h"
+#include "rdmachine/session/system_files.h"
 
 namespace {
 
@@ -2871,11 +2872,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   opts.viewer.on_frame = &OnFrame;
   opts.viewer.on_cursor = &OnCursor;
   opts.viewer.on_message = &OnMessage;
-  // Text, rich text and images copied on either Mac can be pasted on the
-  // other; they only cross when they are pasted (both ways for now; a
-  // setting comes with the preferences window). Copied files only as their
-  // names.
+  // Text, rich text, images, files and folders copied on either Mac can be
+  // pasted on the other; they only cross when they are pasted (both ways
+  // for now; a setting comes with the preferences window).
   opts.clipboard = SharedClipboard();
+  opts.file_target = rdm::SystemFileTarget();
+  opts.file_staging_dir = rdm::FileStagingDir();
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;
   opts.on_moving = [weakRemote](const std::string& reason) {

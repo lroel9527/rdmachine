@@ -9,6 +9,9 @@
 #include <cstdlib>
 #include <thread>
 #include <vector>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <memory>
 
@@ -443,6 +446,54 @@ class ClipboardE2E : public MediaE2E {
   void Configure(MediaHostOptions& mo) override { mo.inject_input = true; }
 };
 
+// Where the client's copied files appear on the server: records what it is told.
+struct RecordingFileTarget : FileTarget {
+  void SetRequester(FileRequester* r) override {
+    std::lock_guard lock(mu);
+    requester = r;
+  }
+  std::optional<std::vector<std::string>> Publish(uint64_t announce, const std::vector<FileEntry>& items) override {
+    std::lock_guard lock(mu);
+    published = announce;
+    std::vector<std::string> out;
+    for (const auto& e : items) out.push_back("/placeholders/" + e.path);
+    return out;
+  }
+  void Withdraw(uint64_t) override {}
+  void OnList(uint64_t, uint32_t, const std::vector<FileEntry>&, const std::string&) override {}
+  void OnProgress(uint64_t, uint32_t, const std::string&, uint64_t) override {}
+  void OnFileReady(uint64_t, uint32_t, const FileEntry&, const std::string&) override {
+    std::lock_guard lock(mu);
+    ++ready;
+  }
+  void OnItemDone(uint64_t, uint32_t, const std::string& error) override {
+    std::lock_guard lock(mu);
+    done.push_back(error);
+  }
+  std::mutex mu;
+  FileRequester* requester = nullptr;
+  uint64_t published = 0;
+  int ready = 0;
+  std::vector<std::string> done;
+};
+
+class FilesE2E : public MediaE2E {
+ protected:
+  void Configure(MediaHostOptions& mo) override {
+    mo.inject_input = true;
+    char tmpl[] = "/tmp/rdm-e2e-files-XXXXXX";
+    root_ = mkdtemp(tmpl);
+    mo.file_target = target_;
+    mo.file_staging_dir = root_ + "/staging";
+  }
+  void TearDown() override {
+    MediaE2E::TearDown();
+    if (!root_.empty()) std::system(("rm -rf '" + root_ + "'").c_str());
+  }
+  std::shared_ptr<RecordingFileTarget> target_ = std::make_shared<RecordingFileTarget>();
+  std::string root_;
+};
+
 
 
 }  // namespace
@@ -472,6 +523,58 @@ TEST_F(ClipboardE2E, TextIsFetchedWhenPasted) {
   std::this_thread::sleep_for(500ms);
   EXPECT_EQ(server_clipboard_->writes(), 1);
   EXPECT_EQ(client_clipboard->writes(), 1);
+  s->Close();
+}
+
+TEST_F(FilesE2E, AFolderCopiedOnTheClientIsFetchedWhenPasted) {
+  // folder/{big.bin (3 MiB), sub/small.txt}
+  const std::string folder = root_ + "/folder";
+  ASSERT_EQ(system(("mkdir -p '" + folder + "/sub'").c_str()), 0);
+  std::string big(3u << 20, '\0');
+  for (size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>((i * 7 + i / 1001) & 0xFF);
+  { std::ofstream(folder + "/big.bin", std::ios::binary) << big; }
+  { std::ofstream(folder + "/sub/small.txt") << "小文件"; }
+
+  Frames frames;
+  auto client_clipboard = std::make_shared<FakeClipboard>();
+  auto o = Options(&frames);
+  o.clipboard = client_clipboard;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  std::this_thread::sleep_for(700ms);
+
+  ClipboardContent c = ClipboardContent::Text("folder");
+  c.files = {folder};
+  client_clipboard->CopyContent(c);
+  ASSERT_TRUE(WaitFor([&] { return server_clipboard_->promise() != nullptr; }));
+  EXPECT_EQ(server_clipboard_->promise()->file_paths(), std::vector<std::string>{"/placeholders/folder"});
+
+  uint64_t announce = 0;
+  {
+    std::lock_guard lock(target_->mu);
+    ASSERT_TRUE(target_->requester);
+    announce = target_->published;
+    target_->requester->RequestFileFetch(announce, 0);
+  }
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard lock(target_->mu);
+    return !target_->done.empty();
+  }, 20s));
+  {
+    std::lock_guard lock(target_->mu);
+    EXPECT_EQ(target_->done, std::vector<std::string>{""});
+    EXPECT_EQ(target_->ready, 4);  // the folder, sub, and two files
+  }
+  std::string session;
+  for (const auto& e : std::filesystem::directory_iterator(root_ + "/staging")) session = e.path().string();
+  const std::string got = session + "/" + std::to_string(announce) + "/0/folder";
+  std::ifstream f(got + "/big.bin", std::ios::binary);
+  std::string read((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  EXPECT_TRUE(read == big);
+  std::ifstream g(got + "/sub/small.txt");
+  std::string small((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(small, "小文件");
   s->Close();
 }
 

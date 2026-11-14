@@ -423,6 +423,11 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     // as before.
     so.push_text_to_older_peers = true;
     so.log = options_.log;
+    // A view-only client's files are not taken either.
+    if (clip_mode != ClipboardMode::kSend) {
+      so.file_target = options_.file_target;
+      so.file_staging_dir = options_.file_staging_dir;
+    }
     // A large paste yields to the picture: it slows down when frames are
     // skipped for congestion.
     so.congestion_events = [this]() -> uint64_t {

@@ -41,6 +41,10 @@ class RemoteSession {
     // Fetch what the server copies right away instead of when it is pasted
     // (a process with no main run loop, such as the command-line client).
     bool clipboard_fetch_on_announce = false;
+    // Where files the server copied appear when pasted here (null: as their
+    // names), and where they are written on the way (docs/file-paste.md).
+    std::shared_ptr<FileTarget> file_target;
+    std::string file_staging_dir;
     std::function<void(const std::string&)> log;  // may be empty
     int udp_wait_ms = 4000;    // then fall back to TCP; 0 = no fallback
     // The session ended from the other side or the network: "server_closed",

@@ -7,7 +7,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
 
-project(rdmachine VERSION 3.2.8 LANGUAGES C CXX)
+project(rdmachine VERSION 3.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,6 +67,9 @@ if(RDM_WITH_RDACCEL)
   add_subdirectory(session)
   add_subdirectory(server)
   add_subdirectory(client)
+  if(APPLE)
+    add_subdirectory(fileprovider)
+  endif()
 endif()
 
 if(RDM_BUILD_TESTS)

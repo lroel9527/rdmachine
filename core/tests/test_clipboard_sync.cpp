@@ -152,7 +152,7 @@ TEST(ClipboardSync, HelloGoesFirst) {
   EXPECT_EQ(s.sent[0].type, kClipboardHelloMessageType);
   auto h = DecodeClipboardHello(s.sent[0].payload);
   ASSERT_TRUE(h);
-  EXPECT_EQ(h->version, 3);
+  EXPECT_EQ(h->version, 4);
 }
 
 TEST(ClipboardSync, ACopyIsOnlyAnnouncedNotSent) {

@@ -85,6 +85,37 @@ NSPasteboardType TypeOf(const std::string& mime) {
 
 @end
 
+// The peer's copied file as it appears here (a File Provider placeholder):
+// its URL is given once the placeholder exists, which takes a moment after
+// it was published.
+@interface RDMFileURLProvider : NSObject <NSPasteboardItemDataProvider>
+- (instancetype)initWithPath:(NSString*)path;
+@end
+
+@implementation RDMFileURLProvider {
+  NSString* _path;
+}
+
+- (instancetype)initWithPath:(NSString*)path {
+  if (!(self = [super init])) return nil;
+  _path = [path copy];
+  return self;
+}
+
+- (void)pasteboard:(NSPasteboard*)pb item:(NSPasteboardItem*)item provideDataForType:(NSPasteboardType)type {
+  NSDate* until = [NSDate dateWithTimeIntervalSinceNow:10];
+  while (![NSFileManager.defaultManager fileExistsAtPath:_path] && [until timeIntervalSinceNow] > 0) {
+    if (NSThread.isMainThread) {
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false);
+    } else {
+      usleep(20000);
+    }
+  }
+  [item setString:[NSURL fileURLWithPath:_path].absoluteString forType:type];
+}
+
+@end
+
 namespace rdm {
 namespace {
 
@@ -109,9 +140,14 @@ class MacClipboard : public Clipboard {
       if (NSString* s = [pb stringForType:NSPasteboardTypeString]) {
         c.formats.push_back({std::string(kMimeText), Utf8(s)});
       }
-      // Files copied in Finder: only their names (the text above). The
-      // files themselves are not shared, nor Finder's icons of them.
-      if ([pb canReadObjectForClasses:@[ NSURL.class ] options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}]) {
+      // Files copied in Finder: their names (the text above) and their
+      // paths, not Finder's icons of them.
+      NSArray<NSURL*>* urls = [pb readObjectsForClasses:@[ NSURL.class ]
+                                                options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+      if (urls.count > 0) {
+        for (NSURL* u in urls) {
+          if (const char* path = u.fileSystemRepresentation) c.files.emplace_back(path);
+        }
         return c;
       }
       if (NSData* rtf = [pb dataForType:NSPasteboardTypeRTF]) c.formats.push_back({std::string(kMimeRtf), Bytes(rtf)});
@@ -164,17 +200,33 @@ class MacClipboard : public Clipboard {
         if (NSPasteboardType t = TypeOf(mime)) [formats addObject:t];
         if (mime == kMimePng) [formats addObject:NSPasteboardTypeTIFF];
       }
-      if (formats.count == 0) return std::nullopt;
-      RDMPromiseProvider* provider = [[RDMPromiseProvider alloc] initWithPromise:promise];
-      NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
-      if (![item setDataProvider:provider forTypes:formats]) return std::nullopt;
-      NSArray<NSPasteboardItem*>* items = @[ item ];
-      const NSInteger count = [pb clearContents];
+      if (formats.count == 0 && promise->file_paths().empty()) return std::nullopt;
+      NSMutableArray* providers = [NSMutableArray array];
+      NSMutableArray<NSPasteboardItem*>* items = [NSMutableArray array];
+      if (formats.count > 0) {
+        RDMPromiseProvider* provider = [[RDMPromiseProvider alloc] initWithPromise:promise];
+        NSPasteboardItem* item = [[NSPasteboardItem alloc] init];
+        if (![item setDataProvider:provider forTypes:formats]) return std::nullopt;
+        [providers addObject:provider];
+        [items addObject:item];
+      }
+      // One item per file, as Finder puts them (the first one also carries
+      // the formats above).
+      for (size_t i = 0; i < promise->file_paths().size(); ++i) {
+        RDMFileURLProvider* provider = [[RDMFileURLProvider alloc] initWithPath:NS(promise->file_paths()[i])];
+        NSPasteboardItem* item = i == 0 && items.count > 0 ? items[0] : [[NSPasteboardItem alloc] init];
+        if (![item setDataProvider:provider forTypes:@[ NSPasteboardTypeFileURL ]]) return std::nullopt;
+        [providers addObject:provider];
+        if (!(i == 0 && items.count > 0)) [items addObject:item];
+      }
+      // Only on this computer: Universal Clipboard would otherwise read
+      // the promise at once, fetching what nobody pasted.
+      const NSInteger count = [pb prepareForNewContentsWithOptions:NSPasteboardContentsCurrentHostOnly];
       if (![pb writeObjects:items]) return std::nullopt;
       {
         // One clipboard may serve several sessions, each on its own thread.
         std::lock_guard lock(provider_mu_);
-        provider_ = provider;  // kept until the next promise
+        providers_ = providers;  // kept until the next promise
       }
       promise_count_ = static_cast<int64_t>(count);
       return static_cast<int64_t>(count);
@@ -190,7 +242,7 @@ class MacClipboard : public Clipboard {
   const std::string name_;
   std::atomic<int64_t> promise_count_{-1};  // the change count of our promise on the pasteboard
   std::mutex provider_mu_;
-  RDMPromiseProvider* provider_ = nil;
+  NSArray* providers_ = nil;
 };
 
 }  // namespace

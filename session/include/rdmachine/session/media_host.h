@@ -39,6 +39,10 @@ struct MediaHostOptions {
   // sessions never take the client's clipboard.
   std::shared_ptr<Clipboard> clipboard;
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
+  // Where files the client copied appear when pasted here (null: as their
+  // names), and where they are written on the way (docs/file-paste.md).
+  std::shared_ptr<FileTarget> file_target;
+  std::string file_staging_dir;
   // Builds the desktop a client asks for (docs/protocol.md, "请求桌面").
   // Empty = requests are not honoured: the display is shared as it is.
   VirtualDesktopFactory virtual_desktop;

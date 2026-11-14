@@ -18,6 +18,7 @@ add_executable(rdm_core_tests
   test_control.cpp
   test_clipboard_sync.cpp
   test_clipboard_wire.cpp
+  test_file_transfer.cpp
   test_transfer_pacer.cpp
   test_input_source_sync.cpp
   test_desktop.cpp

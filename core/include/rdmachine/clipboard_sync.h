@@ -12,8 +12,9 @@
 // a promise of that on its clipboard (ClipboardPromise); when an application
 // there pastes, the promise asks for exactly the format it needs, which then
 // comes across. Content that came from the peer is never announced back, so
-// the two sides do not ping-pong. Copied files are not shared (only their
-// names, as text); a transfer window will carry files.
+// the two sides do not ping-pong. Copied files and folders are announced
+// by name and size and come across when pasted (file_transfer.h); to an
+// older peer only their names go, as text.
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include "rdmachine/clipboard_wire.h"
+#include "rdmachine/file_transfer.h"
 #include "rdmachine/transfer_pacer.h"
 
 namespace rdm {
@@ -43,8 +45,11 @@ struct ClipboardFormat {
 // What is on a clipboard, as far as it is shared.
 struct ClipboardContent {
   std::vector<ClipboardFormat> formats;
+  // Files and folders copied (local absolute paths; only names and sizes are
+  // announced).
+  std::vector<std::string> files;
 
-  bool empty() const { return formats.empty(); }
+  bool empty() const { return formats.empty() && files.empty(); }
   const std::string* Find(std::string_view mime) const;
   bool operator==(const ClipboardContent&) const = default;
 
@@ -57,9 +62,13 @@ class ClipboardPromise {
  public:
   struct Hub;  // shared with the ClipboardSync
 
-  ClipboardPromise(std::shared_ptr<Hub> hub, uint64_t announce, std::vector<std::string> formats);
+  ClipboardPromise(std::shared_ptr<Hub> hub, uint64_t announce, std::vector<std::string> formats,
+                   std::vector<std::string> file_paths = {});
 
   const std::vector<std::string>& formats() const { return formats_; }  // MIME types
+  // The peer's copied files, as they appear on this side (FileTarget's
+  // paths): put on the clipboard as files; empty when none.
+  const std::vector<std::string>& file_paths() const { return file_paths_; }
 
   // Fetches `mime` from the peer and waits for it, calling `pump` every few
   // milliseconds meanwhile (macOS: runs the main run loop, so the
@@ -74,6 +83,7 @@ class ClipboardPromise {
   std::shared_ptr<Hub> hub_;
   uint64_t announce_;
   std::vector<std::string> formats_;
+  std::vector<std::string> file_paths_;
 };
 
 // The system clipboard. Called only from the ClipboardSync's own thread (or
@@ -87,7 +97,7 @@ class Clipboard {
   // What the clipboard holds in the shared formats; nullopt when it holds
   // something that must not leave this computer (macOS: marked concealed or
   // transient by a password manager). Files copied in a file manager come
-  // as their names (text), and nothing else.
+  // as their names (text) and their paths (ClipboardContent::files).
   virtual std::optional<ClipboardContent> Read() = 0;
   // Replaces the clipboard's contents and returns the change count that this
   // write produced (NSPasteboard's clearContents returns it), or nullopt on
@@ -161,6 +171,11 @@ class ClipboardSync {
     // (tests drive their own).
     std::function<uint64_t()> clock;
     std::function<void(const std::string&)> log;  // may be empty
+    // Where the peer's copied files appear when pasted here; null: they
+    // are pasted as their names. Fetched items are written under
+    // file_staging_dir first.
+    std::shared_ptr<FileTarget> file_target;
+    std::string file_staging_dir;
   };
 
   ClipboardSync(std::shared_ptr<Clipboard> clipboard, SendFn send, Options options);
@@ -253,6 +268,7 @@ class ClipboardSync {
   std::shared_ptr<ClipboardPromise::Hub> hub_;  // shared with promises; lives as long as this
   std::vector<std::pair<uint64_t, std::string>> pending_requests_;
   std::unique_ptr<Incoming> incoming_;
+  std::unique_ptr<FileTransfer> files_;
   // Fetching the whole announcement at once (options_.fetch_on_announce, or
   // a clipboard that cannot keep promises): what has come so far.
   bool eager_ = false;

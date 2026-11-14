@@ -78,7 +78,7 @@ if [ "$do_build" = 1 ]; then
   cmake --build "$build_dir" -j "$(sysctl -n hw.ncpu)"
 fi
 bin="$build_dir/bin"
-for b in rdmachine-server rdmachine-client rdmachine-connect; do
+for b in rdmachine-server rdmachine-client rdmachine-connect rdmachine-files-ext; do
   [ -x "$bin/$b" ] || { echo "$bin/$b not found: build first, or pass --build" >&2; exit 1; }
 done
 
@@ -109,6 +109,15 @@ make_app() {
       -e "s/@MIN_MACOS@/$min_macos/" "$pkg/$plist" >"$app/Contents/Info.plist"
   printf 'APPL????' >"$app/Contents/PkgInfo"
   plutil -lint -s "$app/Contents/Info.plist"
+  # The File Provider extension (copied files pasted in Finder,
+  # docs/file-paste.md): signed on its own first, sandboxed.
+  local appex="$app/Contents/PlugIns/RDMachine Files.appex"
+  mkdir -p "$appex/Contents/MacOS"
+  ditto "$bin/rdmachine-files-ext" "$appex/Contents/MacOS/rdmachine-files-ext"
+  sed -e "s/@BUNDLE_ID@/$id.files/" -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build_no/" \
+      -e "s/@MIN_MACOS@/$min_macos/" "$pkg/files-Info.plist.in" >"$appex/Contents/Info.plist"
+  plutil -lint -s "$appex/Contents/Info.plist"
+  codesign "${sign_args[@]}" --options runtime --entitlements "$pkg/files.entitlements" "$appex"
   # The bundle identifier comes from Info.plist; the designated requirement
   # codesign derives from it and the certificate is what TCC checks.
   codesign "${sign_args[@]}" "$app"

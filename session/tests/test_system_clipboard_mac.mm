@@ -101,7 +101,7 @@ TEST_F(MacClipboardTest, RichTextAndImagesBothWays) {
   EXPECT_EQ(back.size.width, 4);
 }
 
-TEST_F(MacClipboardTest, CopiedFilesAreReadAsTheirNamesOnly) {
+TEST_F(MacClipboardTest, CopiedFilesAreReadAsTheirNamesAndPaths) {
   std::ofstream(dir_ / "a.txt") << "a";
   fs::create_directories(dir_ / "folder");
   [pb_ clearContents];
@@ -119,7 +119,9 @@ TEST_F(MacClipboardTest, CopiedFilesAreReadAsTheirNamesOnly) {
   ASSERT_TRUE([pb_ writeObjects:items]);
   auto c = clipboard_->Read();
   ASSERT_TRUE(c);
-  EXPECT_EQ(*c, ClipboardContent::Text("a.txt\nfolder"));  // every item's name; no icon
+  ClipboardContent want = ClipboardContent::Text("a.txt\nfolder");  // every item's name; no icon
+  want.files = {(dir_ / "a.txt").string(), (dir_ / "folder").string()};
+  EXPECT_EQ(*c, want);
 }
 
 // ---- the peer's copy, promised on the pasteboard and fetched when read ----
