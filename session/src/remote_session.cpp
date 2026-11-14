@@ -157,6 +157,10 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     so.file_target = s->options_.file_target;
     so.file_staging_dir = s->options_.file_staging_dir;
     RemoteSession* raw = s.get();
+    so.send_bulk = [raw](uint32_t type, std::string_view payload) {
+      return raw->SendBulkMessage(type, reinterpret_cast<const uint8_t*>(payload.data()), payload.size()) == RDA_OK;
+    };
+    so.bulk_queued = [raw] { return raw->BulkQueuedBytes(); };
     s->clipboard_ = std::make_unique<ClipboardSync>(
         s->options_.clipboard,
         [raw](uint32_t type, std::string_view payload) {
@@ -207,6 +211,16 @@ rda_status RemoteSession::SendInput(const rda_input_event& ev) {
 rda_status RemoteSession::SendMessage(uint32_t type, const uint8_t* payload, size_t n) {
   std::lock_guard lock(mu_);
   return viewer_ ? rda_viewer_send_message(viewer_, type, payload, n) : RDA_ERR_CLOSED;
+}
+
+rda_status RemoteSession::SendBulkMessage(uint32_t type, const uint8_t* payload, size_t n) {
+  std::lock_guard lock(mu_);
+  return viewer_ ? rda_viewer_send_bulk_message(viewer_, type, payload, n) : RDA_ERR_CLOSED;
+}
+
+int64_t RemoteSession::BulkQueuedBytes() const {
+  std::lock_guard lock(mu_);
+  return viewer_ ? rda_viewer_bulk_queued_bytes(viewer_) : -1;
 }
 
 rda_viewer* RemoteSession::viewer() const {

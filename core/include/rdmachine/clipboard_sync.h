@@ -176,6 +176,10 @@ class ClipboardSync {
     // file_staging_dir first.
     std::shared_ptr<FileTarget> file_target;
     std::string file_staging_dir;
+    // Files' data on the transport's bulk channel and how much of it waits
+    // there (FileTransfer::Options); empty: on `send`, paced.
+    SendFn send_bulk;
+    std::function<int64_t()> bulk_queued;
   };
 
   ClipboardSync(std::shared_ptr<Clipboard> clipboard, SendFn send, Options options);

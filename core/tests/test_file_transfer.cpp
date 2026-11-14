@@ -73,6 +73,7 @@ struct FakeTarget : FileTarget {
     ++lists;
   }
   void OnProgress(uint64_t, uint32_t, const std::string&, uint64_t) override { ++progress; }
+  void OnFileStarted(uint64_t, uint32_t, const FileEntry& e, const std::string&) override { started.push_back(e.path); }
   void OnFileReady(uint64_t, uint32_t, const FileEntry& e, const std::string& local) override {
     ready.emplace_back(e, local);
   }
@@ -88,6 +89,7 @@ struct FakeTarget : FileTarget {
   std::vector<FileEntry> listed;
   std::string list_error;
   int lists = 0, progress = 0;
+  std::vector<std::string> started;
   std::vector<std::pair<FileEntry, std::string>> ready;
   std::vector<std::string> done;
 };
@@ -311,8 +313,10 @@ TEST(FileTransfer, PastingAFolderBringsTheWholeTree) {
   EXPECT_TRUE(S_ISDIR(st.st_mode));
   ASSERT_EQ(stat((got + "/sub").c_str(), &st), 0);
   EXPECT_EQ(st.st_mode & 0777, 0750u);
-  // Every file, link and folder was reported, the item itself among them.
+  // Every file, link and folder was reported, the item itself among them;
+  // the regular files also when they began to arrive.
   EXPECT_EQ(target->ready.size(), 6u);
+  EXPECT_EQ(target->started, (std::vector<std::string>{"a.txt", "sub/b.bin"}));
   EXPECT_GT(target->progress, 0);
 
   target->requester->RequestFileFetch(target->published, 1);

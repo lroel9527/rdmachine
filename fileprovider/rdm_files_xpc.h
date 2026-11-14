@@ -24,6 +24,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setTree:(NSData*)json;
 // A file the extension asked for (fetchItem) has arrived: read it from `handle`.
 - (void)fileReady:(NSString*)itemID handle:(NSFileHandle*)handle;
+// It has begun to arrive: `handle` reads what is there so far, `progress`
+// says how much that is (what is below it can be handed on already).
+- (void)fileGrowing:(NSString*)itemID handle:(NSFileHandle*)handle;
 - (void)progress:(NSString*)itemID bytes:(unsigned long long)bytes;
 - (void)itemFailed:(NSString*)itemID reason:(NSString*)reason;
 @end

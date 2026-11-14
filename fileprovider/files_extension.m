@@ -86,6 +86,25 @@ static os_log_t Log(void) {
 @implementation RDMFetch
 @end
 
+// A range of a file the system asked for (fetchPartialContents).
+@interface RDMPartial : NSObject
+@property(nonatomic) NSRange range;
+@property(nonatomic) unsigned long long alignment;
+@property(nonatomic, copy) void (^completion)(NSURL*, id<NSFileProviderItem>, NSRange, NSFileProviderMaterializationFlags,
+                                              NSError*);
+@property(nonatomic, strong) NSProgress* progress;
+@end
+@implementation RDMPartial
+@end
+
+// A file on its way: what reads it, and how much of it is there.
+@interface RDMGrowing : NSObject
+@property(nonatomic, strong) NSFileHandle* handle;
+@property(nonatomic) unsigned long long available;
+@end
+@implementation RDMGrowing
+@end
+
 @class RDMModel;
 
 @interface RDMService : NSObject <RDMFilesExtension, NSXPCListenerDelegate>
@@ -101,6 +120,8 @@ static os_log_t Log(void) {
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray<NSString*>*>* children;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray*>* waitingTree;  // top item -> blocks
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray<RDMFetch*>*>* fetches;
+@property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray<RDMPartial*>*>* partials;
+@property(nonatomic, strong) NSMutableDictionary<NSString*, RDMGrowing*>* growing;
 @property(nonatomic, strong) NSMutableArray<NSString*>* deleted;
 @property(nonatomic, strong) NSMutableArray<NSNumber*>* deletedAt;
 @property(nonatomic) unsigned long long generation;
@@ -123,6 +144,8 @@ static os_log_t Log(void) {
   _children = [NSMutableDictionary dictionary];
   _waitingTree = [NSMutableDictionary dictionary];
   _fetches = [NSMutableDictionary dictionary];
+  _partials = [NSMutableDictionary dictionary];
+  _growing = [NSMutableDictionary dictionary];
   _deleted = [NSMutableArray array];
   _deletedAt = [NSMutableArray array];
   _epoch = [NSUUID UUID].UUIDString;
@@ -164,6 +187,11 @@ static os_log_t Log(void) {
     for (RDMFetch* f in self.fetches[key]) f.completion(nil, nil, gone);
   }
   [self.fetches removeAllObjects];
+  for (NSString* key in self.partials) {
+    for (RDMPartial* p in self.partials[key]) p.completion(nil, nil, NSMakeRange(0, 0), 0, gone);
+  }
+  [self.partials removeAllObjects];
+  [self.growing removeAllObjects];
   for (NSString* key in self.waitingTree) {
     for (void (^b)(NSString*) in self.waitingTree[key]) b(@"gone");
   }
@@ -187,6 +215,56 @@ static os_log_t Log(void) {
   it.link = e[@"l"];
   it.version = self.currentCopy ?: @"";
   return it;
+}
+
+// Hands on what has arrived of a file to the ranges waiting for it: each
+// whose range is covered (or all, once the file is complete) gets a clone of
+// the file as it is now, with everything that is there from its aligned
+// start, so the reader (Finder copying) goes on at once. On the queue.
+- (void)servePartials:(NSString*)itemID fd:(int)fd available:(unsigned long long)available complete:(BOOL)complete {
+  NSMutableArray<RDMPartial*>* waiting = self.partials[itemID];
+  RDMItem* item = self.items[itemID];
+  if (!waiting.count || !item || !self.domain || fd < 0) return;
+  NSURL* tmp = [[NSFileProviderManager managerForDomain:self.domain] temporaryDirectoryURLWithError:nil];
+  const unsigned long long size = item.size;
+  for (RDMPartial* p in [waiting copy]) {
+    const unsigned long long align = MAX(p.alignment, 1ULL);
+    const unsigned long long loc = p.range.location;
+    const unsigned long long want_end = MIN(loc + p.range.length, size);
+    unsigned long long end = complete ? size : (available / align) * align;
+    if (end > size) end = size;
+    if (available > loc) p.progress.completedUnitCount = (int64_t)MIN(available - loc, (unsigned long long)p.range.length);
+    if (!complete && end < want_end) continue;
+    const unsigned long long start = MIN((loc / align) * align, end);
+    NSURL* dst = [tmp URLByAppendingPathComponent:[NSUUID UUID].UUIDString];
+    BOOL ok = dst && fclonefileat(fd, AT_FDCWD, dst.fileSystemRepresentation, 0) == 0;
+    if (!ok && dst) {
+      // Not on the same volume: copy what is there.
+      const int out = open(dst.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+      if (out >= 0) {
+        char buf[1 << 16];
+        ok = YES;
+        for (off_t at = 0; at < (off_t)end;) {
+          const ssize_t n = pread(fd, buf, (size_t)MIN((off_t)sizeof buf, (off_t)end - at), at);
+          if (n <= 0 || pwrite(out, buf, (size_t)n, at) != n) {
+            ok = NO;
+            break;
+          }
+          at += n;
+        }
+        close(out);
+      }
+    }
+    [waiting removeObject:p];
+    if (!ok) {
+      p.completion(nil, nil, NSMakeRange(0, 0), 0,
+                   [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:nil]);
+      continue;
+    }
+    p.progress.completedUnitCount = p.progress.totalUnitCount;
+    p.completion(dst, item, NSMakeRange((NSUInteger)start, (NSUInteger)(end - start)), 0, nil);
+  }
+  if (!waiting.count) [self.partials removeObjectForKey:itemID];
 }
 
 // Top item identifier ("c3/0") of any item inside a copy, or nil.
@@ -303,10 +381,16 @@ static os_log_t Log(void) {
 - (void)fileReady:(NSString*)itemID handle:(NSFileHandle*)handle {
   RDMModel* m = [RDMModel shared];
   dispatch_async(m.queue, ^{
+    [m.growing removeObjectForKey:itemID];
+    RDMItem* item = m.items[itemID];
+    // Ranges asked for get the whole file now.
+    if (item) [m servePartials:itemID fd:handle.fileDescriptor available:item.size complete:YES];
     NSArray<RDMFetch*>* waiting = m.fetches[itemID];
     [m.fetches removeObjectForKey:itemID];
-    RDMItem* item = m.items[itemID];
-    if (!waiting.count || !item || !m.domain) return;
+    if (!waiting.count || !item || !m.domain) {
+      [handle closeFile];
+      return;
+    }
     NSError* error = nil;
     NSURL* tmp = [[NSFileProviderManager managerForDomain:m.domain] temporaryDirectoryURLWithError:&error];
     NSURL* dst = [tmp URLByAppendingPathComponent:[NSUUID UUID].UUIDString];
@@ -354,10 +438,24 @@ static os_log_t Log(void) {
   });
 }
 
+- (void)fileGrowing:(NSString*)itemID handle:(NSFileHandle*)handle {
+  RDMModel* m = [RDMModel shared];
+  dispatch_async(m.queue, ^{
+    RDMGrowing* g = [[RDMGrowing alloc] init];
+    g.handle = handle;
+    m.growing[itemID] = g;
+  });
+}
+
 - (void)progress:(NSString*)itemID bytes:(unsigned long long)bytes {
   RDMModel* m = [RDMModel shared];
   dispatch_async(m.queue, ^{
     for (RDMFetch* f in m.fetches[itemID]) f.progress.completedUnitCount = (int64_t)bytes;
+    RDMGrowing* g = m.growing[itemID];
+    if (g) {
+      g.available = bytes;
+      [m servePartials:itemID fd:g.handle.fileDescriptor available:bytes complete:NO];
+    }
   });
 }
 
@@ -366,11 +464,15 @@ static os_log_t Log(void) {
   dispatch_async(m.queue, ^{
     NSArray<RDMFetch*>* waiting = m.fetches[itemID];
     [m.fetches removeObjectForKey:itemID];
+    NSArray<RDMPartial*>* parts = m.partials[itemID];
+    [m.partials removeObjectForKey:itemID];
+    [m.growing removeObjectForKey:itemID];
     os_log_error(Log(), "%{public}@ failed: %{public}@", itemID, reason);
     NSError* e = [NSError errorWithDomain:NSFileProviderErrorDomain
                                      code:NSFileProviderErrorServerUnreachable
                                  userInfo:@{NSLocalizedDescriptionKey : reason}];
     for (RDMFetch* f in waiting) f.completion(nil, nil, e);
+    for (RDMPartial* p in parts) p.completion(nil, nil, NSMakeRange(0, 0), 0, e);
   });
 }
 
@@ -500,7 +602,8 @@ static os_log_t Log(void) {
 
 // ---- the extension -----------------------------------------------------------------
 
-@interface FilesExtension : NSObject <NSFileProviderReplicatedExtension, NSFileProviderServicing>
+@interface FilesExtension : NSObject <NSFileProviderReplicatedExtension, NSFileProviderServicing,
+                                      NSFileProviderPartialContentFetching>
 @end
 
 @implementation FilesExtension
@@ -593,6 +696,70 @@ static os_log_t Log(void) {
         fetch.completion(nil, nil, [NSError errorWithDomain:NSFileProviderErrorDomain
                                                        code:NSFileProviderErrorServerUnreachable
                                                    userInfo:nil]);
+      });
+    }] fetchItem:itemIdentifier];
+  });
+  return progress;
+}
+
+// A range of a file: what reads it (Finder copying) gets each piece as it
+// arrives, so its progress is the transfer's and it writes as it goes.
+- (NSProgress*)fetchPartialContentsForItemWithIdentifier:(NSFileProviderItemIdentifier)itemIdentifier
+                                                 version:(NSFileProviderItemVersion*)requestedVersion
+                                                 request:(NSFileProviderRequest*)request
+                                            minimalRange:(NSRange)requestedRange
+                                              aligningTo:(NSUInteger)alignment
+                                                 options:(NSFileProviderFetchContentsOptions)options
+                                       completionHandler:(void (^)(NSURL*, NSFileProviderItem, NSRange,
+                                                                   NSFileProviderMaterializationFlags,
+                                                                   NSError*))completionHandler {
+  RDMModel* m = [RDMModel shared];
+  NSProgress* progress = [NSProgress progressWithTotalUnitCount:(int64_t)MAX(requestedRange.length, (NSUInteger)1)];
+  RDMPartial* part = [[RDMPartial alloc] init];
+  part.range = requestedRange;
+  part.alignment = alignment;
+  part.progress = progress;
+  __block BOOL completed = NO;
+  part.completion = ^(NSURL* u, id<NSFileProviderItem> item, NSRange r, NSFileProviderMaterializationFlags f, NSError* e) {
+    // On the model's queue; only the first answer counts.
+    if (completed) return;
+    completed = YES;
+    completionHandler(u, item, r, f, e);
+  };
+  progress.cancellationHandler = ^{
+    dispatch_async(m.queue, ^{
+      [m.partials[itemIdentifier] removeObject:part];
+      part.completion(nil, nil, NSMakeRange(0, 0), 0,
+                      [NSError errorWithDomain:NSCocoaErrorDomain code:NSUserCancelledError userInfo:nil]);
+    });
+  };
+  dispatch_async(m.queue, ^{
+    RDMItem* item = m.items[itemIdentifier];
+    if (!item || item.kind != 'f') {
+      part.completion(nil, nil, NSMakeRange(0, 0), 0,
+                      [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNoSuchItem userInfo:nil]);
+      return;
+    }
+    os_log(Log(), "partial fetch %{public}@ at %lu, %lu bytes (alignment %lu)", itemIdentifier,
+           (unsigned long)requestedRange.location, (unsigned long)requestedRange.length, (unsigned long)alignment);
+    if (!m.partials[itemIdentifier]) m.partials[itemIdentifier] = [NSMutableArray array];
+    [m.partials[itemIdentifier] addObject:part];
+    RDMGrowing* g = m.growing[itemIdentifier];
+    if (g) [m servePartials:itemIdentifier fd:g.handle.fileDescriptor available:g.available complete:NO];
+    if (completed) return;
+    NSXPCConnection* host = m.host;
+    if (!host) {
+      [m.partials[itemIdentifier] removeObject:part];
+      part.completion(nil, nil, NSMakeRange(0, 0), 0,
+                      [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorServerUnreachable userInfo:nil]);
+      return;
+    }
+    [[host remoteObjectProxyWithErrorHandler:^(NSError* e) {
+      (void)e;
+      dispatch_async(m.queue, ^{
+        [m.partials[itemIdentifier] removeObject:part];
+        part.completion(nil, nil, NSMakeRange(0, 0), 0,
+                        [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorServerUnreachable userInfo:nil]);
       });
     }] fetchItem:itemIdentifier];
   });

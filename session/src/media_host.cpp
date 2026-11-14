@@ -428,6 +428,16 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       so.file_target = options_.file_target;
       so.file_staging_dir = options_.file_staging_dir;
     }
+    // Files the client pastes go below the picture (rdaccel's bulk channel).
+    so.send_bulk = [this](uint32_t type, std::string_view payload) {
+      rda_host* h = clipboard_host_.load();
+      return h && rda_host_send_bulk_message(h, type, reinterpret_cast<const uint8_t*>(payload.data()),
+                                             payload.size()) == RDA_OK;
+    };
+    so.bulk_queued = [this]() -> int64_t {
+      rda_host* h = clipboard_host_.load();
+      return h ? rda_host_bulk_queued_bytes(h) : -1;
+    };
     // A large paste yields to the picture: it slows down when frames are
     // skipped for congestion.
     so.congestion_events = [this]() -> uint64_t {

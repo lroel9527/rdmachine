@@ -173,6 +173,12 @@ class FileTarget {
   // Answers.
   virtual void OnList(uint64_t announce, uint32_t item, const std::vector<FileEntry>& entries,
                       const std::string& error) = 0;
+  // A regular file of the item has begun to arrive at `local_path`; it grows
+  // from there (OnProgress: how much of it is written), so what has arrived
+  // can be read before the rest (macOS: Finder copies it as it comes).
+  virtual void OnFileStarted(uint64_t announce, uint32_t item, const FileEntry& entry, const std::string& local_path) {
+    (void)announce, (void)item, (void)entry, (void)local_path;
+  }
   virtual void OnProgress(uint64_t announce, uint32_t item, const std::string& path, uint64_t bytes) = 0;
   // A file, link or folder of the item has arrived complete at `local_path`.
   virtual void OnFileReady(uint64_t announce, uint32_t item, const FileEntry& entry, const std::string& local_path) = 0;
@@ -196,6 +202,12 @@ class FileTransfer : public FileRequester {
     std::function<uint64_t()> congestion_events;
     std::function<uint64_t()> clock;  // microseconds; empty = steady clock
     std::function<void(const std::string&)> log;
+    // The data of a stream goes through send_bulk when set: rdaccel's bulk
+    // channel, below the picture. bulk_queued says how much of it waits in
+    // the transport (-1: unknown, e.g. over TCP or with an older peer); when
+    // known, the stream keeps that short instead of pacing itself.
+    SendFn send_bulk;
+    std::function<int64_t()> bulk_queued;
     // Posts a request to the clipboard's thread (ClipboardSync wires this).
     std::function<void(uint32_t kind, uint64_t announce, uint32_t item)> post;
   };
@@ -248,6 +260,9 @@ class FileTransfer : public FileRequester {
   std::string ItemDir(uint64_t announce, uint32_t item) const;
   void Log(const std::string& line);
   uint64_t Now() const;
+  bool SendData(std::string_view payload);
+  // Pump with the transport's bulk queue known: fill it up to a target.
+  uint64_t PumpBulk(uint64_t now, int64_t queued);
 
   const SendFn send_;
   const Options options_;

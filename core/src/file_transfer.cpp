@@ -481,7 +481,9 @@ struct FileTransfer::InStream : FileStreamParser::Handler {
         return symlink(e.link.c_str(), current_path.c_str()) == 0;
       case FileKind::kFile:
         fd = open(current_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        return fd >= 0;
+        if (fd < 0) return false;
+        target->OnFileStarted(announce, item, current, current_path);
+        return true;
     }
     return false;
   }
@@ -634,17 +636,73 @@ void FileTransfer::StartNextStream() {
   }
 }
 
+bool FileTransfer::SendData(std::string_view payload) {
+  return options_.send_bulk ? options_.send_bulk(kFileDataMessageType, payload) : send_(kFileDataMessageType, payload);
+}
+
+uint64_t FileTransfer::PumpBulk(uint64_t now, int64_t queued) {
+  // Enough waiting in the transport to keep a fast path busy between two
+  // refills, little enough that a cancel or a new copy is not stuck behind
+  // seconds of data. The transport's own congestion control sets the speed
+  // and puts the picture first.
+  constexpr int64_t kTarget = 1 << 20;
+  constexpr uint64_t kMaxUnacked = 64ull << 20;  // the receiver keeps up
+  constexpr uint64_t kRefillUs = 10'000;
+  OutStream& o = *out_;
+  if (now - o.reported_us >= 5'000'000) {
+    char line[160];
+    snprintf(line, sizeof line, "sending on the bulk channel, %lld KiB queued, %llu KiB unacknowledged, %.1f MB sent",
+             static_cast<long long>(queued / 1024), static_cast<unsigned long long>((o.sent - o.acked) / 1024),
+             o.sent / 1e6);
+    Log(line);
+    o.reported_us = now;
+  }
+  std::string chunk;
+  while (!o.all_sent && queued < kTarget && o.sent - o.acked < kMaxUnacked) {
+    std::string error;
+    if (!o.Next(kChunk, &chunk, &error)) {
+      Log(error);
+      DropOutgoing("error", true);
+      StartNextStream();
+      return Now();
+    }
+    if (chunk.empty()) {
+      o.all_sent = true;
+      if (o.acked == o.sent) {
+        Log("sent " + o.root + " (" + std::to_string(o.sent) + " bytes)");
+        out_.reset();
+        StartNextStream();
+        return Now();
+      }
+      break;
+    }
+    if (!SendData(EncodeClipboardData({o.id, o.sent}, chunk))) {
+      Log("sending stopped: the connection is gone");
+      out_.reset();
+      fetches_.clear();
+      return now + 1'000'000;
+    }
+    o.sent += chunk.size();
+    queued += static_cast<int64_t>(chunk.size());
+  }
+  return o.all_sent ? now + 1'000'000 : now + kRefillUs;  // all sent: acknowledgements wake the thread
+}
+
 uint64_t FileTransfer::Pump(uint64_t now) {
   const uint64_t idle = now + 1'000'000;
   if (!out_) return idle;
   OutStream& o = *out_;
+  if (o.reported_us == 0) o.reported_us = now;
+  if (options_.bulk_queued) {
+    const int64_t queued = options_.bulk_queued();
+    if (queued >= 0) return PumpBulk(now, queued);
+  }
   if (options_.congestion_events && now - o.congestion_checked_us >= kCongestionEveryUs) {
     o.congestion_checked_us = now;
     const uint64_t c = options_.congestion_events();
     if (o.congestion_seen != 0 && c > o.congestion_seen) o.pacer.OnCongestion(now);
     o.congestion_seen = std::max<uint64_t>(c, 1);
   }
-  if (o.reported_us == 0) o.reported_us = now;
   if (now - o.reported_us >= 5'000'000) {
     // What holds a slow transfer back: the rate, the window or the path.
     char line[160];
@@ -678,7 +736,7 @@ uint64_t FileTransfer::Pump(uint64_t now) {
       }
       break;
     }
-    if (!send_(kFileDataMessageType, EncodeClipboardData({o.id, o.sent}, chunk))) {
+    if (!SendData(EncodeClipboardData({o.id, o.sent}, chunk))) {
       Log("sending stopped: the connection is gone");
       out_.reset();
       fetches_.clear();

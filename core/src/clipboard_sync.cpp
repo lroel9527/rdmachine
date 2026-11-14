@@ -200,6 +200,8 @@ ClipboardSync::ClipboardSync(std::shared_ptr<Clipboard> clipboard, SendFn send, 
   fo.congestion_events = options_.congestion_events;
   fo.clock = options_.clock;
   fo.log = options_.log;
+  fo.send_bulk = options_.send_bulk;
+  fo.bulk_queued = options_.bulk_queued;
   fo.post = [this](uint32_t kind, uint64_t announce, uint32_t item) {
     {
       std::lock_guard lock(mu_);

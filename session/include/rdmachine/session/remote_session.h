@@ -76,6 +76,10 @@ class RemoteSession {
   // session moves, so do not keep the viewer pointer). Thread-safe.
   rda_status SendInput(const rda_input_event& ev);
   rda_status SendMessage(uint32_t type, const uint8_t* payload, size_t n);
+  // On rdaccel's bulk channel (below the picture), and how much of it waits
+  // there (-1: not known).
+  rda_status SendBulkMessage(uint32_t type, const uint8_t* payload, size_t n);
+  int64_t BulkQueuedBytes() const;
   // The current viewer, for statistics and tests; may change on a move.
   rda_viewer* viewer() const;
   SessionReady session() const;

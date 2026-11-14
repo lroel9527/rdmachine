@@ -51,6 +51,7 @@ class MacFileTarget : public FileTarget {
   std::optional<std::vector<std::string>> Publish(uint64_t announce, const std::vector<FileEntry>& items) override;
   void Withdraw(uint64_t announce) override;
   void OnList(uint64_t announce, uint32_t item, const std::vector<FileEntry>& entries, const std::string& error) override;
+  void OnFileStarted(uint64_t announce, uint32_t item, const FileEntry& entry, const std::string& local_path) override;
   void OnProgress(uint64_t announce, uint32_t item, const std::string& path, uint64_t bytes) override;
   void OnFileReady(uint64_t announce, uint32_t item, const FileEntry& entry, const std::string& local_path) override;
   void OnItemDone(uint64_t announce, uint32_t item, const std::string& error) override;
@@ -74,6 +75,8 @@ struct Hub {
   NSData* published = nil;
   std::set<std::string> requested;            // files the extension waits for
   std::map<std::string, std::string> ready;   // files that arrived first
+  // Files on their way: where they are written and how much is there.
+  std::map<std::string, std::pair<std::string, uint64_t>> growing;
   uint64_t counter = 0;
   // After a failed connection (RDMachine turned off in System Settings), no
   // new try for a while: each try may wait seconds on the clipboard's thread.
@@ -217,6 +220,15 @@ bool ConnectOnce(Hub& h, std::string* error) {
   return true;
 }
 
+// What has arrived of a file still on its way, for the extension to hand on
+// in pieces (Finder copies as it comes).
+void DeliverGrowing(Hub& h, const std::string& item_id, const std::string& local_path, uint64_t bytes) {
+  NSFileHandle* fh = [NSFileHandle fileHandleForReadingAtPath:NS(local_path)];
+  if (!fh) return;
+  [Proxy(h.conn) fileGrowing:NS(item_id) handle:fh];
+  if (bytes > 0) [Proxy(h.conn) progress:NS(item_id) bytes:bytes];
+}
+
 void Deliver(Hub& h, const std::string& item_id, const std::string& local_path) {
   NSFileHandle* fh = [NSFileHandle fileHandleForReadingAtPath:NS(local_path)];
   if (!fh) {
@@ -262,6 +274,7 @@ void Deliver(Hub& h, const std::string& item_id, const std::string& local_path) 
     Deliver(h, id, it->second);
     return;
   }
+  if (auto it = h.growing.find(id); it != h.growing.end()) DeliverGrowing(h, id, it->second.first, it->second.second);
   h.requested.insert(id);
   h.owner->requester->RequestFileFetch(h.announce, item);
 }
@@ -323,6 +336,7 @@ std::optional<std::vector<std::string>> MacFileTarget::Publish(uint64_t announce
     h.published = json;
     h.requested.clear();
     h.ready.clear();
+    h.growing.clear();
     std::vector<std::string> paths;
     const std::string root = Std(h.root.path);
     for (const auto& e : items) paths.push_back(root + "/" + copy_id + "/" + e.path);
@@ -354,6 +368,7 @@ void MacFileTarget::Withdraw(uint64_t announce) {
   h.published = nil;
   h.requested.clear();
   h.ready.clear();
+  h.growing.clear();
 }
 
 void MacFileTarget::OnList(uint64_t announce, uint32_t item, const std::vector<FileEntry>& entries,
@@ -374,12 +389,25 @@ void MacFileTarget::OnList(uint64_t announce, uint32_t item, const std::vector<F
   }
 }
 
+void MacFileTarget::OnFileStarted(uint64_t announce, uint32_t item, const FileEntry& entry,
+                                  const std::string& local_path) {
+  @autoreleasepool {
+    Hub& h = TheHub();
+    std::lock_guard lock(h.mu);
+    if (h.owner != this || h.announce != announce) return;
+    const std::string id = ItemId(h.copy_id, item, entry.path);
+    h.growing[id] = {local_path, 0};
+    if (h.requested.count(id) && h.conn) DeliverGrowing(h, id, local_path, 0);
+  }
+}
+
 void MacFileTarget::OnProgress(uint64_t announce, uint32_t item, const std::string& path, uint64_t bytes) {
   Hub& h = TheHub();
   std::lock_guard lock(h.mu);
-  if (h.owner != this || h.announce != announce || !h.conn) return;
+  if (h.owner != this || h.announce != announce) return;
   const std::string id = ItemId(h.copy_id, item, path);
-  if (h.requested.count(id)) [Proxy(h.conn) progress:NS(id) bytes:bytes];
+  if (auto it = h.growing.find(id); it != h.growing.end()) it->second.second = bytes;
+  if (h.requested.count(id) && h.conn) [Proxy(h.conn) progress:NS(id) bytes:bytes];
 }
 
 void MacFileTarget::OnFileReady(uint64_t announce, uint32_t item, const FileEntry& entry, const std::string& local_path) {
@@ -389,6 +417,7 @@ void MacFileTarget::OnFileReady(uint64_t announce, uint32_t item, const FileEntr
     std::lock_guard lock(h.mu);
     if (h.owner != this || h.announce != announce) return;
     const std::string id = ItemId(h.copy_id, item, entry.path);
+    h.growing.erase(id);
     if (h.requested.erase(id) && h.conn) {
       Deliver(h, id, local_path);
     } else {
