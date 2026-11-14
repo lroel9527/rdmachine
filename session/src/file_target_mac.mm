@@ -290,7 +290,10 @@ std::optional<std::vector<std::string>> MacFileTarget::Publish(uint64_t announce
       Log("copied files are pasted as names: " + error);
       return std::nullopt;
     }
-    const std::string copy_id = "c" + std::to_string(++h.counter);
+    // Unique across runs: the system remembers items by identifier, and an
+    // earlier run's "c1/0" (a failed fetch, in back-off) would stand in for
+    // this one's.
+    const std::string copy_id = "c" + std::to_string(static_cast<long long>(time(nullptr))) + "-" + std::to_string(++h.counter);
     NSData* entries = [NS(EncodeFileEntries(items)) dataUsingEncoding:NSUTF8StringEncoding];
     NSMutableDictionary* d = [NSMutableDictionary dictionary];
     d[@"copy"] = NS(copy_id);
