@@ -398,6 +398,30 @@ void MacFileTarget::OnItemDone(uint64_t announce, uint32_t item, const std::stri
   }
 }
 
+bool RegisterFileDomain(std::string* error) {
+  if (!HasExtension()) {
+    *error = "this app has no File Provider extension";
+    return false;
+  }
+  NSFileProviderDomain* d = [[NSFileProviderDomain alloc] initWithIdentifier:@"files" displayName:@"RDMachine"];
+  __block NSError* err = nil;
+  if (!Wait(^(dispatch_semaphore_t sem) {
+        [NSFileProviderManager addDomain:d
+                       completionHandler:^(NSError* e) {
+                         err = e;
+                         dispatch_semaphore_signal(sem);
+                       }];
+      })) {
+    *error = "timed out";
+    return false;
+  }
+  if (err) {
+    *error = Std(err.localizedDescription);
+    return false;
+  }
+  return true;
+}
+
 std::shared_ptr<FileTarget> SystemFileTarget() {
   static const bool has = HasExtension();
   if (!has) return nullptr;

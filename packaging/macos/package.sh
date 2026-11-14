@@ -197,8 +197,14 @@ if [ "$do_pkg" = 1 ]; then
       --identifier "$id" --version "$version" --install-location /Applications \
       ${scripts:+--scripts "$scripts"} "$stage/$id.pkg"
   }
-  component org.rdmachine.server.pkg "RDMachine Server.app" "$pkg/pkg/server-scripts"
-  component org.rdmachine.client.pkg "RDMachine.app"
+  # Each component's scripts, with the helper both use to register their
+  # File Provider domain (register-files.sh).
+  for d in server-scripts client-scripts; do
+    ditto "$pkg/pkg/$d" "$stage/$d"
+    install -m 755 "$pkg/pkg/register-files.sh" "$stage/$d/register-files.sh"
+  done
+  component org.rdmachine.server.pkg "RDMachine Server.app" "$stage/server-scripts"
+  component org.rdmachine.client.pkg "RDMachine.app" "$stage/client-scripts"
   sed -e "s/@VERSION@/$version/g" -e "s/@MIN_MACOS@/$min_macos/g" "$pkg/pkg/distribution.xml.in" >"$stage/distribution.xml"
   productbuild --quiet --distribution "$stage/distribution.xml" --resources "$pkg/pkg/resources" \
     --package-path "$stage" "$installer_pkg"

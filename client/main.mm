@@ -3121,6 +3121,14 @@ int main(int argc, char** argv) {
                     rdm::kProtocolVersion, rda_version_string(), NSAppKitVersionNumber);
         return 0;
       }
+      if (std::strcmp(argv[i], "--register-files") == 0) {
+        // The installer, as the logged-in user: add the RDMachine location
+        // so its switch is in System Settings (docs/file-paste.md).
+        std::string error;
+        const bool ok = rdm::RegisterFileDomain(&error);
+        std::printf("RDMachine location: %s\n", ok ? "registered" : error.c_str());
+        return ok ? 0 : 1;
+      }
     }
     NSApplication* app = NSApplication.sharedApplication;
     app.activationPolicy = NSApplicationActivationPolicyRegular;

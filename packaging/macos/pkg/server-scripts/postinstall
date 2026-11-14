@@ -11,6 +11,8 @@ if [ ! -x "$SERVICE" ]; then
   exit 1
 fi
 "$SERVICE" install --app "$APP"
+# Its RDMachine location (files copied on the client, pasted in Finder here).
+"$(dirname "$0")/register-files.sh" "$APP" rdmachine-server
 # Installs do not fail over this: the app is in place either way, and
 # "sudo rdmachine-service install" can be run again.
 exit 0

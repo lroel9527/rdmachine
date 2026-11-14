@@ -16,6 +16,14 @@ namespace rdm {
 // (a command-line tool, the login window, Linux).
 std::shared_ptr<FileTarget> SystemFileTarget();
 
+// Adds this app's File Provider domain and waits for the answer: the
+// switch in System Settings cannot be turned on until the domain exists.
+// The installer runs it (`--register-files`, as the logged-in user) so the
+// switch is there right after installing; otherwise the first paste adds
+// the domain. False with `error` when this process has no extension or the
+// system refused.
+bool RegisterFileDomain(std::string* error);
+
 // Where fetched items are written before the extension takes them:
 // ~/Library/Caches/<bundle id>/files (macOS).
 std::string FileStagingDir();

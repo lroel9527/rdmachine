@@ -1,0 +1,6 @@
+#!/bin/sh
+# Installer (root), after RDMachine.app is in place: register its RDMachine
+# location for the logged-in user (register-files.sh).
+APP="${2:-/Applications}/RDMachine.app"
+"$(dirname "$0")/register-files.sh" "$APP" rdmachine-client
+exit 0

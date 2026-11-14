@@ -68,6 +68,7 @@
 #include "rdmachine/protocol.h"
 #include "rdmachine/session/server_settings.h"
 #include "rdmachine/session/daemon.h"
+#include "rdmachine/session/system_files.h"
 #include "rdmachine/control_server.h"
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/system_auth.h"
@@ -272,6 +273,14 @@ int main(int argc, char** argv) {
   std::string v;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
+    if (Flag(a, "--register-files", nullptr)) {
+      // The installer, as the logged-in user: add the RDMachine location so
+      // its switch is in System Settings (docs/file-paste.md).
+      std::string error;
+      const bool ok = rdm::RegisterFileDomain(&error);
+      std::printf("RDMachine location: %s\n", ok ? "registered" : error.c_str());
+      return ok ? 0 : 1;
+    }
     if (Flag(a, "--version", nullptr)) {
       std::printf("rdmachine-server %s (protocol %d, rdaccel %s, %s)\n", rdm::VersionString(), rdm::kProtocolVersion,
                   rda_version_string(), rda_platform_name());
