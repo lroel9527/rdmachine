@@ -202,12 +202,12 @@ ClipboardSync::ClipboardSync(std::shared_ptr<Clipboard> clipboard, SendFn send, 
   fo.log = options_.log;
   fo.send_bulk = options_.send_bulk;
   fo.bulk_queued = options_.bulk_queued;
-  fo.post = [this](uint32_t kind, uint64_t announce, uint32_t item) {
+  fo.post = [this](uint32_t kind, uint64_t announce, uint32_t item, const std::string& name) {
     {
       std::lock_guard lock(mu_);
       if (stop_) return;
-      events_.emplace_back(kLocalFileEvent,
-                           std::to_string(kind) + " " + std::to_string(announce) + " " + std::to_string(item));
+      events_.emplace_back(kLocalFileEvent, std::to_string(kind) + " " + std::to_string(announce) + " " +
+                                                std::to_string(item) + "\n" + name);
     }
     wake_.notify_all();
   };
@@ -367,7 +367,10 @@ void ClipboardSync::Handle(uint32_t type, const std::string& payload, uint64_t n
     case kLocalFileEvent: {
       unsigned kind = 0, item = 0;
       unsigned long long announce = 0;
-      if (sscanf(payload.c_str(), "%u %llu %u", &kind, &announce, &item) == 3) files_->OnPosted(kind, announce, item);
+      const size_t nl = payload.find('\n');
+      if (nl != std::string::npos && sscanf(payload.c_str(), "%u %llu %u", &kind, &announce, &item) == 3) {
+        files_->OnPosted(kind, announce, item, payload.substr(nl + 1));
+      }
       return;
     }
     case kClipboardHelloMessageType:
@@ -468,7 +471,9 @@ bool ClipboardSync::Announce(const ClipboardContent& content) {
     return true;
   }
   ClipboardAnnounce a;
-  a.id = ++next_id_;
+  // Unique, not counted: the other side may still be fetching an earlier
+  // copy's files, also after a reconnect (file_transfer.h).
+  a.id = NewCopyId();
   for (const auto& f : offered.formats) a.formats.push_back(f.mime);
   a.files = std::move(files);
   if (!send_(kClipboardAnnounceMessageType, EncodeClipboardAnnounce(a))) return false;
@@ -593,7 +598,8 @@ void ClipboardSync::HandleAnnounce(const std::string& payload) {
   // fetched at once: files only come when pasted).
   std::vector<std::string> file_paths;
   if (!a->files.empty() && !options_.fetch_on_announce) {
-    if (auto paths = files_->OnPeerAnnounce(a->id, a->files)) file_paths = std::move(*paths);
+    const bool unique_ids = peer_hello_ && peer_hello_->version >= kClipboardUniqueCopyVersion;
+    if (auto paths = files_->OnPeerAnnounce(a->id, a->files, unique_ids)) file_paths = std::move(*paths);
   }
   if (formats.empty() && file_paths.empty()) return;  // nothing that could be pasted here
   peer_announce_ = *a;
@@ -638,6 +644,8 @@ void ClipboardSync::DropPromise() {
 
 void ClipboardSync::LocalFetch(uint64_t announce, const std::string& mime) {
   if (!peer_announce_ || peer_announce_->id != announce) return;  // the promise is void already
+  // Pasting the names of files that could not be offered as files.
+  if (!eager_) files_->NamesPasted();
   for (const auto& [id, m] : pending_requests_) {
     if (m == mime) return;  // asked already
   }

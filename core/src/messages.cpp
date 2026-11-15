@@ -103,12 +103,16 @@ class Reader {
 };
 
 json ToJson(const ClientHello& m) {
-  return {{"protocol", m.protocol}, {"client_name", m.client_name}, {"client_version", m.client_version}};
+  return {{"protocol", m.protocol},
+          {"revision", m.revision},
+          {"client_name", m.client_name},
+          {"client_version", m.client_version}};
 }
 json ToJson(const ServerHello& m) {
   json methods = json::array();
   for (AuthMethod a : m.auth_methods) methods.push_back(AuthMethodName(a));
   return {{"protocol", m.protocol},
+          {"revision", m.revision},
           {"server_name", m.server_name},
           {"server_version", m.server_version},
           {"auth_methods", methods}};
@@ -198,6 +202,9 @@ ParseResult ParseClientHello(Reader& r) {
       !r.Str("client_name", &m.client_name) || !r.Str("client_version", &m.client_version))
     return Bad(r.error);
   m.protocol = static_cast<int>(protocol);
+  int64_t revision = 0;  // an older client says none
+  if (!r.Int("revision", &revision, false, 0, std::numeric_limits<int>::max())) return Bad(r.error);
+  m.revision = static_cast<int>(revision);
   return Ok(std::move(m));
 }
 
@@ -208,6 +215,9 @@ ParseResult ParseServerHello(const json& j, Reader& r) {
       !r.Str("server_name", &m.server_name) || !r.Str("server_version", &m.server_version))
     return Bad(r.error);
   m.protocol = static_cast<int>(protocol);
+  int64_t revision = 0;  // an older server says none
+  if (!r.Int("revision", &revision, false, 0, std::numeric_limits<int>::max())) return Bad(r.error);
+  m.revision = static_cast<int>(revision);
   auto it = j.find("auth_methods");
   if (it == j.end() || !it->is_array()) return Bad("auth_methods: missing or not an array");
   for (const json& v : *it) {

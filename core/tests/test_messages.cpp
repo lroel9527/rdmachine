@@ -21,6 +21,20 @@ TEST(Messages, HelloRoundTrip) {
   EXPECT_EQ(out.client_version, "0.1.0");
 }
 
+TEST(Messages, HelloRevisionIsOptional) {
+  rdm::ClientHello h{rdm::kProtocolVersion, "studio-mac", "3.5.0", 7};
+  EXPECT_EQ(RoundTrip(h).revision, 7);
+  // What rdmachine 3.4 and earlier send: no revision, which is 0.
+  auto r = rdm::ParseMessage(R"({"type":"hello","protocol":0,"client_name":"a","client_version":"3.4.2"})");
+  ASSERT_TRUE(r.message) << r.error;
+  EXPECT_EQ(std::get<rdm::ClientHello>(*r.message).revision, 0);
+  auto s = rdm::ParseMessage(
+      R"({"type":"server_hello","protocol":0,"server_name":"m","server_version":"3.4.2","auth_methods":["password"]})");
+  ASSERT_TRUE(s.message) << s.error;
+  EXPECT_EQ(std::get<rdm::ServerHello>(*s.message).revision, 0);
+  EXPECT_EQ(rdm::NegotiatedRevision(0, rdm::kProtocolRevision), 0);
+}
+
 TEST(Messages, ServerHelloSkipsUnknownAuthMethods) {
   auto r = rdm::ParseMessage(
       R"({"type":"server_hello","protocol":0,"server_name":"mbp","server_version":"0.1.0",)"

@@ -53,6 +53,7 @@ struct ConnectResult {
   std::optional<int64_t> retry_after_ms;
   std::string fingerprint;
   ServerHello server;
+  int revision = 0;  // the protocol revision both sides speak (protocol.h)
   SessionReady session;
   std::unique_ptr<ClientConnection> connection;  // set on success
 };

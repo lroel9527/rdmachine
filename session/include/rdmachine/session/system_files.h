@@ -11,10 +11,13 @@ namespace rdm {
 // macOS: the File Provider extension inside this app (a domain called
 // "RDMachine"): the peer's items become placeholders that Finder copies,
 // fetched when it does. One extension and domain per process, shared by the
-// sessions of the process (each call gives a handle; the last session that
-// published owns what is on offer). Null when this process has no extension
-// (a command-line tool, the login window, Linux).
-std::shared_ptr<FileTarget> SystemFileTarget();
+// sessions of the process (each call gives a handle). A copy stays while
+// Finder copies from it, also when something else is copied meanwhile; a
+// fetch cut short by a dropped connection goes on in the next session with
+// the same `peer` (the client: the server's address; the server: "", any
+// client). Null when this process has no extension (a command-line tool,
+// the login window, Linux).
+std::shared_ptr<FileTarget> SystemFileTarget(const std::string& peer = "");
 
 // Adds this app's File Provider domain and waits for the answer: the
 // switch in System Settings cannot be turned on until the domain exists.

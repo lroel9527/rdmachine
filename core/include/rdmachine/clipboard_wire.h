@@ -5,6 +5,9 @@
 // Version 3: nothing leaves a computer until the other side pastes it.
 // Version 4: copied files and folders too (an announcement lists them,
 // file_transfer.h carries them).
+// Version 5: announcement ids are unique (random, not counted per session),
+// so a paste of files goes on across new copies and reconnects; fetches may
+// go on from where an earlier one stopped.
 //   hello    (both ways, first)  {"version":3}
 //   announce (copying side)      something was copied: its formats, nothing else
 //   request  (pasting side)      an application is pasting: send this format
@@ -39,11 +42,13 @@ constexpr uint32_t kClipboardCancelMessageType = 0x10009;
 constexpr uint32_t kClipboardAnnounceMessageType = 0x1000A;
 constexpr uint32_t kClipboardRequestMessageType = 0x1000B;
 
-constexpr int kClipboardVersion = 4;
+constexpr int kClipboardVersion = 5;
 // The first version that fetches at paste time (announce, request, ...).
 constexpr int kClipboardPromiseVersion = 3;
 // The first version with files.
 constexpr int kClipboardFilesVersion = 4;
+// The first version whose announcement ids are unique across sessions.
+constexpr int kClipboardUniqueCopyVersion = 5;
 
 // Formats, as MIME types (the same names on every system).
 inline constexpr std::string_view kMimeText = "text/plain";  // UTF-8
@@ -64,7 +69,7 @@ std::optional<ClipboardHello> DecodeClipboardHello(std::string_view payload);
 // 4 "files":[...] (file_transfer.h's entries, a name each) when files or
 // folders were copied.
 struct ClipboardAnnounce {
-  uint64_t id = 0;  // the copying side's own numbering
+  uint64_t id = 0;  // the copying side's (version 5: random, unique; earlier: counted)
   std::vector<std::string> formats;
   std::vector<FileEntry> files;
 

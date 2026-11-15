@@ -21,6 +21,7 @@ struct ClientHello {
   int protocol = kProtocolVersion;
   std::string client_name;     // e.g. the client machine's name, for logs and the approval prompt
   std::string client_version;  // rdmachine version string
+  int revision = kProtocolRevision;  // absent on the wire: 0
 };
 
 enum class AuthMethod { kPassword, kPairingCode };
@@ -31,6 +32,7 @@ struct ServerHello {
   std::string server_name;
   std::string server_version;
   std::vector<AuthMethod> auth_methods;  // what the server accepts, in its order of preference
+  int revision = kProtocolRevision;  // absent on the wire: 0
 };
 
 // Client -> server.

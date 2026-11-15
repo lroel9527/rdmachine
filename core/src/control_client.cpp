@@ -98,6 +98,7 @@ ConnectResult ConnectAndStartSession(const ClientOptions& options) {
     result.error = "incompatible";
     return result;
   }
+  result.revision = NegotiatedRevision(kProtocolRevision, server->revision);
 
   if (!ch.Send(options.auth)) {
     result.error = "connection_closed";

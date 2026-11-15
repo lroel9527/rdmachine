@@ -1,4 +1,4 @@
-# 控制协议 v0
+# 控制协议（基础版本 0，修订 1）
 
 rdmachine 的客户端和服务端之间有两条连接：
 
@@ -7,7 +7,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 控制连接先完成登录，再为这次会话生成一把新的 32 字节密钥和一个一次性令牌，经 TLS 交给客户端，客户端拿它们去建 rdaccel 连接。这样 rdaccel 每次都拿到新密钥，密码不会出现在 UDP 上，也不需要改 rdaccel（rdaccel 本身只有预共享密钥，没有前向保密和服务器身份，见 [rdaccel 能力评估](research/rdaccel-assessment.md)）。
 
-> 版本 0 是 M0 期间的不稳定版本，两端必须一致。字段和消息在版本 1 之前都可能变。
+> **版本和兼容**（3.5.0 起）：`protocol` 是基础版本，固定为 0，两端必须一样；只有旧版本跟不上的改动才会换基础版本（没有计划）。在它之上兼容地加东西用**修订**：hello 和 server_hello 各带自己的 `revision`（没有就是 0，3.4 及更早），两边都按较小的那个用；修订 N 的功能只在协商出的修订不低于 N 时用，旧的一方没有这个功能，照常工作。修订加的字段和消息都是可选的，旧的一方忽略它们。所以新旧版本可以互连，不用两边同时升级。修订 0：3.4 及以前的一切（包括后来加的可选字段 `desktop`、`text_mode` 等）；修订 1：修订本身（3.5.0）。实现在 `core/include/rdmachine/protocol.h`（`kProtocolRevision`、`NegotiatedRevision`）。
 
 ## 一次连接的完整流程
 
@@ -74,7 +74,8 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `protocol` | 整数 ≥ 0 | 协议版本，现在是 0 |
+| `protocol` | 整数 ≥ 0 | 基础版本，0 |
+| `revision` | 整数 ≥ 0，可选 | 客户端的修订（3.5.0 起是 1；没有就是 0） |
 | `client_name` | 字符串 | 客户端机器名，用于日志和以后的审批弹窗 |
 | `client_version` | 字符串 | rdmachine 版本 |
 
@@ -82,7 +83,8 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `protocol` | 整数 | 服务端的协议版本。和客户端不一致时，服务端发完 `server_hello` 紧接着发 `error`（`incompatible`）并关闭，客户端提示升级 |
+| `protocol` | 整数 | 服务端的基础版本。和客户端不一致时，服务端发完 `server_hello` 紧接着发 `error`（`incompatible`）并关闭，客户端提示升级 |
+| `revision` | 整数，可选 | 服务端的修订；两边按较小的那个用 |
 | `server_name` | 字符串 | 服务端机器名 |
 | `server_version` | 字符串 | rdmachine 版本 |
 | `auth_methods` | 字符串数组 | 服务端接受的登录方式，按推荐顺序：`password`、`pairing_code`。客户端忽略不认识的方式 |
@@ -271,24 +273,28 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 
 实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、宣布、承诺、按请求发送和接收，平台无关，Linux 上用内存剪贴板测试；`ClipboardPromise` 是放在剪贴板上的承诺）、`clipboard_wire.h`（消息）、`transfer_pacer.h`（节奏）；macOS 剪贴板（包括延迟提供数据的 `RDMPromiseProvider`）在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板；`MacPromiseTest` 用 AppKit 读承诺，和别的应用一样），`session/tests/test_media_e2e.cpp`（两端真实连接）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
 
-### 文件（剪贴板版本 4）
+### 文件（剪贴板版本 4、5）
 
-复制的是文件或文件夹时，announce 多一个 `"files"`：每一项的名字、类型（`"k"`：`f` 文件、`d` 文件夹、`l` 符号链接）、大小、权限和修改时间，没有内容。对方是版本 3 时不带，它只收到文件名（文本）。粘贴的一方要的时候才问（`core/include/rdmachine/file_transfer.h`）：
+复制的是文件或文件夹时，announce 多一个 `"files"`：每一项的名字、类型（`"k"`：`f` 文件、`d` 文件夹、`l` 符号链接）、大小、权限、修改时间和扩展属性（`"x"`，名字到 base64 值，访达标签之类，每项最多 16 KB，系统自己的记账属性不带），没有内容。对方是版本 3 时不带，它只收到文件名（文本）。
+
+版本 5（3.5.0）：announce 的 `id` 是随机的（小于 2^53，不再每个会话从 1 数），复制的一方记住最近 32 份复制，粘贴的一方按 id 来取的都答。所以正在粘贴的时候任一边又复制了别的，传输照常进行；断线重连后新会话也认得旧的 id。对方是版本 4 时，粘贴的一方把它的 id 和本会话的一个随机数混一下再用，免得和别的会话撞上（这种复制断线后不接着传）。粘贴的一方要的时候才问（`core/include/rdmachine/file_transfer.h`）：
 
 | 类型 | 方向 | 内容 |
 | --- | --- | --- |
 | `0x1000C` list request | 粘贴的一方 | JSON `{"announce":3,"id":1,"item":0}`：第 0 项（文件夹）里有什么 |
 | `0x1000D` list | 复制的一方 | JSON `{"request":1,"entries":[...]}`，整棵树，第一项是它自己（路径 `""`）；或 `{"request":1,"error":"gone"}` |
-| `0x1000E` fetch | 粘贴的一方 | 同 list request 的字段：把第 0 项整个发过来 |
+| `0x1000E` fetch | 粘贴的一方 | 同 list request 的字段：把第 0 项整个发过来；可以带 `"from":{"p":"sub/b.bin","o":4096,"s":9000,"t":1700000000}` 从那里接着发（见下） |
 | `0x1000F` data | 复制的一方 | 二进制，同剪贴板的 data，`id` 是 fetch 的 |
 | `0x10010` ack | 粘贴的一方 | 同剪贴板的 ack |
 | `0x10011` cancel | 双向 | 同剪贴板的 cancel |
 
 data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画面后面发，用路径空出来的带宽，速度由 rdaccel 的拥塞控制决定；发送方让批量通道里保持约 1 MB 待发（`rda_*_bulk_queued_bytes`），排空了再补，未确认的最多 64 MB。拿不到这个数时（走 TCP，或对端的 rdaccel 早于 1.10、批量消息退回消息通道）用剪贴板那套节奏。ack、list、fetch、cancel 仍走消息通道；两个通道之间不保证顺序，cancel 之后晚到的 data 按未知的 id 丢掉。
 
-一项的内容是一个流，像 tar：每条记录是 4 字节小端长度、JSON 头（`{"p":"sub/a.txt","k":"f","s":12,"m":420,"t":1700000000}`，链接带 `"l"`），普通文件的头后面跟 `s` 字节内容；最后一条是 `{"end":true}`。路径相对于这一项，接收方拒绝绝对路径、`.`、`..` 和空的部分。粘贴的一方一个文件开始收就告诉扩展（`OnFileStarted`），按收到的多少回报进度，扩展据此把已到的部分先交给系统（见[文件复制粘贴](file-paste.md)的“部分内容”）。
+一项的内容是一个流，像 tar：每条记录是 4 字节小端长度、JSON 头（`{"p":"sub/a.txt","k":"f","s":12,"m":420,"t":1700000000}`，链接带 `"l"`，扩展属性带 `"x"`），普通文件的头后面跟 `s` 字节内容（带 `"o"` 时只跟从第 `o` 字节起的 `s - o` 字节）；最后一条是 `{"end":true}`。
 
-粘贴的一方先写到 `~/Library/Caches/<应用标识>/files/` 下这个会话自己的文件夹，再交给 File Provider 扩展；会话结束、对方又复制了别的、这边复制了别的，都会取消正在传的并删掉暂存的。macOS 上的做法见[文件复制粘贴](file-paste.md)。
+接着传：粘贴的一方断线时记下正在写的那一项（路径、写了多少、宣布时的大小和修改时间），暂存的文件留着；新会话再取这一项时带上 `from`。复制的一方看那个文件没变（大小和修改时间一样），就把排在它前面的普通文件都发成 `"o"` 等于大小的记录（没有内容，粘贴的一方已经有了，核对一下大小），它自己从 `o` 接着发，后面的照常；变了就从头发，不带 `o` 的记录覆盖已有的。旧的复制方不认识 `from`，从头发，结果一样对。路径相对于这一项，接收方拒绝绝对路径、`.`、`..` 和空的部分。粘贴的一方一个文件开始收就告诉扩展（`OnFileStarted`），按收到的多少回报进度，扩展据此把已到的部分先交给系统（见[文件复制粘贴](file-paste.md)的“部分内容”）。
+
+粘贴的一方先写到 `~/Library/Caches/<应用标识>/files/<announce>/<项>/` 下，再交给 File Provider 扩展。暂存的跟着那份复制走：复制不在剪贴板上、也没有在取的，一分钟后连同扩展里的占位项一起删掉（`RemoveStagedCopy`）；会话结束时正在取的留着，等下一个会话（90 秒内）接着取。macOS 上的做法见[文件复制粘贴](file-paste.md)。
 
 ## 键盘语言同步
 

@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #include <dirent.h>
 
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <sstream>
 
 #include "fake_clipboard.h"
@@ -34,18 +36,6 @@ std::string ReadFile(const std::string& path) {
   return ss.str();
 }
 
-// The one session folder FileTransfer made under a staging folder.
-std::string SessionDir(const std::string& staging) {
-  std::string out;
-  if (DIR* d = opendir(staging.c_str())) {
-    while (dirent* e = readdir(d)) {
-      if (e->d_name[0] == 's') out = staging + "/" + e->d_name;
-    }
-    closedir(d);
-  }
-  return out;
-}
-
 struct TempDir {
   TempDir() {
     char tmpl[] = "/tmp/rdm-files-XXXXXX";
@@ -58,6 +48,12 @@ struct TempDir {
 // Where the peer's files would appear: records what FileTransfer tells it.
 struct FakeTarget : FileTarget {
   void SetRequester(FileRequester* r) override { requester = r; }
+  void DropRequester(FileRequester* r) override {
+    if (requester == r) requester = nullptr;
+  }
+  void OnNamesPasted() override { ++names_pasted; }
+  // Finder copying item `item` of what is published.
+  void Fetch(uint32_t item) { requester->RequestFileFetch(published, item, published_items[item].path); }
   std::optional<std::vector<std::string>> Publish(uint64_t announce, const std::vector<FileEntry>& items) override {
     if (!can_publish) return std::nullopt;
     published = announce;
@@ -88,7 +84,7 @@ struct FakeTarget : FileTarget {
   std::vector<uint64_t> withdrawn;
   std::vector<FileEntry> listed;
   std::string list_error;
-  int lists = 0, progress = 0;
+  int lists = 0, progress = 0, names_pasted = 0;
   std::vector<std::string> started;
   std::vector<std::pair<FileEntry, std::string>> ready;
   std::vector<std::string> done;
@@ -295,13 +291,13 @@ TEST(FileTransfer, PastingAFolderBringsTheWholeTree) {
   EXPECT_EQ(target->list_error, "");
   EXPECT_EQ(target->listed.size(), 6u);
 
-  target->requester->RequestFileFetch(target->published, 0);
-  target->requester->RequestFileFetch(target->published, 0);  // once is enough
+  target->Fetch(0);
+  target->Fetch(0);  // once is enough
   Exchange(a, b);
   ASSERT_EQ(target->done, std::vector<std::string>{""});
   EXPECT_EQ(a.Count(kFileFetchMessageType), 0u);
   EXPECT_EQ(b.Count(kFileFetchMessageType), 1u);
-  const std::string session = SessionDir(staging.path);
+  const std::string session = staging.path;
   const std::string got = session + "/" + std::to_string(target->published) + "/0/folder";
   EXPECT_EQ(ReadFile(got + "/a.txt"), t.a);
   EXPECT_EQ(ReadFile(got + "/sub/b.bin"), t.b);
@@ -319,14 +315,14 @@ TEST(FileTransfer, PastingAFolderBringsTheWholeTree) {
   EXPECT_EQ(target->started, (std::vector<std::string>{"a.txt", "sub/b.bin"}));
   EXPECT_GT(target->progress, 0);
 
-  target->requester->RequestFileFetch(target->published, 1);
+  target->Fetch(1);
   Exchange(a, b);
   EXPECT_EQ(ReadFile(session + "/" + std::to_string(target->published) + "/1/single.txt"), "hello");
   ASSERT_EQ(stat((session + "/" + std::to_string(target->published) + "/1/single.txt").c_str(), &st), 0);
   EXPECT_EQ(st.st_mode & 0777, 0640u);
 }
 
-TEST(FileTransfer, ANewCopyWithdrawsAndCleansUp) {
+TEST(FileTransfer, ANewCopyWithdrawsButAnOldOneCanStillBeFetched) {
   Tree t;
   TempDir staging;
   auto target = std::make_shared<FakeTarget>();
@@ -338,19 +334,245 @@ TEST(FileTransfer, ANewCopyWithdrawsAndCleansUp) {
   a.clipboard->CopyContent(c);
   Exchange(a, b);
   const uint64_t first = target->published;
-  target->requester->RequestFileFetch(first, 0);
-  Exchange(a, b);
-  const std::string dir = SessionDir(staging.path) + "/" + std::to_string(first);
-  struct stat st;
-  ASSERT_EQ(stat(dir.c_str(), &st), 0);
+  const std::string name = target->published_items[0].path;
   b.clipboard->Copy("something else");  // copied on the pasting side
   Exchange(a, b);
   EXPECT_EQ(target->withdrawn, std::vector<uint64_t>{first});
-  EXPECT_NE(stat(dir.c_str(), &st), 0);
-  // An old announcement's item is gone.
-  target->requester->RequestFileFetch(first, 0);
+  // Finder may still be copying from it: the copying side still answers.
+  target->requester->RequestFileFetch(first, 0, name);
   Exchange(a, b);
-  EXPECT_EQ(target->done.back(), "gone");
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  EXPECT_EQ(ReadFile(staging.path + "/" + std::to_string(first) + "/0/single.txt"), "hello");
+  // What is staged goes when the target says so.
+  RemoveStagedCopy(staging.path, first);
+  struct stat st;
+  EXPECT_NE(stat((staging.path + "/" + std::to_string(first)).c_str(), &st), 0);
+}
+
+TEST(FileTransfer, AnnouncementIdsAreUniqueAcrossSessions) {
+  Tree t;
+  std::set<uint64_t> ids;
+  for (int i = 0; i < 3; ++i) {
+    auto target = std::make_shared<FakeTarget>();
+    TempDir staging;
+    Side a, b(Fast(target, staging.path));
+    a.sync.Begin();
+    b.sync.Begin();
+    ClipboardContent c;
+    c.files = {t.single};
+    a.clipboard->CopyContent(c);
+    Exchange(a, b);
+    ASSERT_NE(target->published, 0u);
+    EXPECT_LT(target->published, 1ull << 53);
+    ids.insert(target->published);
+  }
+  EXPECT_EQ(ids.size(), 3u);
+}
+
+TEST(FileTransfer, APasteUnderWayGoesOnWhenEitherSideCopiesSomethingElse) {
+  TempDir src;
+  const std::string big = Pattern(6'000'000, 5);
+  WriteFile(src.path + "/big.bin", big);
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  Side a, b(Fast(target, staging.path));
+  a.sync.Begin();
+  b.sync.Begin();
+  ClipboardContent c;
+  c.files = {src.path + "/big.bin"};
+  a.clipboard->CopyContent(c);
+  Exchange(a, b);
+  const uint64_t first = target->published;
+  target->Fetch(0);
+  for (int i = 0; i < 3; ++i) Round(a, b);
+  ASSERT_TRUE(target->done.empty());
+  a.clipboard->Copy("copied on the copying side");
+  Exchange(a, b, 5);
+  b.clipboard->Copy("copied on the pasting side");
+  Exchange(a, b);
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  EXPECT_EQ(ReadFile(staging.path + "/" + std::to_string(first) + "/0/big.bin"), big);
+}
+
+TEST(FileTransfer, AFetchCutShortGoesOnInTheNextSession) {
+  TempDir src;
+  mkdir((src.path + "/f").c_str(), 0755);
+  const std::string one = Pattern(2'000'000, 6), two = Pattern(9'000'000, 7), three = Pattern(500'000, 8);
+  WriteFile(src.path + "/f/1.bin", one);
+  WriteFile(src.path + "/f/2.bin", two);
+  WriteFile(src.path + "/f/3.bin", three);
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  auto a = std::make_unique<Side>();
+  auto b = std::make_unique<Side>(Fast(target, staging.path));
+  a->sync.Begin();
+  b->sync.Begin();
+  ClipboardContent c;
+  c.files = {src.path + "/f"};
+  a->clipboard->CopyContent(c);
+  Exchange(*a, *b);
+  const uint64_t key = target->published;
+  target->Fetch(0);
+  // Part of it arrives, then the connection drops.
+  uint64_t got = 0;
+  for (int i = 0; i < 200 && got < 4'000'000; ++i) {
+    Round(*a, *b);
+    struct stat st;
+    got = 0;
+    for (const char* f : {"1.bin", "2.bin"}) {
+      if (stat((staging.path + "/" + std::to_string(key) + "/0/f/" + f).c_str(), &st) == 0) got += st.st_size;
+    }
+  }
+  ASSERT_GE(got, 4'000'000u);
+  ASSERT_LT(got, 11'000'000u);
+  ASSERT_TRUE(target->done.empty());
+  b.reset();
+  a.reset();
+  EXPECT_EQ(target->requester, nullptr);
+  EXPECT_TRUE(target->done.empty());  // still waiting, for the next session
+
+  // The next session: the target asks again; only the rest comes.
+  a = std::make_unique<Side>();
+  b = std::make_unique<Side>(Fast(target, staging.path));
+  a->sync.Begin();
+  b->sync.Begin();
+  Exchange(*a, *b);
+  ASSERT_TRUE(target->requester);
+  target->ready.clear();
+  target->requester->RequestFileFetch(key, 0, "f");
+  Exchange(*a, *b);
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  const std::string dir = staging.path + "/" + std::to_string(key) + "/0/f";
+  EXPECT_EQ(ReadFile(dir + "/1.bin"), one);
+  EXPECT_EQ(ReadFile(dir + "/2.bin"), two);
+  EXPECT_EQ(ReadFile(dir + "/3.bin"), three);
+  uint64_t sent = 0;
+  for (const auto& m : a->log) {
+    if (m.type == kFileDataMessageType) sent += m.payload.size();
+  }
+  EXPECT_LT(sent, one.size() + two.size() + three.size() - 3'000'000);
+  // Every file was reported ready again (Finder may be waiting for any).
+  int files = 0;
+  for (const auto& [e, local] : target->ready) files += e.kind == FileKind::kFile;
+  EXPECT_EQ(files, 3);
+}
+
+TEST(FileTransfer, AFileChangedMeanwhileStartsOver) {
+  TempDir src;
+  const std::string first = Pattern(8'000'000, 9);
+  WriteFile(src.path + "/x.bin", first);
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  auto a = std::make_unique<Side>();
+  auto b = std::make_unique<Side>(Fast(target, staging.path));
+  a->sync.Begin();
+  b->sync.Begin();
+  ClipboardContent c;
+  c.files = {src.path + "/x.bin"};
+  a->clipboard->CopyContent(c);
+  Exchange(*a, *b);
+  const uint64_t key = target->published;
+  target->Fetch(0);
+  for (int i = 0; i < 3; ++i) Round(*a, *b);
+  ASSERT_TRUE(target->done.empty());
+  b.reset();
+  a.reset();
+  const std::string second = Pattern(7'000'000, 10);
+  WriteFile(src.path + "/x.bin", second);
+  a = std::make_unique<Side>();
+  b = std::make_unique<Side>(Fast(target, staging.path));
+  a->sync.Begin();
+  b->sync.Begin();
+  Exchange(*a, *b);
+  target->requester->RequestFileFetch(key, 0, "x.bin");
+  Exchange(*a, *b);
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  EXPECT_EQ(ReadFile(staging.path + "/" + std::to_string(key) + "/0/x.bin"), second);
+}
+
+TEST(FileTransfer, ExtendedAttributesComeAlong) {
+  Tree t;
+  const std::string tag = "bplist00 a Finder tag";
+  ASSERT_EQ(setxattr(t.single.c_str(), "org.rdmachine.test", tag.data(), tag.size(), 0, 0), 0);
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  Side a, b(Fast(target, staging.path));
+  a.sync.Begin();
+  b.sync.Begin();
+  ClipboardContent c;
+  c.files = {t.single};
+  a.clipboard->CopyContent(c);
+  Exchange(a, b);
+  ASSERT_EQ(target->published_items.size(), 1u);
+  EXPECT_EQ(target->published_items[0].xattrs.at("org.rdmachine.test"), tag);
+  target->Fetch(0);
+  Exchange(a, b);
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  const std::string got = staging.path + "/" + std::to_string(target->published) + "/0/single.txt";
+  char buf[64] = {};
+  ASSERT_EQ(getxattr(got.c_str(), "org.rdmachine.test", buf, sizeof buf, 0, 0), static_cast<ssize_t>(tag.size()));
+  EXPECT_EQ(std::string(buf, tag.size()), tag);
+}
+
+TEST(FileTransfer, AnOlderPeersIdsAreMadeUnique) {
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  Side b(Fast(target, staging.path));
+  b.sync.Begin();
+  b.sync.PollOnce();
+  b.Receive(kClipboardHelloMessageType, EncodeClipboardHello({4}));
+  ClipboardAnnounce an;
+  an.id = 1;
+  an.files = {{"a.txt", FileKind::kFile, 3, 0644, 0, ""}};
+  b.Receive(kClipboardAnnounceMessageType, EncodeClipboardAnnounce(an));
+  b.sync.PollOnce();
+  ASSERT_NE(target->published, 0u);
+  EXPECT_NE(target->published, 1u);
+  target->Fetch(0);
+  b.sync.PollOnce();
+  bool asked = false;
+  for (const auto& m : b.log) {
+    if (m.type != kFileFetchMessageType) continue;
+    auto f = DecodeFileFetch(m.payload);
+    ASSERT_TRUE(f);
+    EXPECT_EQ(f->announce, 1u);  // what the peer knows it by
+    asked = true;
+  }
+  EXPECT_TRUE(asked);
+}
+
+TEST(FileTransfer, PastingTheNamesOfFilesThatCouldNotBeOfferedTellsTheTarget) {
+  Tree t;
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  target->can_publish = false;
+  Side a, b(Fast(target, staging.path));
+  a.sync.Begin();
+  b.sync.Begin();
+  ClipboardContent c = ClipboardContent::Text("single.txt");
+  c.files = {t.single};
+  a.clipboard->CopyContent(c);
+  Exchange(a, b);
+  EXPECT_EQ(target->names_pasted, 0);  // not on copy
+  auto p = b.clipboard->promise();
+  ASSERT_TRUE(p);
+  EXPECT_EQ(p->FetchFormat("text/plain", [&] { Round(b, a); }, 5000), std::optional<std::string>("single.txt"));
+  EXPECT_EQ(target->names_pasted, 1);
+  p->FetchFormat("text/plain", [&] { Round(b, a); }, 5000);
+  EXPECT_EQ(target->names_pasted, 1);  // once per copy
+}
+
+TEST(FileFetch, RoundTrip) {
+  FileFetch f{7, 8, 2, FileResumePoint{"sub/b.bin", 4096, 9000, 1700000000, true}};
+  EXPECT_EQ(DecodeFileFetch(EncodeFileFetch(f)), f);
+  FileFetch plain{7, 9, 0, std::nullopt};
+  EXPECT_EQ(DecodeFileFetch(EncodeFileFetch(plain)), plain);
+  // An older peer's fetch decodes the same.
+  EXPECT_EQ(DecodeFileListRequest(EncodeFileFetch(f))->id, 8u);
+  // A resume point past the file's end is not one.
+  auto bad = DecodeFileFetch(R"({"announce":1,"id":2,"item":0,"from":{"p":"a","o":10,"s":5,"t":0}})");
+  ASSERT_TRUE(bad && bad->from);
+  EXPECT_FALSE(bad->from->file);
 }
 
 TEST(FileTransfer, AVersion3PeerGetsNamesOnly) {
@@ -402,7 +624,7 @@ TEST(FileTransfer, AFileThatCannotBeReadFailsTheFetch) {
   a.clipboard->CopyContent(c);
   Exchange(a, b);
   unlink(t.single.c_str());  // gone before it is pasted
-  target->requester->RequestFileFetch(target->published, 0);
+  target->Fetch(0);
   Exchange(a, b);
   ASSERT_EQ(target->done.size(), 1u);
   EXPECT_EQ(target->done[0], "error");

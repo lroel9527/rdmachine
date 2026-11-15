@@ -110,6 +110,8 @@ class ServerSession {
   enum class State { kExpectHello, kExpectAuth, kExpectSessionRequest, kInSession, kMoving, kClosed };
   static constexpr auto kMoveTimeout = std::chrono::seconds(60);
   State state() const { return state_; }
+  // The protocol revision both sides speak (after the hello; protocol.h).
+  int revision() const { return revision_; }
 
  private:
   Output Fail(const char* code, std::string message);
@@ -127,6 +129,7 @@ class ServerSession {
   SessionOrigin origin_;  // filled at login
   std::function<Clock::time_point()> now_;
   State state_ = State::kExpectHello;
+  int revision_ = 0;
   bool started_ = false;          // the delegate runs a session for this connection
   SessionRequest last_request_;  // what a moved session starts again with
   Clock::time_point move_deadline_{}, next_try_{};

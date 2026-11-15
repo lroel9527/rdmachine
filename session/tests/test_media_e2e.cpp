@@ -452,6 +452,10 @@ struct RecordingFileTarget : FileTarget {
     std::lock_guard lock(mu);
     requester = r;
   }
+  void DropRequester(FileRequester* r) override {
+    std::lock_guard lock(mu);
+    if (requester == r) requester = nullptr;
+  }
   std::optional<std::vector<std::string>> Publish(uint64_t announce, const std::vector<FileEntry>& items) override {
     std::lock_guard lock(mu);
     published = announce;
@@ -555,7 +559,7 @@ TEST_F(FilesE2E, AFolderCopiedOnTheClientIsFetchedWhenPasted) {
     std::lock_guard lock(target_->mu);
     ASSERT_TRUE(target_->requester);
     announce = target_->published;
-    target_->requester->RequestFileFetch(announce, 0);
+    target_->requester->RequestFileFetch(announce, 0, "folder");
   }
   ASSERT_TRUE(WaitFor([&] {
     std::lock_guard lock(target_->mu);
@@ -566,9 +570,7 @@ TEST_F(FilesE2E, AFolderCopiedOnTheClientIsFetchedWhenPasted) {
     EXPECT_EQ(target_->done, std::vector<std::string>{""});
     EXPECT_EQ(target_->ready, 4);  // the folder, sub, and two files
   }
-  std::string session;
-  for (const auto& e : std::filesystem::directory_iterator(root_ + "/staging")) session = e.path().string();
-  const std::string got = session + "/" + std::to_string(announce) + "/0/folder";
+  const std::string got = root_ + "/staging/" + std::to_string(announce) + "/0/folder";
   std::ifstream f(got + "/big.bin", std::ios::binary);
   std::string read((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   EXPECT_TRUE(read == big);

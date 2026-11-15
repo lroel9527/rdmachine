@@ -2876,7 +2876,9 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // pasted on the other; they only cross when they are pasted (both ways
   // for now; a setting comes with the preferences window).
   opts.clipboard = SharedClipboard();
-  opts.file_target = rdm::SystemFileTarget();
+  // A paste cut short by a dropped connection goes on when this server is
+  // back (the reconnect makes a new session).
+  opts.file_target = rdm::SystemFileTarget(rdm::KnownHosts::Key(host, port));
   opts.file_staging_dir = rdm::FileStagingDir();
   opts.log = [](const std::string& line) { NSLog(@"%@", [NSString stringWithUTF8String:line.c_str()]); };
   __weak RemoteWindowController* weakRemote = remote;

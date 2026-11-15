@@ -5,8 +5,10 @@
 // which fetches it from the peer and hands the file over.
 //
 // Sandboxed, no network: everything comes from the app over XPC
-// (rdm_files_xpc.h). It keeps only the current copy, in memory; when it is
-// started again the app publishes again.
+// (rdm_files_xpc.h). It keeps the copies the app published, in memory, each
+// in a folder of its own, until the app withdraws them (a copy stays while
+// Finder copies from it, also when a newer one came); when it is started
+// again the app publishes them again.
 #import <FileProvider/FileProvider.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <os/log.h>
@@ -35,6 +37,9 @@ static os_log_t Log(void) {
 @property(nonatomic) long long mtime;
 @property(nonatomic, copy, nullable) NSString* link;
 @property(nonatomic, copy) NSString* version;
+// Finder tags and the like: the system puts them on the placeholder and on
+// what is copied from it.
+@property(nonatomic, strong, nullable) NSDictionary<NSString*, NSData*>* extendedAttributes;
 @end
 
 @implementation RDMItem
@@ -115,7 +120,7 @@ static os_log_t Log(void) {
 @property(nonatomic, readonly) dispatch_queue_t queue;
 @property(nonatomic, strong, nullable) NSFileProviderDomain* domain;
 @property(nonatomic, strong, nullable) NSXPCConnection* host;
-@property(nonatomic, copy, nullable) NSString* currentCopy;
+@property(nonatomic, strong) NSMutableArray<NSString*>* publishedCopies;  // oldest first
 @property(nonatomic, strong) NSMutableDictionary<NSString*, RDMItem*>* items;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray<NSString*>*>* children;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray*>* waitingTree;  // top item -> blocks
@@ -141,6 +146,7 @@ static os_log_t Log(void) {
   if (!(self = [super init])) return nil;
   _queue = dispatch_queue_create("org.rdmachine.files.model", DISPATCH_QUEUE_SERIAL);
   _items = [NSMutableDictionary dictionary];
+  _publishedCopies = [NSMutableArray array];
   _children = [NSMutableDictionary dictionary];
   _waitingTree = [NSMutableDictionary dictionary];
   _fetches = [NSMutableDictionary dictionary];
@@ -176,30 +182,44 @@ static os_log_t Log(void) {
                                }];
 }
 
-// Removes the current copy (recorded as a deletion of its folder).
-- (void)dropCopy {
-  if (!self.currentCopy) return;
+// Whether `ident` is `copyID`'s folder or anything in it.
+static BOOL InCopy(NSString* ident, NSString* copyID) {
+  return [ident isEqualToString:copyID] || [ident hasPrefix:[copyID stringByAppendingString:@"/"]];
+}
+
+// Removes a copy (recorded as a deletion of its folder).
+- (void)dropCopy:(NSString*)copyID {
+  if (![self.publishedCopies containsObject:copyID]) return;
+  [self.publishedCopies removeObject:copyID];
   self.generation++;
-  [self.deleted addObject:self.currentCopy];
+  [self.deleted addObject:copyID];
   [self.deletedAt addObject:@(self.generation)];
   NSError* gone = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNoSuchItem userInfo:nil];
-  for (NSString* key in self.fetches) {
+  for (NSString* key in self.fetches.allKeys) {
+    if (!InCopy(key, copyID)) continue;
     for (RDMFetch* f in self.fetches[key]) f.completion(nil, nil, gone);
+    [self.fetches removeObjectForKey:key];
   }
-  [self.fetches removeAllObjects];
-  for (NSString* key in self.partials) {
+  for (NSString* key in self.partials.allKeys) {
+    if (!InCopy(key, copyID)) continue;
     for (RDMPartial* p in self.partials[key]) p.completion(nil, nil, NSMakeRange(0, 0), 0, gone);
+    [self.partials removeObjectForKey:key];
   }
-  [self.partials removeAllObjects];
-  [self.growing removeAllObjects];
-  for (NSString* key in self.waitingTree) {
+  for (NSString* key in self.growing.allKeys) {
+    if (InCopy(key, copyID)) [self.growing removeObjectForKey:key];
+  }
+  for (NSString* key in self.waitingTree.allKeys) {
+    if (!InCopy(key, copyID)) continue;
     for (void (^b)(NSString*) in self.waitingTree[key]) b(@"gone");
+    [self.waitingTree removeObjectForKey:key];
   }
-  [self.waitingTree removeAllObjects];
-  [self.items removeAllObjects];
-  [self.children removeAllObjects];
-  self.children[NSFileProviderRootContainerItemIdentifier] = [NSMutableArray array];
-  self.currentCopy = nil;
+  for (NSString* key in self.items.allKeys) {
+    if (InCopy(key, copyID)) [self.items removeObjectForKey:key];
+  }
+  for (NSString* key in self.children.allKeys) {
+    if (InCopy(key, copyID)) [self.children removeObjectForKey:key];
+  }
+  [self.children[NSFileProviderRootContainerItemIdentifier] removeObject:copyID];
 }
 
 - (RDMItem*)itemFromEntry:(NSDictionary*)e identifier:(NSString*)ident parent:(NSString*)parent name:(NSString*)name {
@@ -213,7 +233,18 @@ static os_log_t Log(void) {
   it.mode = [e[@"m"] unsignedIntValue];
   it.mtime = [e[@"t"] longLongValue];
   it.link = e[@"l"];
-  it.version = self.currentCopy ?: @"";
+  NSArray* parts = [ident componentsSeparatedByString:@"/"];
+  it.version = parts.firstObject ?: @"";
+  NSDictionary* x = e[@"x"];
+  if ([x isKindOfClass:NSDictionary.class] && x.count) {
+    NSMutableDictionary<NSString*, NSData*>* attrs = [NSMutableDictionary dictionary];
+    for (NSString* name in x) {
+      NSString* v = x[name];
+      NSData* d = [v isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:v options:0] : nil;
+      if ([name isKindOfClass:NSString.class] && d) attrs[name] = d;
+    }
+    it.extendedAttributes = attrs;
+  }
   return it;
 }
 
@@ -306,8 +337,13 @@ static os_log_t Log(void) {
       reply(@"malformed");
       return;
     }
-    [m dropCopy];
-    m.currentCopy = copyID;
+    if ([m.publishedCopies containsObject:copyID]) {
+      // Published again (the app reconnected to a new extension process,
+      // or once more): what is known of it stays.
+      reply(nil);
+      return;
+    }
+    [m.publishedCopies addObject:copyID];
     m.generation++;
     RDMItem* folder = [[RDMItem alloc] init];
     folder.identifier = copyID;
@@ -318,7 +354,7 @@ static os_log_t Log(void) {
     folder.mtime = (long long)[NSDate date].timeIntervalSince1970;
     folder.version = copyID;
     m.items[copyID] = folder;
-    m.children[NSFileProviderRootContainerItemIdentifier] = [NSMutableArray arrayWithObject:copyID];
+    [m.children[NSFileProviderRootContainerItemIdentifier] addObject:copyID];
     NSMutableArray* tops = [NSMutableArray array];
     for (NSUInteger i = 0; i < entries.count; i++) {
       NSDictionary* e = entries[i];
@@ -337,8 +373,9 @@ static os_log_t Log(void) {
 - (void)withdrawCopy:(NSString*)copyID {
   RDMModel* m = [RDMModel shared];
   dispatch_async(m.queue, ^{
-    if (![m.currentCopy isEqualToString:copyID]) return;
-    [m dropCopy];
+    if (![m.publishedCopies containsObject:copyID]) return;
+    [m dropCopy:copyID];
+    os_log(Log(), "withdrew %{public}@", copyID);
     [m signal];
   });
 }

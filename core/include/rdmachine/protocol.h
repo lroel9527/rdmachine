@@ -5,9 +5,19 @@
 
 namespace rdm {
 
-// 0 while the protocol is unstable (M0). Both sides must match exactly until
-// version 1; from 1 on, a side accepts any version >= its minimum.
+// The base protocol: frozen at 0. Both sides must have the same base; it
+// changes only for a change an older side cannot follow (none is planned).
 inline constexpr int kProtocolVersion = 0;
+// What this build adds on top of the base, compatibly. Each side says its
+// revision in its hello (absent: 0) and both use the lower one; a feature of
+// revision N is used only when the negotiated revision is at least N, and an
+// older side simply does without it. Fields and messages a revision adds
+// are optional, so an older side ignores them.
+//   0  everything up to rdmachine 3.4 (optional fields since then: desktop,
+//      text_mode, ...)
+//   1  the revision itself (rdmachine 3.5)
+inline constexpr int kProtocolRevision = 1;
+inline constexpr int NegotiatedRevision(int a, int b) { return a < b ? a : b; }
 
 inline constexpr uint16_t kDefaultPort = 4100;  // TCP control (TLS) and UDP media
 

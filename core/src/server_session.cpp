@@ -115,6 +115,7 @@ ServerSession::Output ServerSession::OnHello(const ClientHello& m) {
     out.close = true;
     return out;
   }
+  revision_ = NegotiatedRevision(m.revision, kProtocolRevision);
   state_ = State::kExpectAuth;
   return out;
 }

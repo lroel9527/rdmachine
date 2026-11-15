@@ -101,6 +101,21 @@ TEST_F(ServerSessionTest, IncompatibleProtocol) {
   EXPECT_EQ(ErrorCode(out), "incompatible");
 }
 
+TEST_F(ServerSessionTest, NegotiatesTheLowerRevision) {
+  {
+    auto s = Make();
+    auto out = s.Handle(ClientHello{0, "old client", "3.4.2", 0});
+    EXPECT_FALSE(out.close);
+    EXPECT_EQ(std::get<ServerHello>(out.send[0]).revision, kProtocolRevision);
+    EXPECT_EQ(s.revision(), 0);
+  }
+  {
+    auto s = Make();
+    s.Handle(ClientHello{0, "newer client", "9.0.0", kProtocolRevision + 5});
+    EXPECT_EQ(s.revision(), kProtocolRevision);
+  }
+}
+
 TEST_F(ServerSessionTest, OutOfOrderMessages) {
   {
     auto s = Make();
