@@ -121,6 +121,9 @@ static os_log_t Log(void) {
 @property(nonatomic, strong, nullable) NSFileProviderDomain* domain;
 @property(nonatomic, strong, nullable) NSXPCConnection* host;
 @property(nonatomic, strong) NSMutableArray<NSString*>* publishedCopies;  // oldest first
+// Which app connection published each copy: when that app goes away (it
+// quit, crashed or restarted), so do its copies; nothing could fetch them.
+@property(nonatomic, strong) NSMapTable<NSString*, NSXPCConnection*>* publishers;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, RDMItem*>* items;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray<NSString*>*>* children;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSMutableArray*>* waitingTree;  // top item -> blocks
@@ -147,6 +150,7 @@ static os_log_t Log(void) {
   _queue = dispatch_queue_create("org.rdmachine.files.model", DISPATCH_QUEUE_SERIAL);
   _items = [NSMutableDictionary dictionary];
   _publishedCopies = [NSMutableArray array];
+  _publishers = [NSMapTable strongToWeakObjectsMapTable];
   _children = [NSMutableDictionary dictionary];
   _waitingTree = [NSMutableDictionary dictionary];
   _fetches = [NSMutableDictionary dictionary];
@@ -319,6 +323,18 @@ static BOOL InCopy(NSString* ident, NSString* copyID) {
   c.invalidationHandler = ^{
     dispatch_async(m.queue, ^{
       if (m.host == weak) m.host = nil;
+      // The app that published these is gone (a new process of it publishes
+      // its own again).
+      BOOL dropped = NO;
+      for (NSString* copyID in [m.publishedCopies copy]) {
+        NSXPCConnection* owner = [m.publishers objectForKey:copyID];
+        if (owner && owner != weak) continue;
+        [m dropCopy:copyID];
+        [m.publishers removeObjectForKey:copyID];
+        os_log(Log(), "dropped %{public}@: the app that published it is gone", copyID);
+        dropped = YES;
+      }
+      if (dropped) [m signal];
     });
   };
   dispatch_sync(m.queue, ^{ m.host = c; });
@@ -329,6 +345,7 @@ static BOOL InCopy(NSString* ident, NSString* copyID) {
 
 - (void)publish:(NSData*)json reply:(void (^)(NSString*))reply {
   RDMModel* m = [RDMModel shared];
+  NSXPCConnection* from = [NSXPCConnection currentConnection];
   dispatch_async(m.queue, ^{
     NSDictionary* d = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
     NSString* copyID = [d isKindOfClass:NSDictionary.class] ? d[@"copy"] : nil;
@@ -337,6 +354,7 @@ static BOOL InCopy(NSString* ident, NSString* copyID) {
       reply(@"malformed");
       return;
     }
+    if (from) [m.publishers setObject:from forKey:copyID];
     if ([m.publishedCopies containsObject:copyID]) {
       // Published again (the app reconnected to a new extension process,
       // or once more): what is known of it stays.
@@ -375,6 +393,7 @@ static BOOL InCopy(NSString* ident, NSString* copyID) {
   dispatch_async(m.queue, ^{
     if (![m.publishedCopies containsObject:copyID]) return;
     [m dropCopy:copyID];
+    [m.publishers removeObjectForKey:copyID];
     os_log(Log(), "withdrew %{public}@", copyID);
     [m signal];
   });
