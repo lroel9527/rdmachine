@@ -6,4 +6,6 @@ namespace rdm {
 // and the client scales the picture.
 VirtualDesktopFactory SystemVirtualDesktop() { return {}; }
 
+std::unique_ptr<DisplayAwake> KeepDisplaysAwake(const std::string&) { return std::make_unique<DisplayAwake>(); }
+
 }  // namespace rdm

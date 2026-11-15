@@ -22,7 +22,7 @@ if(APPLE)
   # The XPC protocol shared with the File Provider extension.
   target_include_directories(rdm_session PRIVATE ${PROJECT_SOURCE_DIR}/fileprovider)
   target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security"
-    "-framework FileProvider")
+    "-framework FileProvider" "-framework IOKit")
 else()
   target_sources(rdm_session PRIVATE src/system_clipboard.cpp src/virtual_desktop.cpp src/login_screen.cpp src/code_identity.cpp)
 endif()

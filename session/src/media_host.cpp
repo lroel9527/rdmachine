@@ -520,6 +520,8 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     return std::nullopt;
   }
   host_ = host;
+  // No display sleep while someone is connected: it would stop the capture.
+  awake_ = KeepDisplaysAwake("rdmachine: a remote session is connected");
   text_mode_ = request.text_mode;
   mode_host_ = host;
   status_ = MediaHostStatus{};
@@ -810,6 +812,7 @@ void MediaHost::EndSession() {
     injector_ = nullptr;
     clipboard_.reset();  // no on_message after rda_host_destroy
     desktop = std::move(desktop_);
+    awake_.reset();
   }
   if (injector) rda_injector_destroy(injector);
   // Last, with nothing capturing or pointing at it any more: the real

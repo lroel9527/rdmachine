@@ -34,4 +34,15 @@ using VirtualDesktopFactory =
 // This platform's factory; empty where there is none (Linux for now).
 VirtualDesktopFactory SystemVirtualDesktop();
 
+// While it exists, the displays do not sleep for being idle (macOS: a
+// PreventUserIdleDisplaySleep power assertion), as during Apple's Screen
+// Sharing: a display that goes to sleep stops the screen capture, and the
+// client's picture would stand still until the remote user clicks or types.
+// Creating it also wakes a display that is asleep already.
+class DisplayAwake {
+ public:
+  virtual ~DisplayAwake() = default;
+};
+std::unique_ptr<DisplayAwake> KeepDisplaysAwake(const std::string& reason);
+
 }  // namespace rdm

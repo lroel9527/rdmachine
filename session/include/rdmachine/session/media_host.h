@@ -161,6 +161,7 @@ class MediaHost : public ServerDelegate {
   std::string client_input_source_, input_source_;
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_
+  std::unique_ptr<DisplayAwake> awake_;      // guarded by mu_; while a session runs
   std::thread desktop_thread_;                // runs while desktop_ exists
   std::thread capture_thread_;                // runs while a session does
   std::mutex capture_mu_;

@@ -2,6 +2,7 @@
 
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 
 #include <chrono>
 #include <thread>
@@ -293,6 +294,37 @@ VirtualDesktopFactory SystemVirtualDesktop() {
     }
     return desktop;
   };
+}
+
+namespace {
+
+class MacDisplayAwake final : public DisplayAwake {
+ public:
+  explicit MacDisplayAwake(const std::string& reason) {
+    CFStringRef why = CFStringCreateWithCString(nullptr, reason.c_str(), kCFStringEncodingUTF8);
+    IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep, kIOPMAssertionLevelOn,
+                                why ? why : CFSTR("rdmachine session"), &id_);
+    // Wakes a display that is asleep (the assertion alone keeps it asleep).
+    IOPMAssertionID activity = kIOPMNullAssertionID;
+    if (IOPMAssertionDeclareUserActivity(why ? why : CFSTR("rdmachine session"), kIOPMUserActiveLocal, &activity) ==
+            kIOReturnSuccess &&
+        activity != kIOPMNullAssertionID) {
+      IOPMAssertionRelease(activity);
+    }
+    if (why) CFRelease(why);
+  }
+  ~MacDisplayAwake() override {
+    if (id_ != kIOPMNullAssertionID) IOPMAssertionRelease(id_);
+  }
+
+ private:
+  IOPMAssertionID id_ = kIOPMNullAssertionID;
+};
+
+}  // namespace
+
+std::unique_ptr<DisplayAwake> KeepDisplaysAwake(const std::string& reason) {
+  return std::make_unique<MacDisplayAwake>(reason);
 }
 
 }  // namespace rdm
