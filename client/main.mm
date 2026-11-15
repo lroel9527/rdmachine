@@ -50,6 +50,7 @@
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/remote_session.h"
 #include "rdmachine/session/system_clipboard.h"
+#include "rdmachine/session/file_progress.h"
 #include "rdmachine/session/system_files.h"
 
 namespace {
@@ -1849,7 +1850,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
+                                   NSMenuDelegate>
 @end
 
 // One connection being made. Several can be under way at once (a window
@@ -1920,6 +1922,14 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSMutableArray<RemoteWindowController*>* _remotes;
   NSMutableArray<ConnectAttempt*>* _attempts;
   std::unique_ptr<rdm::KnownHosts> _knownHosts;
+  // The menu bar icon: the connections, and a ring while files pasted here
+  // are on their way (Finder shows nothing until they are all here).
+  NSStatusItem* _statusItem;
+  NSMenu* _statusMenu;
+  NSTimer* _statusTimer;
+  BOOL _statusMenuOpen;
+  NSString* _statusSymbol;  // the icon now shown (nil: the ring)
+  int _ringStep;            // -1: no ring; 0..40, or 41 when the size is unknown
 }
 
 static NSTextField* Label(NSString* text, NSRect frame) {
@@ -2003,6 +2013,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _attempts = [NSMutableArray array];
   _knownHosts = std::make_unique<rdm::KnownHosts>(rdm::DefaultConfigDir() + "/known_hosts");
   [self buildMenu];
+  [self buildStatusItem];
   _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 280)
                                                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                  backing:NSBackingStoreBuffered
@@ -2851,6 +2862,112 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kSyncKeyboardLanguageKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kSyncKeyboardLanguageChanged object:nil];
+}
+
+// ---- the menu bar icon ----------------------------------------------------
+
+- (void)buildStatusItem {
+  _ringStep = -1;
+  _statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+  _statusItem.button.toolTip = @"RDMachine";
+  _statusMenu = [[NSMenu alloc] init];
+  _statusMenu.delegate = self;
+  _statusMenu.autoenablesItems = NO;
+  _statusItem.menu = _statusMenu;
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(fileReceiveChanged:)
+                                             name:@(rdm::kFileReceiveChangedNotification)
+                                           object:nil];
+  [self updateStatusItem];
+  // Common modes: it keeps up while the menu is open.
+  _statusTimer = [NSTimer timerWithTimeInterval:2.0 target:self selector:@selector(updateStatusItem) userInfo:nil repeats:YES];
+  [NSRunLoop.mainRunLoop addTimer:_statusTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)fileReceiveChanged:(NSNotification*)note {
+  const rdm::FileReceiveProgress p = rdm::CurrentFileReceive();
+  int step = -1;
+  if (p.active) step = p.total > 0 ? static_cast<int>(40.0 * std::min<uint64_t>(p.bytes, p.total) / p.total) : 41;
+  if (step == _ringStep) return;  // only when it changes: a new image relays out the item
+  _ringStep = step;
+  if (step >= 0) {
+    _statusSymbol = nil;
+    _statusItem.button.image = RDMFileProgressRing(step > 40 ? -1 : step / 40.0);
+    _statusItem.button.toolTip = @(rdm::DescribeFileReceive(p).c_str());
+  }
+  [self updateStatusItem];
+}
+
+// The icon (unless the ring is up) and the menu, as things are now.
+- (void)updateStatusItem {
+  if (_ringStep < 0) {
+    NSUInteger live = 0;
+    for (RemoteWindowController* r in _remotes) live += r.isLive ? 1 : 0;
+    NSString* symbol = live > 0 ? @"macwindow.on.rectangle" : @"macwindow";
+    if (![symbol isEqualToString:_statusSymbol]) {
+      _statusSymbol = symbol;
+      NSImage* img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:@"RDMachine"];
+      [img setTemplate:YES];
+      _statusItem.button.image = img;
+      _statusItem.button.title = img ? @"" : @"RD";
+    }
+    _statusItem.button.toolTip = live == 0   ? @"RDMachine：没有连接"
+                                 : live == 1 ? @"RDMachine：已连接 1 台电脑"
+                                             : [NSString stringWithFormat:@"RDMachine：已连接 %lu 台电脑", (unsigned long)live];
+  } else {
+    _statusItem.button.toolTip = @(rdm::DescribeFileReceive(rdm::CurrentFileReceive()).c_str());
+  }
+  // Keep the menu filled at all times: a status item whose menu is empty
+  // does not open on recent macOS (menus hosted out of process).
+  if (!_statusMenuOpen) [self rebuildStatusMenu];
+}
+
+- (void)rebuildStatusMenu {
+  [_statusMenu removeAllItems];
+  auto add = [&](NSString* title, SEL action) {
+    NSMenuItem* item = [_statusMenu addItemWithTitle:title action:action keyEquivalent:@""];
+    item.target = self;
+    item.enabled = action != nullptr;
+    return item;
+  };
+  const rdm::FileReceiveProgress p = rdm::CurrentFileReceive();
+  if (p.active) {
+    add(@(rdm::DescribeFileReceive(p).c_str()), nullptr);
+    [_statusMenu addItem:NSMenuItem.separatorItem];
+  }
+  if (_remotes.count == 0) add(@"没有连接", nullptr);
+  for (RemoteWindowController* r in _remotes) {
+    NSString* name = r.serverName ?: r.target ?: @"?";
+    NSString* state = r.isLive ? [r liveDetail] : r.reconnectingSince ? @"正在重新连接…" : @"未连接";
+    NSMenuItem* item = add([NSString stringWithFormat:@"%@ — %@", name, state], @selector(showRemoteFromStatus:));
+    item.representedObject = r;
+  }
+  [_statusMenu addItem:NSMenuItem.separatorItem];
+  add(@"电脑列表…", @selector(showMachinesFromStatus:));
+  add(@"新建连接…", @selector(newConnection:));
+  [_statusMenu addItem:NSMenuItem.separatorItem];
+  NSMenuItem* quit = [_statusMenu addItemWithTitle:@"退出 rdmachine" action:@selector(terminate:) keyEquivalent:@""];
+  quit.target = NSApp;
+}
+
+- (void)showRemoteFromStatus:(NSMenuItem*)item {
+  RemoteWindowController* r = item.representedObject;
+  if (![_remotes containsObject:r]) return;
+  [NSApp activateIgnoringOtherApps:YES];
+  [r.window makeKeyAndOrderFront:nil];
+}
+
+- (void)showMachinesFromStatus:(id)sender {
+  [NSApp activateIgnoringOtherApps:YES];
+  [self showMachines];
+}
+
+- (void)menuWillOpen:(NSMenu*)menu {
+  if (menu == _statusMenu) _statusMenuOpen = YES;
+}
+
+- (void)menuDidClose:(NSMenu*)menu {
+  if (menu == _statusMenu) _statusMenuOpen = NO;
 }
 
 - (void)buildMenu {

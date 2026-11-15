@@ -1,4 +1,5 @@
 #include "rdmachine/session/system_clipboard.h"
+#include "rdmachine/session/file_progress.h"
 #include "rdmachine/session/system_files.h"
 
 namespace rdm {
@@ -11,5 +12,7 @@ bool RegisterFileDomain(std::string* error) {
   return false;
 }
 std::string FileStagingDir() { return {}; }
+FileReceiveProgress CurrentFileReceive() { return {}; }
+std::string DescribeFileReceive(const FileReceiveProgress&) { return {}; }
 
 }  // namespace rdm

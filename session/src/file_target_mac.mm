@@ -10,6 +10,7 @@
 #include <set>
 
 #include "rdm_files_xpc.h"
+#include "rdmachine/session/file_progress.h"
 #include "rdmachine/session/system_files.h"
 
 namespace rdm {
@@ -92,6 +93,14 @@ struct Copy {
   // Files on their way: where they are written and how much is there.
   std::map<std::string, std::pair<std::string, uint64_t>> growing;
   std::set<uint32_t> active;  // items being fetched
+  // For the receive progress: per item being fetched, its size and how much
+  // of each of its files is here; a folder's size once its tree is known.
+  struct Receive {
+    uint64_t total = 0;  // 0: not known yet
+    std::map<std::string, uint64_t> files;
+  };
+  std::map<uint32_t, Receive> receiving;
+  std::map<uint32_t, uint64_t> tree_bytes;
   CFAbsoluteTime last_used = 0;
   uint64_t timer = 0;  // the pending linger or orphan check (a newer one replaces it)
 
@@ -112,6 +121,11 @@ struct Hub {
   NSDate* retry_after = nil;
   std::string last_error;
   CFAbsoluteTime prompted = 0;
+  // Receive progress: a notification is on its way; the speed estimate.
+  bool progress_posting = false;
+  uint64_t rate_bytes = 0;
+  CFAbsoluteTime rate_at = 0;
+  double rate = 0;
 };
 
 Hub& TheHub() {
@@ -159,6 +173,7 @@ bool Wait(void (^start)(dispatch_semaphore_t)) {
 // ---- keeping copies --------------------------------------------------------------
 
 void Check(const std::string& copy_id, uint64_t timer);
+void NoteProgress(Hub& h);
 
 // Comes back to the copy after `seconds` (replacing an earlier check).
 void Schedule(Hub& h, Copy& c, double seconds) {
@@ -180,7 +195,9 @@ void Retire(Hub& h, const std::string& copy_id) {
   }
   rdm::RemoveStagedCopy(rdm::FileStagingDir(), c.announce);
   h.by_announce.erase(c.announce);
+  const bool receiving = !c.receiving.empty();
   h.copies.erase(it);
+  if (receiving) NoteProgress(h);
 }
 
 // After something changed: a copy off the clipboard with nothing under way
@@ -197,6 +214,8 @@ void FailAll(Hub& h, Copy& c, NSString* reason) {
   }
   c.requested.clear();
   c.active.clear();
+  c.receiving.clear();
+  NoteProgress(h);
 }
 
 void Check(const std::string& copy_id, uint64_t timer) {
@@ -221,6 +240,42 @@ void Check(const std::string& copy_id, uint64_t timer) {
 
 std::string NameOf(const Copy& c, uint32_t item) { return item < c.items.size() ? c.items[item].path : std::string(); }
 
+// The receive progress changed: the apps hear of it (a few times a second
+// at most). With the lock held.
+void NoteProgress(Hub& h) {
+  if (h.progress_posting) return;
+  h.progress_posting = true;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    {
+      Hub& hh = TheHub();
+      std::lock_guard lock(hh.mu);
+      hh.progress_posting = false;
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:@(rdm::kFileReceiveChangedNotification) object:nil];
+  });
+}
+
+// An item of the copy is being fetched now (counted in the progress).
+void StartReceiving(Hub& h, Copy& c, uint32_t item) {
+  if (c.receiving.count(item) || item >= c.items.size()) return;
+  Copy::Receive& r = c.receiving[item];
+  const rdm::FileEntry& e = c.items[item];
+  if (e.kind == rdm::FileKind::kFile) {
+    r.total = e.size;
+  } else if (auto t = c.tree_bytes.find(item); t != c.tree_bytes.end()) {
+    r.total = t->second;
+  }
+  NoteProgress(h);
+}
+
+// How much of a file of the item is here.
+void Received(Hub& h, Copy& c, uint32_t item, const std::string& path, uint64_t bytes) {
+  auto it = c.receiving.find(item);
+  if (it == c.receiving.end()) return;
+  it->second.files[path] = bytes;
+  NoteProgress(h);
+}
+
 // Asks `r` for what the copy waits for (a session that came back, or took
 // over): each item once; it goes on where the last one stopped.
 void Resume(Copy& c, rdm::FileRequester* r) {
@@ -233,6 +288,7 @@ void Resume(Copy& c, rdm::FileRequester* r) {
   }
   for (uint32_t item : items) {
     c.active.insert(item);
+    StartReceiving(TheHub(), c, item);
     r->RequestFileFetch(c.announce, item, NameOf(c, item));
   }
   if (!items.empty()) Log("going on with " + c.id + " in the new session");
@@ -461,6 +517,7 @@ void Deliver(Hub& h, const std::string& item_id, const std::string& local_path) 
     return;
   }
   c.active.insert(item);
+  StartReceiving(h, c, item);
   c.fetcher->RequestFileFetch(c.announce, item, NameOf(c, item));
 }
 @end
@@ -621,6 +678,13 @@ void MacFileTarget::OnList(uint64_t announce, uint32_t item, const std::vector<F
     if (!error.empty()) {
       d[@"error"] = NS(error);
     } else {
+      uint64_t bytes = 0;
+      for (const auto& e : entries) bytes += e.kind == FileKind::kFile ? e.size : 0;
+      c->tree_bytes[item] = bytes;
+      if (auto r = c->receiving.find(item); r != c->receiving.end() && r->second.total == 0) {
+        r->second.total = bytes;
+        NoteProgress(h);
+      }
       NSData* j = [NS(EncodeFileEntries(entries)) dataUsingEncoding:NSUTF8StringEncoding];
       d[@"entries"] = [NSJSONSerialization JSONObjectWithData:j options:0 error:nil] ?: @[];
     }
@@ -637,6 +701,7 @@ void MacFileTarget::OnFileStarted(uint64_t announce, uint32_t item, const FileEn
     if (!c) return;
     const std::string id = ItemId(c->id, item, entry.path);
     c->growing[id] = {local_path, entry.offset};
+    Received(h, *c, item, entry.path, entry.offset);
     if (c->requested.count(id) && h.conn) DeliverGrowing(h, id, local_path, entry.offset);
   }
 }
@@ -648,6 +713,7 @@ void MacFileTarget::OnProgress(uint64_t announce, uint32_t item, const std::stri
   if (!c) return;
   const std::string id = ItemId(c->id, item, path);
   if (auto it = c->growing.find(id); it != c->growing.end()) it->second.second = bytes;
+  Received(h, *c, item, path, bytes);
   if (c->requested.count(id) && h.conn) [Proxy(h.conn) progress:NS(id) bytes:bytes];
 }
 
@@ -661,6 +727,7 @@ void MacFileTarget::OnFileReady(uint64_t announce, uint32_t item, const FileEntr
     const std::string id = ItemId(c->id, item, entry.path);
     c->growing.erase(id);
     c->ready[id] = local_path;  // for a later paste of the same copy, too
+    Received(h, *c, item, entry.path, entry.size);
     if (c->requested.erase(id) && h.conn) Deliver(h, id, local_path);
   }
 }
@@ -671,6 +738,7 @@ void MacFileTarget::OnItemDone(uint64_t announce, uint32_t item, const std::stri
   Copy* c = ByAnnounce(h, announce);
   if (!c) return;
   c->active.erase(item);
+  if (c->receiving.erase(item)) NoteProgress(h);
   const std::string prefix = ItemId(c->id, item);
   for (auto it = c->requested.begin(); it != c->requested.end();) {
     if (*it == prefix || it->rfind(prefix + "/", 0) == 0) {
@@ -681,6 +749,66 @@ void MacFileTarget::OnItemDone(uint64_t announce, uint32_t item, const std::stri
     }
   }
   Settle(h, *c);
+}
+
+FileReceiveProgress CurrentFileReceive() {
+  Hub& h = TheHub();
+  std::lock_guard lock(h.mu);
+  FileReceiveProgress p;
+  bool unknown = false;
+  for (const auto& [id, c] : h.copies) {
+    for (const auto& [item, r] : c.receiving) {
+      if (p.items++ == 0) p.name = NameOf(c, item);
+      for (const auto& [path, bytes] : r.files) p.bytes += bytes;
+      p.total += r.total;
+      unknown = unknown || r.total == 0;
+    }
+  }
+  p.active = p.items > 0;
+  if (unknown) p.total = 0;
+  const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if (!p.active) {
+    h.rate = 0;
+    h.rate_at = 0;
+  } else if (h.rate_at == 0 || p.bytes < h.rate_bytes) {
+    h.rate_at = now;
+    h.rate_bytes = p.bytes;
+  } else if (now - h.rate_at >= 0.5) {
+    const double inst = static_cast<double>(p.bytes - h.rate_bytes) / (now - h.rate_at);
+    h.rate = h.rate > 0 ? 0.7 * h.rate + 0.3 * inst : inst;
+    h.rate_at = now;
+    h.rate_bytes = p.bytes;
+  }
+  p.bytes_per_second = h.rate;
+  return p;
+}
+
+std::string DescribeFileReceive(const FileReceiveProgress& p) {
+  if (!p.active) return {};
+  auto mb = [](double b) {
+    char s[32];
+    snprintf(s, sizeof s, b >= 100e6 ? "%.0f" : "%.1f", b / 1e6);
+    return std::string(s);
+  };
+  std::string out = "正在接收“" + p.name + "”";
+  if (p.items > 1) out += " 等 " + std::to_string(p.items) + " 项";
+  out += " " + mb(static_cast<double>(p.bytes));
+  out += p.total > 0 ? " / " + mb(static_cast<double>(p.total)) + " MB" : " MB";
+  if (p.bytes_per_second > 1000) {
+    char s[64];
+    snprintf(s, sizeof s, " · %.1f MB/秒", p.bytes_per_second / 1e6);
+    out += s;
+    if (p.total > p.bytes) {
+      const double left = static_cast<double>(p.total - p.bytes) / p.bytes_per_second;
+      if (left < 60) {
+        snprintf(s, sizeof s, " · 约 %.0f 秒", std::max(1.0, left));
+      } else {
+        snprintf(s, sizeof s, " · 约 %.0f 分钟", std::ceil(left / 60));
+      }
+      out += s;
+    }
+  }
+  return out;
 }
 
 bool RegisterFileDomain(std::string* error) {
@@ -726,3 +854,44 @@ std::string FileStagingDir() {
 }
 
 }  // namespace rdm
+
+NSImage* RDMFileProgressRing(double fraction) {
+  const NSSize size = NSMakeSize(18, 18);
+  NSImage* img = [NSImage imageWithSize:size
+                                flipped:NO
+                         drawingHandler:^BOOL(NSRect rect) {
+                           const NSPoint c = NSMakePoint(NSMidX(rect), NSMidY(rect));
+                           const CGFloat r = 6.5, w = 2.2;
+                           // The track, faint (a template image keeps only alpha).
+                           NSBezierPath* track = [NSBezierPath bezierPath];
+                           [track appendBezierPathWithArcWithCenter:c radius:r startAngle:0 endAngle:360];
+                           track.lineWidth = w;
+                           [[NSColor colorWithWhite:0 alpha:0.3] setStroke];
+                           [track stroke];
+                           // What has arrived, clockwise from the top.
+                           const double f = fraction < 0 ? 0.15 : std::clamp(fraction, 0.0, 1.0);
+                           if (f > 0) {
+                             NSBezierPath* arc = [NSBezierPath bezierPath];
+                             [arc appendBezierPathWithArcWithCenter:c radius:r startAngle:90 endAngle:90 - 360 * f clockwise:YES];
+                             arc.lineWidth = w;
+                             arc.lineCapStyle = NSLineCapStyleRound;
+                             [[NSColor blackColor] setStroke];
+                             [arc stroke];
+                           }
+                           // A small arrow in the middle: something is coming in.
+                           NSBezierPath* arrow = [NSBezierPath bezierPath];
+                           [arrow moveToPoint:NSMakePoint(c.x, c.y + 2.6)];
+                           [arrow lineToPoint:NSMakePoint(c.x, c.y - 2.4)];
+                           [arrow moveToPoint:NSMakePoint(c.x - 2.2, c.y - 0.4)];
+                           [arrow lineToPoint:NSMakePoint(c.x, c.y - 2.6)];
+                           [arrow lineToPoint:NSMakePoint(c.x + 2.2, c.y - 0.4)];
+                           arrow.lineWidth = 1.4;
+                           arrow.lineCapStyle = NSLineCapStyleRound;
+                           arrow.lineJoinStyle = NSLineJoinStyleRound;
+                           [[NSColor blackColor] setStroke];
+                           [arrow stroke];
+                           return YES;
+                         }];
+  [img setTemplate:YES];
+  return img;
+}

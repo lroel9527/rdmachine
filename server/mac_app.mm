@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "mac_app.h"
+#include "rdmachine/session/file_progress.h"
 
 namespace {
 
@@ -207,6 +208,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   NSTimer* _timer;
   bool _menuOpen;
   NSString* _symbol;  // the icon now shown
+  int _ringStep;      // the receive ring now shown (-1: none; 0..40, or 41 when the size is unknown)
 }
 
 - (instancetype)initWithRuntime:(rdm::ServerRuntime*)runtime info:(const rdm::MenuBarAppInfo&)info {
@@ -214,6 +216,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _runtime = runtime;
   _info = info;
   _menuOpen = false;
+  _ringStep = -1;
   _item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
   _item.button.toolTip = @"RDMachine Server";
   _menu = [[NSMenu alloc] init];
@@ -227,6 +230,12 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     [weakSelf applySettings:s];
   };
 
+  // Files pasted here on their way: the icon becomes a ring (Finder shows
+  // nothing until the download is over).
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(receiveChanged:)
+                                             name:@(rdm::kFileReceiveChangedNotification)
+                                           object:nil];
   [self tick];
   // Common modes: keep updating while the menu is open.
   _timer = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(tick) userInfo:nil repeats:YES];
@@ -234,8 +243,31 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   return self;
 }
 
+- (void)receiveChanged:(NSNotification*)note {
+  const rdm::FileReceiveProgress p = rdm::CurrentFileReceive();
+  int step = -1;
+  if (p.active) step = p.total > 0 ? static_cast<int>(40.0 * std::min<uint64_t>(p.bytes, p.total) / p.total) : 41;
+  if (step == _ringStep) return;  // only when it changes: a new image relays out the item
+  _ringStep = step;
+  if (step < 0) {
+    _symbol = nil;  // the usual icon again, at the next tick
+    _item.button.toolTip = @"RDMachine Server";
+    [self tick];
+    return;
+  }
+  _item.button.image = RDMFileProgressRing(step > 40 ? -1 : step / 40.0);
+  _item.button.title = @"";
+  _item.button.toolTip = @(rdm::DescribeFileReceive(p).c_str());
+}
+
 - (void)tick {
   const rdm::MediaHostStatus st = _runtime->Status();
+  if (_ringStep >= 0) {
+    // While a receive is shown: its line in the tooltip and the menu.
+    _item.button.toolTip = @(rdm::DescribeFileReceive(rdm::CurrentFileReceive()).c_str());
+    if (!_menuOpen) [self rebuildMenu];
+    return;
+  }
 
   // Only when it changes: setting the image relays out the status item,
   // which can swallow a click that is in progress.
@@ -279,6 +311,8 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   const uint16_t port = _runtime->port();
 
   [self add:[NSString stringWithFormat:@"RDMachine Server %@", NS(_info.version)] action:nullptr];
+  const rdm::FileReceiveProgress receiving = rdm::CurrentFileReceive();
+  if (receiving.active) [self add:@(rdm::DescribeFileReceive(receiving).c_str()) action:nullptr];
   if (_runtime->agent_mode()) {
     // The daemon listens; this app shows this session's desktop for it.
     [self add:(_runtime->daemon_connected()
