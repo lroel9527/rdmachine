@@ -15,9 +15,9 @@ inline constexpr int kProtocolVersion = 0;
 // are optional, so an older side ignores them.
 //   0  everything up to rdmachine 3.4 (optional fields since then: desktop,
 //      text_mode, ...)
-//   1  the revision itself (rdmachine 3.5)
+//   1  the revision itself (rdmachine 4.0)
 //   2  extended desktops: session_request.extra_desktops and
-//      session_ready.extra_displays (rdmachine 3.6)
+//      session_ready.extra_displays (rdmachine 4.0)
 inline constexpr int kProtocolRevision = 2;
 inline constexpr int NegotiatedRevision(int a, int b) { return a < b ? a : b; }
 

@@ -22,7 +22,7 @@ TEST(Messages, HelloRoundTrip) {
 }
 
 TEST(Messages, HelloRevisionIsOptional) {
-  rdm::ClientHello h{rdm::kProtocolVersion, "studio-mac", "3.5.0", 7};
+  rdm::ClientHello h{rdm::kProtocolVersion, "studio-mac", "4.0.0", 7};
   EXPECT_EQ(RoundTrip(h).revision, 7);
   // What rdmachine 3.4 and earlier send: no revision, which is 0.
   auto r = rdm::ParseMessage(R"({"type":"hello","protocol":0,"client_name":"a","client_version":"3.4.2"})");
