@@ -46,6 +46,10 @@ struct MediaHostOptions {
   // Builds the desktop a client asks for (docs/protocol.md, "请求桌面").
   // Empty = requests are not honoured: the display is shared as it is.
   VirtualDesktopFactory virtual_desktop;
+  // Extra displays of an extended desktop (request.extra_desktops); each is
+  // served on a port of its own: udp_port + 2 + i (UDP or TCP as the main
+  // picture). Empty: none are built.
+  ExtraDesktopFactory extra_desktop;
   // The server runs in the login window session (docs/decisions.md, "登录
   // 窗口和锁屏"): any account on this computer may log in with its password
   // (there is no logged-in user to match), and sessions say so to the
@@ -109,6 +113,28 @@ class MediaHost : public ServerDelegate {
   MediaHostStatus Status();
 
  private:
+  // An extra display of an extended desktop: its display, picture
+  // connection and input (docs/protocol.md, "扩展桌面").
+  struct Extra {
+    MediaHost* self = nullptr;
+    size_t index = 0;
+    std::unique_ptr<VirtualDesktop> desktop;
+    int32_t display_index = -1;  // rdaccel's
+    ExtraDisplay info;
+    rda_host* host = nullptr;
+    rda_injector* injector = nullptr;
+    std::mutex inject_mu;
+  };
+  static int OnExtraAuth(void* user, const uint8_t* token, size_t n);
+  static void OnExtraInput(void* user, const rda_input_event* ev);
+  static void OnExtraState(void* user, rda_state state, rda_status reason);
+  static void OnExtraError(void* user, rda_status status, const char* message);
+  // Builds the extra displays asked for, next to the main desktop (mu_ held).
+  void BuildExtraDesktops(const SessionRequest& request);
+  // Starts their hosts once the main one runs (mu_ held); those that cannot
+  // start are dropped. Adds what works to `grant`.
+  void StartExtraHosts(const SessionRequest& request, const SessionSecrets& secrets, const SessionOrigin& origin,
+                       bool inject, SessionGrant* grant);
   static int OnAuth(void* user, const uint8_t* token, size_t n);
   static void OnInput(void* user, const rda_input_event* ev);
   static void OnState(void* user, rda_state state, rda_status reason);
@@ -162,6 +188,7 @@ class MediaHost : public ServerDelegate {
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_
   std::unique_ptr<DisplayAwake> awake_;      // guarded by mu_; while a session runs
+  std::vector<std::unique_ptr<Extra>> extras_;  // guarded by mu_
   std::thread desktop_thread_;                // runs while desktop_ exists
   std::thread capture_thread_;                // runs while a session does
   std::mutex capture_mu_;

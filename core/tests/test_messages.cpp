@@ -35,6 +35,26 @@ TEST(Messages, HelloRevisionIsOptional) {
   EXPECT_EQ(rdm::NegotiatedRevision(0, rdm::kProtocolRevision), 0);
 }
 
+TEST(Messages, ExtendedDesktopRoundTrip) {
+  rdm::SessionRequest req;
+  req.desktop = rdm::DesktopSpec{2880, 1800, 2.0};
+  req.extra_desktops = {{rdm::DesktopSpec{1920, 1080, 1.0}, 1440, 0}, {rdm::DesktopSpec{2560, 1440, 2.0}, -1280, -100}};
+  auto out = RoundTrip(req);
+  EXPECT_EQ(out.extra_desktops, req.extra_desktops);
+  rdm::SessionReady ready;
+  ready.port = 4100;
+  ready.extra_displays = {{4102, rdm::DesktopSpec{1920, 1080, 1.0}, 1440, 0}};
+  EXPECT_EQ(RoundTrip(ready).extra_displays, ready.extra_displays);
+  // Without them (an older side): none.
+  EXPECT_TRUE(RoundTrip(rdm::SessionRequest{}).extra_desktops.empty());
+  // More than three is refused.
+  auto r = rdm::ParseMessage(
+      R"({"type":"session_request","extra_desktops":[)"
+      R"({"desktop":{"width":10,"height":10},"x":0,"y":0},{"desktop":{"width":10,"height":10},"x":0,"y":0},)"
+      R"({"desktop":{"width":10,"height":10},"x":0,"y":0},{"desktop":{"width":10,"height":10},"x":0,"y":0}]})");
+  EXPECT_FALSE(r.message);
+}
+
 TEST(Messages, ServerHelloSkipsUnknownAuthMethods) {
   auto r = rdm::ParseMessage(
       R"({"type":"server_hello","protocol":0,"server_name":"mbp","server_version":"0.1.0",)"

@@ -303,6 +303,11 @@ void MediaHost::CaptureLoop() {
     {
       std::lock_guard lock(mu_);  // host_ stays alive while it is held
       if (host_) {
+        for (auto& x : extras_) {
+          if (!x->host) continue;
+          rda_host_stop_capture(x->host);
+          rda_host_start_capture(x->host);
+        }
         rda_host_stop_capture(host_);
         ok = rda_host_start_capture(host_) == RDA_OK;
         if (ok) {
@@ -369,9 +374,17 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     }
   }
 
+  // An extended desktop: more displays beside this one.
+  if (desktop) {
+    desktop_ = std::move(desktop);  // (BuildExtraDesktops places them next to it)
+    BuildExtraDesktops(request);
+    desktop = std::move(desktop_);
+  }
+
   // Displays.
   size_t count = 0;
   if (rda_list_displays(nullptr, 0, &count) != RDA_OK || count == 0) {
+    extras_.clear();
     *error = "no_display";
     Log(std::string("no display: ") + rda_last_error());
     return std::nullopt;
@@ -379,11 +392,13 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   std::vector<rda_display_info> infos(count);
   infos[0].struct_size = sizeof(rda_display_info);
   if (rda_list_displays(infos.data(), infos.size(), &count) != RDA_OK) {
+    extras_.clear();
     *error = "no_display";
     return std::nullopt;
   }
   infos.resize(std::min(count, infos.size()));
   if (display_index < 0 || static_cast<size_t>(display_index) >= infos.size()) {
+    extras_.clear();
     *error = "no_display";
     return std::nullopt;
   }
@@ -469,6 +484,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     Log(std::string("cannot listen for media on port ") + std::to_string(grant.port) + ": " + rda_last_error());
     if (injector) rda_injector_destroy(injector);
     clipboard_.reset();
+    extras_.clear();
     *error = "internal";
     return std::nullopt;
   }
@@ -515,6 +531,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     injector_ = nullptr;
     if (injector) rda_injector_destroy(injector);
     clipboard_.reset();
+    extras_.clear();
     tokens_.Consume(secrets.auth_token, Clock::now());
     *error = hs == RDA_ERR_PERMISSION ? "capture_denied" : "internal";
     return std::nullopt;
@@ -571,6 +588,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       (request.text_mode ? " (text mode)" : "") + (options_.login_window ? " (login window)" : "") + ", media " +
       (grant.transport == MediaTransport::kTcp ? "tcp" : "udp on " + media_where) + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
+  StartExtraHosts(request, secrets, origin, injector != nullptr, &grant);
   if (!login.password.empty()) {
     const LoginScreenState ls = options_.login_screen ? options_.login_screen() : QueryLoginScreen();
     if (injector && (options_.login_window || ls.screen_locked)) {
@@ -784,6 +802,159 @@ void MediaHost::TypeLogin(std::string username, std::string password, bool type_
                             : connected ? " (the session ended)" : " (the viewer did not connect)"));
 }
 
+int MediaHost::OnExtraAuth(void* user, const uint8_t* token, size_t n) {
+  auto* x = static_cast<Extra*>(user);
+  const bool ok = x->self->tokens_.Consume(std::span<const uint8_t>(token, token ? n : 0), Clock::now());
+  x->self->Log("extra display " + std::to_string(x->index + 2) + ": viewer " + (ok ? "admitted" : "refused"));
+  return ok ? 1 : 0;
+}
+
+void MediaHost::OnExtraInput(void* user, const rda_input_event* ev) {
+  auto* x = static_cast<Extra*>(user);
+  std::lock_guard lock(x->inject_mu);
+  if (x->injector && ev) rda_injector_inject(x->injector, ev);
+}
+
+void MediaHost::OnExtraState(void* user, rda_state state, rda_status reason) {
+  auto* x = static_cast<Extra*>(user);
+  if (state == RDA_STATE_CONNECTED) x->self->Log("extra display " + std::to_string(x->index + 2) + ": media connected");
+  if (state == RDA_STATE_DISCONNECTED) {
+    x->self->Log("extra display " + std::to_string(x->index + 2) + ": media disconnected: " + rda_status_str(reason));
+  }
+}
+
+void MediaHost::OnExtraError(void* user, rda_status status, const char* message) {
+  auto* x = static_cast<Extra*>(user);
+  const std::string what = message ? message : "";
+  x->self->Log("extra display " + std::to_string(x->index + 2) + ": " + rda_status_str(status) + ": " + what);
+  if (what.rfind("capture stopped", 0) == 0) {
+    {
+      std::lock_guard c(x->self->capture_mu_);
+      x->self->capture_restart_ = true;
+    }
+    x->self->capture_cv_.notify_all();
+  }
+}
+
+void MediaHost::BuildExtraDesktops(const SessionRequest& request) {
+  extras_.clear();
+  if (!desktop_ || request.extra_desktops.empty()) return;
+  if (!options_.extra_desktop) {
+    Log("an extended desktop was asked for, but this server cannot build one; one display only");
+    return;
+  }
+  for (size_t i = 0; i < request.extra_desktops.size() && i < kMaxExtraDesktops; ++i) {
+    const ExtraDesktop& want = request.extra_desktops[i];
+    const std::optional<DesktopSpec> planned = PlanDesktop(want.desktop);
+    if (!planned) {
+      Log("extra display " + std::to_string(i + 2) + " ignored: not a usable size");
+      continue;
+    }
+    std::string why;
+    auto d = options_.extra_desktop(*planned, want.x, want.y, static_cast<int>(i + 2), &why);
+    if (!d) {
+      Log("extra display " + std::to_string(i + 2) + " could not be built: " + why);
+      continue;
+    }
+    auto x = std::make_unique<Extra>();
+    x->self = this;
+    x->index = i;
+    x->info.desktop = d->spec();
+    x->info.x = want.x;
+    x->info.y = want.y;
+    x->desktop = std::move(d);
+    int32_t ox = want.x, oy = want.y;
+    x->desktop->Origin(&ox, &oy);
+    Log("extra display " + std::to_string(i + 2) + " built: " + FormatDesktopSpec(x->info.desktop) + " at " +
+        std::to_string(ox) + "," + std::to_string(oy) + " (asked for " + std::to_string(want.x) + "," +
+        std::to_string(want.y) + ")");
+    extras_.push_back(std::move(x));
+  }
+}
+
+void MediaHost::StartExtraHosts(const SessionRequest& request, const SessionSecrets& secrets,
+                                const SessionOrigin& origin, bool inject, SessionGrant* grant) {
+  if (extras_.empty()) return;
+  // rdaccel's numbering of the displays: found by where each one is.
+  size_t count = 0;
+  std::vector<rda_display_info> infos;
+  if (rda_list_displays(nullptr, 0, &count) == RDA_OK && count > 0) {
+    infos.resize(count);
+    infos[0].struct_size = sizeof(rda_display_info);
+    if (rda_list_displays(infos.data(), infos.size(), &count) == RDA_OK) {
+      infos.resize(std::min(count, infos.size()));
+    } else {
+      infos.clear();
+    }
+  }
+  std::vector<std::unique_ptr<Extra>> started;
+  for (auto& x : extras_) {
+    const std::string name = "extra display " + std::to_string(x->index + 2);
+    int32_t ox = 0, oy = 0;
+    if (!x->desktop->Origin(&ox, &oy)) continue;
+    for (const rda_display_info& d : infos) {
+      if (d.x == ox && d.y == oy && d.index != 0) x->display_index = d.index;
+    }
+    if (x->display_index < 0) {
+      Log(name + ": not among the displays that can be captured; left out");
+      continue;
+    }
+    if (inject) {
+      rda_injector_config ic;
+      rda_injector_config_default(&ic);
+      ic.display_index = x->display_index;
+      if (rda_injector_create(&ic, &x->injector) != RDA_OK) x->injector = nullptr;
+    }
+    const uint16_t port = static_cast<uint16_t>(options_.udp_port + 2 + x->index);
+    rda_transport* transport = nullptr;
+    std::string where = "every address";
+    const rda_status ts = request.transport == MediaTransport::kTcp ? rda_tcp_bind(port, &transport)
+                                                                     : BindMediaUdp(origin.local_ip, port, &transport, &where);
+    if (ts != RDA_OK) {
+      Log(name + ": cannot listen on port " + std::to_string(port) + ": " + rda_last_error());
+      if (x->injector) rda_injector_destroy(x->injector);
+      x->injector = nullptr;
+      continue;
+    }
+    const SessionSecrets own = ExtraDisplaySecrets(secrets, x->index);
+    rda_host_config cfg;
+    rda_host_config_default(&cfg);
+    if (options_.fps > 0) cfg.fps = options_.fps;
+    if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
+    cfg.display_index = x->display_index;
+    cfg.encryption_key = own.key.data();  // copied by rdaccel
+    cfg.keep_serving = 0;
+    cfg.capture_own_windows = 1;
+    cfg.text_mode = request.text_mode ? 1 : 0;
+    cfg.user = x.get();
+    cfg.on_auth = &MediaHost::OnExtraAuth;
+    cfg.on_input = &MediaHost::OnExtraInput;
+    cfg.on_state = &MediaHost::OnExtraState;
+    cfg.on_error = &MediaHost::OnExtraError;
+    tokens_.Add(own.auth_token, Clock::now());
+    if (rda_host_create(transport, &cfg, &x->host) != RDA_OK) {  // takes the transport
+      Log(name + ": rdaccel host failed: " + rda_last_error());
+      x->host = nullptr;
+    } else if (rda_host_start_capture(x->host) != RDA_OK) {
+      Log(name + ": capture failed: " + rda_last_error());
+      rda_host_destroy(x->host);
+      x->host = nullptr;
+    }
+    if (!x->host) {
+      if (x->injector) rda_injector_destroy(x->injector);
+      x->injector = nullptr;
+      continue;
+    }
+    x->info.port = port;
+    grant->extra_displays.push_back(x->info);
+    Log(name + ": serving rdaccel display " + std::to_string(x->display_index) + " on " +
+        (request.transport == MediaTransport::kTcp ? "tcp" : "udp " + where) + " port " + std::to_string(port) +
+        (x->injector ? "" : " (view only)"));
+    started.push_back(std::move(x));
+  }
+  extras_ = std::move(started);  // the others' displays go now
+}
+
 void MediaHost::EndSession() {
   // Not under mu_: the stats and desktop threads take mu_ for their work.
   StopTypeLogin();  // it injects through injector_, destroyed below
@@ -794,11 +965,19 @@ void MediaHost::EndSession() {
   rda_host* host;
   rda_injector* injector;
   std::unique_ptr<VirtualDesktop> desktop;
+  std::vector<std::unique_ptr<Extra>> extras;
   {
     std::lock_guard lock(mu_);
     host = host_;
     host_ = nullptr;
     if (!host) return;
+    // The extra displays' hosts first (no callback after rda_host_destroy).
+    for (auto& x : extras_) {
+      if (x->host) rda_host_destroy(x->host);
+      x->host = nullptr;
+    }
+    extras = std::move(extras_);
+    extras_.clear();
     status_ = MediaHostStatus{};
     media_connected_ = false;
     if (clipboard_) clipboard_->Stop();  // its thread may be sending through the host
@@ -815,6 +994,14 @@ void MediaHost::EndSession() {
     awake_.reset();
   }
   if (injector) rda_injector_destroy(injector);
+  for (auto& x : extras) {
+    if (x->injector) rda_injector_destroy(x->injector);
+    x->injector = nullptr;
+  }
+  if (!extras.empty()) {
+    extras.clear();  // their displays go before the main one puts the real displays back
+    Log("extra displays removed");
+  }
   // Last, with nothing capturing or pointing at it any more: the real
   // displays are as they were before the session.
   if (desktop) {

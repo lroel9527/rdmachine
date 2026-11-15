@@ -16,7 +16,9 @@ inline constexpr int kProtocolVersion = 0;
 //   0  everything up to rdmachine 3.4 (optional fields since then: desktop,
 //      text_mode, ...)
 //   1  the revision itself (rdmachine 3.5)
-inline constexpr int kProtocolRevision = 1;
+//   2  extended desktops: session_request.extra_desktops and
+//      session_ready.extra_displays (rdmachine 3.6)
+inline constexpr int kProtocolRevision = 2;
 inline constexpr int NegotiatedRevision(int a, int b) { return a < b ? a : b; }
 
 inline constexpr uint16_t kDefaultPort = 4100;  // TCP control (TLS) and UDP media

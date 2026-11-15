@@ -79,6 +79,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
     mo.file_staging_dir = FileStagingDir();
   }
   mo.virtual_desktop = SystemVirtualDesktop();
+  mo.extra_desktop = SystemExtraDesktop();
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;
   mo.log = options_.log;

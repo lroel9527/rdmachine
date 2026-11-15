@@ -2,6 +2,7 @@
 
 #include <chrono>
 
+#include "rdmachine/server_session.h"  // ExtraDisplaySecrets
 #include "rdmachine/session/viewer.h"
 
 namespace rdm {
@@ -252,6 +253,7 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
     rda_viewer_destroy(fresh);
     return false;
   }
+  CloseExtras();  // the old desktop's extra displays are gone with it
   rda_viewer* old = nullptr;
   {
     std::lock_guard lock(mu_);
@@ -358,10 +360,73 @@ void RemoteSession::KeepAlive() {
   if (!ended.empty() && !stop_ && options_.on_ended) options_.on_ended(ended);
 }
 
+bool RemoteSession::ConnectExtra(size_t i, rda_viewer_config config, std::string* error) {
+  SessionReady ready;
+  {
+    std::lock_guard lock(mu_);
+    if (i >= session_.extra_displays.size()) {
+      *error = "no such extra display";
+      return false;
+    }
+    ready = session_;
+  }
+  const ExtraDisplay& x = ready.extra_displays[i];
+  SessionSecrets main;
+  main.key = ready.key;
+  main.auth_token = ready.auth_token;
+  const SessionSecrets own = ExtraDisplaySecrets(main, i);
+  ready.port = x.port;
+  ready.key = own.key;
+  ready.auth_token = own.auth_token;
+  ready.desktop = x.desktop;
+  rda_viewer* v = nullptr;
+  if (CreateSessionViewer(MediaHostAddress(), ready, config, &v, error) != RDA_OK) return false;
+  const int wait_ms = ready.transport == MediaTransport::kUdp && udp_wait_ms_ > 0 ? udp_wait_ms_
+                                                                                 : options_.control.timeout_ms;
+  rda_state st = RDA_STATE_CONNECTING;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  while (!stop_ && (st = rda_viewer_get_state(v)) == RDA_STATE_CONNECTING &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  if (stop_ || st != RDA_STATE_CONNECTED) {
+    rda_viewer_destroy(v);
+    *error = "the extra display's picture did not connect";
+    return false;
+  }
+  rda_viewer* old = nullptr;
+  {
+    std::lock_guard lock(mu_);
+    if (extras_.size() <= i) extras_.resize(i + 1, nullptr);
+    old = extras_[i];
+    extras_[i] = v;
+  }
+  if (old) rda_viewer_destroy(old);
+  if (options_.log) options_.log("extra display " + std::to_string(i + 2) + " connected");
+  return true;
+}
+
+rda_status RemoteSession::SendExtraInput(size_t i, const rda_input_event& ev) {
+  std::lock_guard lock(mu_);
+  return i < extras_.size() && extras_[i] ? rda_viewer_send_input(extras_[i], &ev) : RDA_ERR_CLOSED;
+}
+
+void RemoteSession::CloseExtras() {
+  std::vector<rda_viewer*> extras;
+  {
+    std::lock_guard lock(mu_);
+    extras.swap(extras_);
+  }
+  for (rda_viewer* v : extras) {
+    if (v) rda_viewer_destroy(v);  // no callback of it runs after this
+  }
+}
+
 void RemoteSession::Close() {
   if (clipboard_) clipboard_->Stop();  // before the viewer it sends through
   stop_ = true;
   if (thread_.joinable()) thread_.join();
+  CloseExtras();
   rda_viewer* v = nullptr;
   {
     std::lock_guard lock(mu_);

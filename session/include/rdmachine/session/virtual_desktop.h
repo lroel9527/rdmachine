@@ -25,6 +25,12 @@ class VirtualDesktop {
   // display meanwhile. On failure the desktop stays as it was if possible;
   // spec() says what it is.
   virtual bool Resize(const DesktopSpec& planned, std::string* error) = 0;
+  // Where it is on the desktop: its top-left corner in points (the main
+  // desktop is at 0, 0). False when not known.
+  virtual bool Origin(int32_t* x, int32_t* y) const {
+    (void)x, (void)y;
+    return false;
+  }
 };
 
 // Builds a desktop for a PlanDesktop() result; null with *error if it cannot.
@@ -33,6 +39,14 @@ using VirtualDesktopFactory =
 
 // This platform's factory; empty where there is none (Linux for now).
 VirtualDesktopFactory SystemVirtualDesktop();
+
+// One more display of an extended desktop (docs/protocol.md, "扩展桌面"):
+// built after the main one, next to it with its top-left corner at (x, y)
+// points (the system may move it to touch the others; Origin() says where
+// it ended up), not mirrored. `number` (2, 3, 4) tells the displays apart.
+using ExtraDesktopFactory = std::function<std::unique_ptr<VirtualDesktop>(
+    const DesktopSpec& planned, int32_t x, int32_t y, int number, std::string* error)>;
+ExtraDesktopFactory SystemExtraDesktop();
 
 // While it exists, the displays do not sleep for being idle (macOS: a
 // PreventUserIdleDisplaySleep power assertion), as during Apple's Screen

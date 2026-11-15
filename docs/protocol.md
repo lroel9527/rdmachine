@@ -7,7 +7,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 控制连接先完成登录，再为这次会话生成一把新的 32 字节密钥和一个一次性令牌，经 TLS 交给客户端，客户端拿它们去建 rdaccel 连接。这样 rdaccel 每次都拿到新密钥，密码不会出现在 UDP 上，也不需要改 rdaccel（rdaccel 本身只有预共享密钥，没有前向保密和服务器身份，见 [rdaccel 能力评估](research/rdaccel-assessment.md)）。
 
-> **版本和兼容**（3.5.0 起）：`protocol` 是基础版本，固定为 0，两端必须一样；只有旧版本跟不上的改动才会换基础版本（没有计划）。在它之上兼容地加东西用**修订**：hello 和 server_hello 各带自己的 `revision`（没有就是 0，3.4 及更早），两边都按较小的那个用；修订 N 的功能只在协商出的修订不低于 N 时用，旧的一方没有这个功能，照常工作。修订加的字段和消息都是可选的，旧的一方忽略它们。所以新旧版本可以互连，不用两边同时升级。修订 0：3.4 及以前的一切（包括后来加的可选字段 `desktop`、`text_mode` 等）；修订 1：修订本身（3.5.0）。实现在 `core/include/rdmachine/protocol.h`（`kProtocolRevision`、`NegotiatedRevision`）。
+> **版本和兼容**（3.5.0 起）：`protocol` 是基础版本，固定为 0，两端必须一样；只有旧版本跟不上的改动才会换基础版本（没有计划）。在它之上兼容地加东西用**修订**：hello 和 server_hello 各带自己的 `revision`（没有就是 0，3.4 及更早），两边都按较小的那个用；修订 N 的功能只在协商出的修订不低于 N 时用，旧的一方没有这个功能，照常工作。修订加的字段和消息都是可选的，旧的一方忽略它们。所以新旧版本可以互连，不用两边同时升级。修订 0：3.4 及以前的一切（包括后来加的可选字段 `desktop`、`text_mode` 等）；修订 1：修订本身（3.5.0）；修订 2：扩展桌面（3.6.0，见“扩展桌面”）。实现在 `core/include/rdmachine/protocol.h`（`kProtocolRevision`、`NegotiatedRevision`）。
 
 ## 一次连接的完整流程
 
@@ -122,6 +122,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `view_only` | 布尔 | false | 只看不控：服务端丢弃这个会话的键鼠事件 |
 | `text_mode` | 布尔 | false | 以文字模式开始会话，见下文“文字模式” |
 | `desktop` | 对象 | 无 | 客户端要的桌面：`width`、`height`（像素，≥ 1）、`scale`（每点像素数，可省略，默认 1）。服务端按它建虚拟显示器并共享那块屏，这时 `display_index` 不起作用。见下文“请求桌面” |
+| `extra_desktops` | 数组 | 无 | 扩展桌面的其余显示器（修订 2，最多 3 项，要和 `desktop` 一起）。见下文“扩展桌面” |
 
 ### session_ready（服务端 → 客户端）
 
@@ -134,6 +135,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `displays` | 数组 | 可选的显示器：`index`、`name`、`width`、`height`（像素）、`scale`（每点像素数） |
 | `desktop` | 对象，可选 | 为这次请求建好的桌面（`width`、`height`、`scale`，尺寸可能被调整过）。没有这个字段：客户端没请求，或者服务端建不了，画面是服务端自己的显示器，客户端按比例缩放显示 |
 | `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后会话迁移到他的桌面，见下文“会话迁移”。没有这个字段等于 `false` |
+| `extra_displays` | 数组，可选 | 为 `extra_desktops` 建好的显示器：`port`、`desktop`、`x`、`y`（修订 2）。密钥和令牌由会话的派生，见“扩展桌面” |
 
 客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
@@ -177,6 +179,16 @@ rdmachine 的客户端和服务端之间有两条连接：
 注意：进程只有通过 AppKit 的事件循环才能得知新显示器的模式，所以 macOS 上服务端的主线程总是跑 `NSApplication`（`--headless` 也是，只是不显示任何界面）。
 
 实现：`core/include/rdmachine/desktop.h`（规格、取整、消息）；`session/include/rdmachine/session/virtual_desktop.h`（`VirtualDesktop`，macOS 实现在 `session/src/virtual_desktop_mac.mm`）；服务端在 `MediaHost`（`StartSession` 里建，`DesktopLoop` 处理中途的请求）；Mac 客户端在 `client/main.mm`（`initialDesktop`、`requestDesktop`）；命令行客户端 `rdmachine-connect --desktop=2880x1800@2 --resize-desktop=2048x1536@2`。测试：`core/tests/test_desktop.cpp`、`session/tests/test_media_e2e.cpp`（用记录调用的假桌面）、`session/tests/test_virtual_desktop_mac.mm` 和 `tools/smoke_test.sh`（真的虚拟屏，会让本机屏幕重排几秒，要 `RDM_TEST_VIRTUAL_DESKTOP=1`）。
+
+## 扩展桌面
+
+修订 2（3.6.0）。客户端全屏、这台 Mac 有不止一块屏幕、“显示 → 全屏时使用所有显示器”开着（默认）时，`session_request` 除了 `desktop` 再带 `extra_desktops`：其余每块屏幕一项（最多 3 项），`{"desktop":{"width":1920,"height":1080,"scale":1},"x":1440,"y":0}`，`x`、`y` 是这块屏幕的左上角相对于主屏幕左上角的位置（点，y 向下），按客户端屏幕的排列。
+
+服务端（macOS）先照常建主桌面（真实显示器镜像它），再为每项建一块虚拟显示器（“RDMachine Desktop 2”起），放在那个位置、不镜像，成为扩展桌面；系统可能把它挪到和别的显示器挨着，实际位置按 rdaccel 的显示器列表认出它是第几块。每块显示器一个 rdaccel host、一条画面连接，端口是画面端口加 2 加序号（4102、4103、4104；UDP 或 TCP 跟主画面一样），各有自己的键鼠注入（坐标是那块显示器自己的）。密钥和令牌不另外传：由会话的密钥派生（HMAC-SHA256，标签 `rdmachine extra display key <序号>` 和 `rdmachine extra display token <序号>`，令牌的输入还带上会话令牌），两边各算各的；每条连接的密钥都不同（同一把密钥用在两条连接上会重用 nonce）。`session_ready` 里 `extra_displays` 列出建好的：`{"port":4102,"desktop":{...},"x":1440,"y":0}`；建不了的不列，旧服务端不认识 `extra_desktops`，什么都不列，客户端照旧一块屏。
+
+客户端在每块对应的屏幕上开一个无边框、盖住菜单栏的窗口，连上那块显示器的画面；鼠标移到哪块屏幕，输入就走哪条连接，服务端的指针跟着进那块显示器；键盘走当时的前台窗口，进的是同一个系统。剪贴板、统计和输入法同步只走主画面。切到别的应用时这些窗口隐藏。显示器在会话开始时建好，中途不变：进出全屏或改了设置，客户端用保存的登录重新连接一次（“正在切换显示器”）；会话迁移时客户端按新的 `session_ready` 重新连上各块。
+
+会话期间服务端不让显示器因空闲睡眠（`PreventUserIdleDisplaySleep`，3.6.0），连接时还会唤醒睡着的显示器：显示器一睡截屏就停，画面停住直到远程那边点一下或按一下键。
 
 ## 文字模式
 

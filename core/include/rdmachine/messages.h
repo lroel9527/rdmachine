@@ -52,6 +52,26 @@ struct AuthResult {
 
 enum class MediaTransport { kUdp, kTcp };
 
+// One more display of an extended desktop (docs/protocol.md, "扩展桌面";
+// protocol revision 2): its size, and where it sits next to the main one.
+struct ExtraDesktop {
+  DesktopSpec desktop;
+  // Its top-left corner relative to the main desktop's, in points, y down
+  // (as the client's screens are arranged).
+  int32_t x = 0, y = 0;
+  bool operator==(const ExtraDesktop&) const = default;
+};
+inline constexpr size_t kMaxExtraDesktops = 3;
+
+// An extra display the server built: its own picture connection. The key
+// and token come from the session's (ExtraDisplaySecrets, server_session.h).
+struct ExtraDisplay {
+  uint16_t port = 0;
+  DesktopSpec desktop;
+  int32_t x = 0, y = 0;  // as asked for
+  bool operator==(const ExtraDisplay&) const = default;
+};
+
 // Client -> server, after a successful AuthResult.
 struct SessionRequest {
   int32_t display_index = 0;  // 0 = main display
@@ -64,6 +84,9 @@ struct SessionRequest {
   // Start in text mode (docs/protocol.md, "文字模式"): sharp text on a very
   // slow link. The client can change it later (kPictureModeMessageType).
   bool text_mode = false;
+  // More displays next to `desktop`, an extended desktop (at most
+  // kMaxExtraDesktops; only with `desktop`). An older server ignores them.
+  std::vector<ExtraDesktop> extra_desktops;
 };
 
 struct DisplayInfo {
@@ -89,6 +112,9 @@ struct SessionReady {
   // after the user logs in there, this connection ends and the client
   // connects again to reach the new desktop (docs/protocol.md, "登录窗口").
   bool login_window = false;
+  // The extra displays built for request.extra_desktops, in order (some may
+  // be missing if they could not be built: fewer entries).
+  std::vector<ExtraDisplay> extra_displays;
 };
 
 struct Ping {

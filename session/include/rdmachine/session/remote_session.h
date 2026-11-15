@@ -83,6 +83,16 @@ class RemoteSession {
   // The current viewer, for statistics and tests; may change on a move.
   rda_viewer* viewer() const;
   SessionReady session() const;
+  // Extended desktop (docs/protocol.md, "扩展桌面"): connects the picture
+  // of session().extra_displays[i] with `config` (the application's
+  // callbacks for that display's window) and waits until it is up. Blocks
+  // up to a few seconds: not on the main thread, nor from a callback. A
+  // move (on_moved) drops the extra pictures; connect them again from the
+  // new session().
+  bool ConnectExtra(size_t i, rda_viewer_config config, std::string* error);
+  // Input for extra display i (its coordinates are its own picture's).
+  rda_status SendExtraInput(size_t i, const rda_input_event& ev);
+  void CloseExtras();
   // Sends bye and tears everything down. Not from on_ended or a viewer callback.
   void Close();
 
@@ -108,6 +118,7 @@ class RemoteSession {
   mutable std::mutex mu_;  // guards viewer_ and session_ once the session runs
   SessionReady session_;
   rda_viewer* viewer_ = nullptr;
+  std::vector<rda_viewer*> extras_;  // by extra display; null: not connected (guarded by mu_)
   int udp_wait_ms_ = 0;  // options_.udp_wait_ms, longer on a far link (Start)
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};

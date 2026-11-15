@@ -136,6 +136,22 @@ class MacVirtualDesktop final : public VirtualDesktop {
     }
   }
 
+  // An extra display of an extended desktop instead of the main one.
+  void MakeExtra(int32_t x, int32_t y, int number) {
+    extra_ = true;
+    x_ = x;
+    y_ = y;
+    number_ = number;
+  }
+
+  bool Origin(int32_t* x, int32_t* y) const override {
+    if (!display_) return false;
+    const CGRect b = CGDisplayBounds(display_.displayID);
+    *x = static_cast<int32_t>(b.origin.x);
+    *y = static_cast<int32_t>(b.origin.y);
+    return true;
+  }
+
   bool Build(const DesktopSpec& d, std::string* error) {
     @autoreleasepool {
       Class descriptor_class = NSClassFromString(@"CGVirtualDisplayDescriptor");
@@ -145,8 +161,9 @@ class MacVirtualDesktop final : public VirtualDesktop {
         *error = "this macOS has no CGVirtualDisplay";
         return false;
       }
-      // How the real displays are now, to put them back afterwards.
-      for (CGDirectDisplayID id : OnlineDisplays()) {
+      // How the real displays are now, to put them back afterwards (the
+      // main desktop's job; an extra display leaves them to it).
+      for (CGDirectDisplayID id : extra_ ? std::vector<CGDirectDisplayID>{} : OnlineDisplays()) {
         Saved s;
         s.id = id;
         s.mirror_of = CGDisplayMirrorsDisplay(id);
@@ -157,7 +174,7 @@ class MacVirtualDesktop final : public VirtualDesktop {
 
       CGVirtualDisplayDescriptor* desc = [(CGVirtualDisplayDescriptor*)[descriptor_class alloc] init];
       desc.queue = dispatch_queue_create("rdmachine.virtual-desktop", DISPATCH_QUEUE_SERIAL);
-      desc.name = @"RDMachine Desktop";
+      desc.name = extra_ ? [NSString stringWithFormat:@"RDMachine Desktop %d", number_] : @"RDMachine Desktop";
       // Room for any later Resize().
       desc.maxPixelsWide = kMaxDesktopWidth;
       desc.maxPixelsHigh = kMaxDesktopHeight;
@@ -166,7 +183,7 @@ class MacVirtualDesktop final : public VirtualDesktop {
       // Always the same, so macOS knows the display again next time.
       desc.vendorID = 0x5244;   // "RD"
       desc.productID = 0x4d01;  // "M", 1
-      desc.serialNum = 1;
+      desc.serialNum = extra_ ? static_cast<unsigned int>(number_) : 1;
       display_ = [(CGVirtualDisplay*)[display_class alloc] initWithDescriptor:desc];
       if (!display_ || display_.displayID == kCGNullDirectDisplay) {
         display_ = nil;
@@ -239,9 +256,17 @@ class MacVirtualDesktop final : public VirtualDesktop {
       return false;
     }
     if (mode) CGConfigureDisplayWithDisplayMode(config, id, mode, nullptr);
-    CGConfigureDisplayOrigin(config, id, 0, 0);  // the display at the origin is the main one
-    for (CGDirectDisplayID other : OnlineDisplays()) {
-      if (other != id) CGConfigureDisplayMirrorOfDisplay(config, other, id);
+    if (extra_) {
+      // Beside the main desktop, showing a picture of its own.
+      CGConfigureDisplayMirrorOfDisplay(config, id, kCGNullDirectDisplay);
+      CGConfigureDisplayOrigin(config, id, x_, y_);
+    } else {
+      CGConfigureDisplayOrigin(config, id, 0, 0);  // the display at the origin is the main one
+      // The real displays (those there before) mirror it; not the extra
+      // displays of an extended desktop, built after it.
+      for (const Saved& s : saved_) {
+        if (s.id != id && CGDisplayIsOnline(s.id)) CGConfigureDisplayMirrorOfDisplay(config, s.id, id);
+      }
     }
     // For this login session only: nothing is written to the display
     // preferences, and it ends with the virtual display anyway.
@@ -250,6 +275,14 @@ class MacVirtualDesktop final : public VirtualDesktop {
     if (e != kCGErrorSuccess) {
       *error = CgError("configuring the displays", e);
       return false;
+    }
+    if (extra_) {
+      if (!WaitFor(kSettleLimit, [&] { return SizeIs(id, d) && CGDisplayMirrorsDisplay(id) == kCGNullDirectDisplay; })) {
+        *error = "the extra display did not take " + FormatDesktopSpec(d) + " (" + Describe(id) + ")";
+        return false;
+      }
+      spec_ = d;
+      return true;
     }
     if (!WaitFor(kSettleLimit, [&] { return SizeIs(id, d) && CGMainDisplayID() == id; })) {
       *error = "the virtual display did not become the main display at " + FormatDesktopSpec(d) + " (" + Describe(id) +
@@ -279,6 +312,9 @@ class MacVirtualDesktop final : public VirtualDesktop {
 
   CGVirtualDisplay* display_ = nil;
   DesktopSpec spec_;
+  bool extra_ = false;
+  int32_t x_ = 0, y_ = 0;
+  int number_ = 1;
   std::vector<Saved> saved_;
 };
 
@@ -287,6 +323,20 @@ class MacVirtualDesktop final : public VirtualDesktop {
 VirtualDesktopFactory SystemVirtualDesktop() {
   return [](const DesktopSpec& planned, std::string* error) -> std::unique_ptr<VirtualDesktop> {
     auto desktop = std::make_unique<MacVirtualDesktop>();
+    std::string why;
+    if (!desktop->Build(planned, &why)) {
+      if (error) *error = why;
+      return nullptr;
+    }
+    return desktop;
+  };
+}
+
+ExtraDesktopFactory SystemExtraDesktop() {
+  return [](const DesktopSpec& planned, int32_t x, int32_t y, int number,
+            std::string* error) -> std::unique_ptr<VirtualDesktop> {
+    auto desktop = std::make_unique<MacVirtualDesktop>();
+    desktop->MakeExtra(x, y, number);
     std::string why;
     if (!desktop->Build(planned, &why)) {
       if (error) *error = why;

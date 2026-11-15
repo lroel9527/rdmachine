@@ -98,6 +98,51 @@ double DesktopScale(double backing) {
   return TextMode() && TextModeStandardResolution() ? 1.0 : backing;
 }
 
+// View > Use All Displays in Full Screen: an extended desktop (docs/protocol.md,
+// "扩展桌面"). While the remote window is full screen, each other screen of
+// this Mac gets a display of its own on the server, next to the main one as
+// the screens are arranged here. On unless turned off.
+NSString* const kUseAllDisplaysKey = @"UseAllDisplays";
+NSString* const kUseAllDisplaysChanged = @"RDMUseAllDisplaysChanged";
+
+bool UseAllDisplays() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kUseAllDisplaysKey] ? [d boolForKey:kUseAllDisplaysKey] : true;
+}
+
+// Where `screen` is next to `home`: its top-left corner relative to home's,
+// in points, y down (the server's display coordinates).
+void ScreenOffset(NSScreen* home, NSScreen* screen, int32_t* x, int32_t* y) {
+  *x = static_cast<int32_t>(std::lround(screen.frame.origin.x - home.frame.origin.x));
+  *y = static_cast<int32_t>(std::lround(NSMaxY(home.frame) - NSMaxY(screen.frame)));
+}
+
+// The other screens as extra desktops, beside the one at `home`.
+std::vector<rdm::ExtraDesktop> ExtraDesktopsFor(NSScreen* home) {
+  std::vector<rdm::ExtraDesktop> out;
+  for (NSScreen* screen in NSScreen.screens) {
+    if (screen == home || [screen isEqual:home] || out.size() >= rdm::kMaxExtraDesktops) continue;
+    rdm::ExtraDesktop e;
+    const double scale = DesktopScale(screen.backingScaleFactor);
+    e.desktop.width = static_cast<int32_t>(std::floor(screen.frame.size.width) * scale);
+    e.desktop.height = static_cast<int32_t>(std::floor(screen.frame.size.height) * scale);
+    e.desktop.scale = scale;
+    ScreenOffset(home, screen, &e.x, &e.y);
+    out.push_back(e);
+  }
+  return out;
+}
+
+// The screen at that offset from `home` (an extra display's), or nil.
+NSScreen* ScreenAt(NSScreen* home, int32_t x, int32_t y) {
+  for (NSScreen* screen in NSScreen.screens) {
+    int32_t sx = 0, sy = 0;
+    ScreenOffset(home, screen, &sx, &sy);
+    if (screen != home && sx == x && sy == y) return screen;
+  }
+  return nil;
+}
+
 // Secure Event Input (what a focused password field turns on) blocks input
 // methods for the whole login session: the input menu is greyed out and Caps
 // Lock goes back to being Caps Lock, so there is no switch for the server to
@@ -472,6 +517,17 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 @interface RemoteView : NSView
 @property(nonatomic, weak) RemoteWindowController* owner;
 @property(nonatomic) BOOL pointerInside;
+// Mouse moves count even when the window is not the key one: the windows of
+// an extended desktop, where the pointer goes from screen to screen.
+@property(nonatomic) BOOL trackAlways;
+@end
+
+// A borderless window that can still take the keyboard (an extra display's).
+@interface ExtraDisplayWindow : NSWindow
+@end
+@implementation ExtraDisplayWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
 @end
 
 // One session's window. Viewer callbacks (library threads) reach it through
@@ -514,6 +570,19 @@ NSString* const kRemoteSizeKey = @"remoteWindowContentSize";
 - (void)hideStatus;
 // "立即重试" on the status card (a reconnect waiting for its next try).
 @property(nonatomic, copy) void (^onRetry)(void);
+// Extended desktop: whether this session asked for extra displays, and what
+// to do when that should change (full screen entered or left, the setting
+// changed): the app connects again with the new layout.
+@property(nonatomic) BOOL extrasRequested;
+@property(nonatomic, copy) void (^onDisplaysChanged)(void);
+- (BOOL)wantsFullScreen;
+- (NSScreen*)homeScreen;
+// An extra display's window, full size on `screen`, its picture and input
+// going through `parent`'s session.
+- (instancetype)initExtraFor:(RemoteWindowController*)parent index:(NSUInteger)index screen:(NSScreen*)screen;
+- (void)sendExtra:(NSUInteger)index event:(const rda_input_event&)ev;
+- (void)extraConnected;
+- (void)toggleFullScreenFromExtra;
 - (void)endSession;
 - (void)send:(const rda_input_event&)ev;
 // The picture's pixel under a point of the view; NO outside the picture,
@@ -558,8 +627,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   if (_tracking) [self removeTrackingArea:_tracking];
   _tracking = [[NSTrackingArea alloc]
       initWithRect:self.bounds
-           options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveInKeyWindow |
-                   NSTrackingInVisibleRect
+           options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved |
+                   (self.trackAlways ? NSTrackingActiveAlways : NSTrackingActiveInKeyWindow) | NSTrackingInVisibleRect
              owner:self
           userInfo:nil];
   [self addTrackingArea:_tracking];
@@ -678,11 +747,23 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSDate* _statusDeadline;
   NSTimer* _statusTimer;
   BOOL _enteringFullScreen;
+  // Extended desktop. In the main window: the extra displays' windows and
+  // their connections under way. In an extra display's window: which one it
+  // is (-1 in the main window), whose session it uses, and whether its
+  // picture is connected.
+  NSMutableArray<RemoteWindowController*>* _extras;
+  dispatch_group_t _extraConnects;
+  NSInteger _extraIndex;
+  __weak RemoteWindowController* _parent;
+  BOOL _extraLive;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
   if (!(self = [super init])) return nil;
   _front = -1;
+  _extraIndex = -1;
+  _extras = [NSMutableArray array];
+  _extraConnects = dispatch_group_create();
   _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(80, 80, 1280, 800)
                                         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                   NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable
@@ -718,6 +799,124 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [_layer addSublayer:_cursorLayer];
   [_layer addSublayer:_statsLayer];
   return self;
+}
+
+- (instancetype)initExtraFor:(RemoteWindowController*)parent index:(NSUInteger)index screen:(NSScreen*)screen {
+  if (!(self = [self initWithTitle:@""])) return nil;
+  _extraIndex = static_cast<NSInteger>(index);
+  _parent = parent;
+  // The whole screen, its menu bar included, above everything of this Mac;
+  // out of the way while another application is in front.
+  ExtraDisplayWindow* w = [[ExtraDisplayWindow alloc] initWithContentRect:screen.frame
+                                                                styleMask:NSWindowStyleMaskBorderless
+                                                                  backing:NSBackingStoreBuffered
+                                                                    defer:NO];
+  w.releasedWhenClosed = NO;
+  w.animationBehavior = NSWindowAnimationBehaviorNone;
+  w.level = NSMainMenuWindowLevel + 1;
+  w.hidesOnDeactivate = YES;
+  w.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorMoveToActiveSpace;
+  w.backgroundColor = NSColor.blackColor;
+  w.acceptsMouseMovedEvents = YES;
+  w.delegate = self;
+  [_window setDelegate:nil];
+  _view.trackAlways = YES;
+  _view.frame = NSMakeRect(0, 0, screen.frame.size.width, screen.frame.size.height);
+  w.contentView = _view;
+  [w setFrame:screen.frame display:NO];
+  _window = w;
+  // Keys typed while this window is the key one go to the server through it.
+  __weak RemoteWindowController* weakSelf = self;
+  _keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp |
+                                                              NSEventMaskFlagsChanged
+                                                      handler:^NSEvent*(NSEvent* e) {
+                                                        RemoteWindowController* me = weakSelf;
+                                                        if (!me || e.window != me.window) return e;
+                                                        if (![me localShortcut:e]) [me key:e];
+                                                        return nil;
+                                                      }];
+  return self;
+}
+
+- (BOOL)wantsFullScreen {
+  return (_window.styleMask & NSWindowStyleMaskFullScreen) != 0 || _enteringFullScreen;
+}
+
+- (NSScreen*)homeScreen {
+  return _window.screen ?: NSScreen.mainScreen;
+}
+
+- (void)sendExtra:(NSUInteger)index event:(const rda_input_event&)ev {
+  if (_session) _session->SendExtraInput(index, ev);
+}
+
+- (void)extraConnected {
+  _extraLive = YES;
+}
+
+- (void)toggleFullScreenFromExtra {
+  [self releaseHeld];
+  [_window toggleFullScreen:nil];
+}
+
+// Main window: a window for each extra display the server built, on the
+// screen it stands for, and its picture connection (in the background).
+- (void)startExtras {
+  if (_extraIndex >= 0 || !_session) return;
+  const rdm::SessionReady ready = _session->session();
+  NSScreen* home = [self homeScreen];
+  rdm::RemoteSession* session = _session.get();  // outlives the connects: endSession waits for them
+  for (size_t i = 0; i < ready.extra_displays.size(); ++i) {
+    const rdm::ExtraDisplay& x = ready.extra_displays[i];
+    NSScreen* screen = ScreenAt(home, x.x, x.y);
+    if (!screen) {
+      NSLog(@"extra display %zu: no screen here at %d,%d any more", i + 2, x.x, x.y);
+      continue;
+    }
+    RemoteWindowController* w = [[RemoteWindowController alloc] initExtraFor:self index:i screen:screen];
+    [w.window orderFront:nil];
+    [_extras addObject:w];
+    dispatch_group_async(_extraConnects, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      rda_viewer_config c;
+      rda_viewer_config_default(&c);
+      c.user = (__bridge void*)w;  // w is kept by this block and _extras until the viewer is gone
+      c.on_stream_info = &OnStreamInfo;
+      c.on_frame = &OnFrame;
+      c.on_cursor = &OnCursor;
+      std::string error;
+      const bool ok = session->ConnectExtra(i, c, &error);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (ok) {
+          [w extraConnected];
+        } else {
+          NSLog(@"extra display %zu: %s", i + 2, error.c_str());
+        }
+      });
+    });
+  }
+  if (_extras.count > 0) _view.trackAlways = YES;
+  [_view updateTrackingAreas];
+}
+
+// Main window: the extra displays' windows go (their pictures are closed
+// already: by the session's Close or a move).
+- (void)closeExtras {
+  for (RemoteWindowController* w in _extras) {
+    [w endSession];
+    w.window.delegate = nil;
+    [w.window orderOut:nil];
+  }
+  [_extras removeAllObjects];
+  _view.trackAlways = NO;
+  [_view updateTrackingAreas];
+}
+
+// Full screen entered or left, or the setting changed: connect again if the
+// layout of displays should change.
+- (void)checkDisplays {
+  if (_extraIndex >= 0 || !_session) return;
+  const BOOL wanted = UseAllDisplays() && [self wantsFullScreen] && NSScreen.screens.count > 1;
+  if (wanted != self.extrasRequested && self.onDisplaysChanged) self.onDisplaysChanged();
 }
 
 // The window as it was left last time: the whole screen if it was full
@@ -951,6 +1150,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                              name:kTextModeChanged
                                            object:nil];
   [self sendInputSource:YES];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(checkDisplays)
+                                             name:kUseAllDisplaysChanged
+                                           object:nil];
+  [self startExtras];
   _connectedAt = std::chrono::steady_clock::now();
   [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(renderStats) name:kStatsChanged object:nil];
   // Keys go through a local monitor rather than keyDown: it also sees
@@ -982,6 +1186,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   }
   [self sendInputSource:YES];
   [self sendPictureMode];
+  [self closeExtras];  // the old desktop's displays are gone; the new one's:
+  [self startExtras];
 }
 
 // Main thread. Lets go of held keys, says bye, frees everything. No viewer
@@ -993,16 +1199,22 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kTextModeChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kUseAllDisplaysChanged object:nil];
   if (_keyMonitor) {
     [NSEvent removeMonitor:_keyMonitor];
     _keyMonitor = nil;
   }
   [self releaseHeld];
   _viewer = nullptr;
+  _extraLive = NO;
   if (_session) {
-    _session->Close();
+    _session->Close();  // closes the extra displays' pictures too
+    // Connects of extra displays still under way end at once (Close stops
+    // them); wait for them before the session goes.
+    dispatch_group_wait(_extraConnects, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
     _session.reset();
   }
+  if (_extraIndex < 0) [self closeExtras];
   if (_cursorImage) CGImageRelease(_cursorImage);
   _cursorImage = nullptr;
   std::lock_guard<std::mutex> lock(_surfMu);
@@ -1036,7 +1248,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   if (mods != want || e.keyCode != 3 /* kVK_ANSI_F */) return NO;
   if (e.type == NSEventTypeKeyDown && !e.isARepeat) {
     [self releaseHeld];  // the server saw ⌃⌥⌘ go down; let them go there
-    [_window toggleFullScreen:nil];
+    if (_extraIndex >= 0) {
+      [_parent toggleFullScreenFromExtra];
+    } else {
+      [_window toggleFullScreen:nil];
+    }
   }
   return YES;
 }
@@ -1069,6 +1285,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _enteringFullScreen = NO;
   [self releaseHeld];
   [self desktopNeedsUpdate];
+  [self checkDisplays];
   CATextLayer* hint = [CATextLayer layer];
   hint.string = @"按 ⌃⌥⌘F 退出全屏";
   hint.font = (__bridge CFTypeRef)[NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
@@ -1096,6 +1313,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 - (void)windowDidExitFullScreen:(NSNotification*)note {
   [self releaseHeld];
   [self desktopNeedsUpdate];
+  [self checkDisplays];
 }
 
 - (void)windowDidEndLiveResize:(NSNotification*)note {
@@ -1260,7 +1478,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _streamH = h;
   [self rebuildCursor];
   [self updatePictureFilter];
-  if (!first || w <= 0 || h <= 0) return;
+  if (!first || w <= 0 || h <= 0 || _extraIndex >= 0) return;
   // Full screen, or on its way there: the screen decides the size.
   if (_enteringFullScreen || (_window.styleMask & NSWindowStyleMaskFullScreen)) return;
   const NSRect screen = (_window.screen ?: NSScreen.mainScreen).visibleFrame;
@@ -1310,7 +1528,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
     const uint64_t now = rda_now_us();
     if (_inputPendingUs.load() == 0 && now - _lastFrameUs.load() > 150'000) _inputPendingUs = now;
   }
-  if (!_viewer) return;
+  if (_extraIndex >= 0 ? !_extraLive : !_viewer) return;
   switch (ev.kind) {
     case RDA_INPUT_MOUSE_DOWN: _heldButtons.insert(ev.code); break;
     case RDA_INPUT_MOUSE_UP: _heldButtons.erase(ev.code); break;
@@ -1322,7 +1540,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
     _lastX = ev.x;
     _lastY = ev.y;
   }
-  _session->SendInput(ev);
+  if (_extraIndex >= 0) {
+    [_parent sendExtra:static_cast<NSUInteger>(_extraIndex) event:ev];
+  } else {
+    _session->SendInput(ev);
+  }
 }
 
 - (void)key:(NSEvent*)e {
@@ -2592,6 +2814,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     return StatsShown();
   } else if (item.action == @selector(toggleSyncKeyboardLanguage:)) {
     item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleUseAllDisplays:)) {
+    item.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextMode:)) {
     item.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextModeStandardResolution:)) {
@@ -2613,6 +2837,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeStandardResolutionKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
+}
+
+- (void)toggleUseAllDisplays:(NSMenuItem*)item {
+  const bool on = !UseAllDisplays();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kUseAllDisplaysKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kUseAllDisplaysChanged object:nil];
 }
 
 - (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
@@ -2649,6 +2880,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // key there goes to the server); the menu item is for finding it.
   NSMenuItem* fs = [view addItemWithTitle:@"进入/退出全屏" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
   fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+  NSMenuItem* all = [view addItemWithTitle:@"全屏时使用所有显示器" action:@selector(toggleUseAllDisplays:) keyEquivalent:@""];
+  all.target = self;
+  all.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
+  all.toolTip = @"全屏时，这台 Mac 的每块屏幕都对应那台 Mac 上的一块显示器（扩展桌面），按这里屏幕的排列放好。";
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* sync = [view addItemWithTitle:@"同步键盘语言"
                                      action:@selector(toggleSyncKeyboardLanguage:)
@@ -2866,6 +3101,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // server that cannot build one shares its display as it is.
   opts.control.request.desktop = reuse ? [remote viewDesktop] : [remote initialDesktop];
   opts.control.request.text_mode = TextMode();
+  // Full screen with more than one screen here: an extended desktop, a
+  // server display for each screen.
+  const BOOL fullScreen = reuse ? [remote wantsFullScreen] : [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey];
+  if (fullScreen && UseAllDisplays()) opts.control.request.extra_desktops = ExtraDesktopsFor([remote homeScreen]);
+  remote.extrasRequested = !opts.control.request.extra_desktops.empty();
   rda_viewer_config_default(&opts.viewer);
   opts.viewer.user = (__bridge void*)remote;
   opts.viewer.on_stream_info = &OnStreamInfo;
@@ -3026,6 +3266,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   }
   __weak AppDelegate* weakSelf = self;
   __weak RemoteWindowController* weakClosing = remote;
+  remote.onDisplaysChanged = ^{
+    AppDelegate* me = weakSelf;
+    RemoteWindowController* r = weakClosing;
+    if (me && r) [me switchDisplays:r];
+  };
   remote.onClose = ^{
     // Called from the controller's own windowWillClose: release it on the
     // next turn of the run loop, not while it is still running.
@@ -3044,6 +3289,22 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     [_machinesWindow orderOut:nil];
   }
   ReleaseSecureInput();
+}
+
+// Full screen entered or left (or View > Use All Displays changed): the
+// server builds the displays at the start of a session, so connect again
+// with the new layout (the remembered login; without one, stay as it is).
+- (void)switchDisplays:(RemoteWindowController*)remote {
+  if (!remote.isLive || [self attemptForRemote:remote] || !HasSavedLogin(remote.target)) return;
+  [remote endSession];
+  [remote showStatus:@"正在切换显示器"
+              detail:@"全屏时每块屏幕对应那台 Mac 上的一块显示器，正在按现在的屏幕重新连接。"
+              symbol:@"rectangle.on.rectangle"
+               until:[NSDate dateWithTimeIntervalSinceNow:60]
+            canRetry:NO];
+  remote.reconnectingSince = NSDate.date;
+  remote.reconnectUntil = [NSDate dateWithTimeIntervalSinceNow:60];
+  [self reconnect:remote];
 }
 
 - (void)sessionEnded:(RemoteWindowController*)remote reason:(NSString*)reason {

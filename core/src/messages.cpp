@@ -162,10 +162,42 @@ bool ReadDesktop(const json& j, std::optional<DesktopSpec>* out, std::string* er
   return true;
 }
 
+// An extra desktop or display: {"desktop":{...},"x":..,"y":..} and, for a
+// display (port != null), "port".
+bool ReadExtra(const json& e, DesktopSpec* desktop, int32_t* x, int32_t* y, uint16_t* port, std::string* error) {
+  if (!e.is_object()) {
+    *error = "not an object";
+    return false;
+  }
+  std::optional<DesktopSpec> d;
+  if (!ReadDesktop(e, &d, error)) return false;
+  if (!d) {
+    *error = "desktop: missing";
+    return false;
+  }
+  Reader r(e);
+  int64_t ex = 0, ey = 0, p = 0;
+  if (!r.Int("x", &ex, true, -100000, 100000) || !r.Int("y", &ey, true, -100000, 100000) ||
+      (port && !r.Int("port", &p, true, 1, 65535))) {
+    *error = r.error;
+    return false;
+  }
+  *desktop = *d;
+  *x = static_cast<int32_t>(ex);
+  *y = static_cast<int32_t>(ey);
+  if (port) *port = static_cast<uint16_t>(p);
+  return true;
+}
+
 json ToJson(const SessionRequest& m) {
   json j = {{"display_index", m.display_index}, {"transport", TransportName(m.transport)}, {"view_only", m.view_only}};
   if (m.desktop) j["desktop"] = ToJson(*m.desktop);
   if (m.text_mode) j["text_mode"] = true;
+  if (!m.extra_desktops.empty()) {
+    json extras = json::array();
+    for (const ExtraDesktop& e : m.extra_desktops) extras.push_back({{"desktop", ToJson(e.desktop)}, {"x", e.x}, {"y", e.y}});
+    j["extra_desktops"] = std::move(extras);
+  }
   return j;
 }
 json ToJson(const SessionReady& m) {
@@ -181,6 +213,13 @@ json ToJson(const SessionReady& m) {
             {"displays", displays}};
   if (m.desktop) j["desktop"] = ToJson(*m.desktop);
   if (m.login_window) j["login_window"] = true;
+  if (!m.extra_displays.empty()) {
+    json extras = json::array();
+    for (const ExtraDisplay& e : m.extra_displays) {
+      extras.push_back({{"port", e.port}, {"desktop", ToJson(e.desktop)}, {"x", e.x}, {"y", e.y}});
+    }
+    j["extra_displays"] = std::move(extras);
+  }
   return j;
 }
 json ToJson(const Ping& m) { return {{"id", m.id}}; }
@@ -267,6 +306,14 @@ ParseResult ParseSessionRequest(const json& j, Reader& r) {
   m.transport = *t;
   std::string error;
   if (!ReadDesktop(j, &m.desktop, &error)) return Bad(error);
+  if (auto it = j.find("extra_desktops"); it != j.end()) {
+    if (!it->is_array() || it->size() > kMaxExtraDesktops) return Bad("extra_desktops: not an array of at most 3");
+    for (const json& e : *it) {
+      ExtraDesktop x;
+      if (!ReadExtra(e, &x.desktop, &x.x, &x.y, nullptr, &error)) return Bad("extra_desktops: " + error);
+      m.extra_desktops.push_back(x);
+    }
+  }
   return Ok(std::move(m));
 }
 
@@ -300,6 +347,14 @@ ParseResult ParseSessionReady(const json& j, Reader& r) {
   }
   std::string error;
   if (!ReadDesktop(j, &m.desktop, &error)) return Bad(error);
+  if (auto it = j.find("extra_displays"); it != j.end()) {
+    if (!it->is_array() || it->size() > kMaxExtraDesktops) return Bad("extra_displays: not an array of at most 3");
+    for (const json& e : *it) {
+      ExtraDisplay x;
+      if (!ReadExtra(e, &x.desktop, &x.x, &x.y, &x.port, &error)) return Bad("extra_displays: " + error);
+      m.extra_displays.push_back(x);
+    }
+  }
   return Ok(std::move(m));
 }
 

@@ -17,12 +17,19 @@ struct SessionSecrets {
   std::array<uint8_t, kAuthTokenBytes> auth_token{};
 };
 
+// The key and token of extra display `index` (0-based) of an extended
+// desktop: derived from the session's (HMAC-SHA256 with a label), so they
+// need not travel. Each picture connection has a key of its own (the same
+// key on two connections would reuse nonces).
+SessionSecrets ExtraDisplaySecrets(const SessionSecrets& session, size_t index);
+
 struct SessionGrant {
   MediaTransport transport = MediaTransport::kUdp;
   uint16_t port = 0;
   std::vector<DisplayInfo> displays;
   std::optional<DesktopSpec> desktop;  // built for request.desktop
   bool login_window = false;           // the picture is the login window
+  std::vector<ExtraDisplay> extra_displays;  // built for request.extra_desktops
 };
 
 // Who a session is for, as the control connection saw it (for status

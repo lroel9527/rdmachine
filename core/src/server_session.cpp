@@ -1,11 +1,34 @@
 #include "rdmachine/server_session.h"
 
+#include <mbedtls/md.h>
+
 #include <algorithm>
 #include <type_traits>
 
 #include "rdmachine/random.h"
 
 namespace rdm {
+
+SessionSecrets ExtraDisplaySecrets(const SessionSecrets& session, size_t index) {
+  SessionSecrets out;
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  auto derive = [&](const std::string& label, uint8_t* dst, size_t n) {
+    uint8_t mac[32];
+    mbedtls_md_hmac(md, session.key.data(), session.key.size(), reinterpret_cast<const uint8_t*>(label.data()),
+                    label.size(), mac);
+    std::copy(mac, mac + std::min<size_t>(n, sizeof mac), dst);
+  };
+  const std::string n = std::to_string(index);
+  derive("rdmachine extra display key " + n, out.key.data(), out.key.size());
+  // The token from the session's token too, so it is as one-use as that one.
+  uint8_t mac[32];
+  const std::string label = "rdmachine extra display token " + n;
+  std::vector<uint8_t> input(session.auth_token.begin(), session.auth_token.end());
+  input.insert(input.end(), label.begin(), label.end());
+  mbedtls_md_hmac(md, session.key.data(), session.key.size(), input.data(), input.size(), mac);
+  std::copy(mac, mac + std::min(sizeof mac, out.auth_token.size()), out.auth_token.data());
+  return out;
+}
 
 namespace {
 
@@ -184,6 +207,7 @@ std::optional<SessionReady> ServerSession::TryStart(const SessionRequest& m, std
   ready.displays = std::move(grant->displays);
   ready.desktop = grant->desktop;
   ready.login_window = grant->login_window;
+  ready.extra_displays = grant->extra_displays;
   std::fill(secrets.key.begin(), secrets.key.end(), 0);
   return ready;
 }

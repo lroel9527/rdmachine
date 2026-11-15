@@ -101,6 +101,18 @@ TEST_F(ServerSessionTest, IncompatibleProtocol) {
   EXPECT_EQ(ErrorCode(out), "incompatible");
 }
 
+TEST(ExtraDisplaySecrets, DifferPerDisplayAndFromTheSession) {
+  SessionSecrets s;
+  for (size_t i = 0; i < s.key.size(); ++i) s.key[i] = static_cast<uint8_t>(i);
+  for (size_t i = 0; i < s.auth_token.size(); ++i) s.auth_token[i] = static_cast<uint8_t>(200 - i);
+  const SessionSecrets a = ExtraDisplaySecrets(s, 0), b = ExtraDisplaySecrets(s, 1);
+  EXPECT_NE(a.key, s.key);
+  EXPECT_NE(a.key, b.key);
+  EXPECT_NE(a.auth_token, b.auth_token);
+  EXPECT_NE(a.auth_token, s.auth_token);
+  EXPECT_EQ(ExtraDisplaySecrets(s, 0).key, a.key);  // both sides derive the same
+}
+
 TEST_F(ServerSessionTest, NegotiatesTheLowerRevision) {
   {
     auto s = Make();
