@@ -209,7 +209,10 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
     std::lock_guard lock(s->mu_);
     s->StartPlayer();
   }
-  if (s->session_.audio && s->audio_paused_) s->SendAudioPaused();
+  if (s->session_.audio) {
+    s->CheckOutputMuted();
+    if (s->audio_paused_ || s->output_muted_) s->UpdateAudioPaused(true);
+  }
   if (s->clipboard_) s->clipboard_->Start();
   s->thread_ = std::thread([raw = s.get()] { raw->KeepAlive(); });
   return s;
@@ -259,13 +262,36 @@ void RemoteSession::StartPlayer() {
 }
 
 void RemoteSession::SendAudioPaused() {
-  const std::string payload = EncodeAudioControl({audio_paused_.load()});
+  const std::string payload = EncodeAudioControl({sent_paused_.load()});
   SendMessage(kAudioControlMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
 }
 
-void RemoteSession::SetAudioPaused(bool paused) {
-  if (audio_paused_.exchange(paused) == paused) return;
+void RemoteSession::UpdateAudioPaused(bool again) {
+  std::lock_guard lock(pause_mu_);
+  const bool want = audio_paused_ || output_muted_;
+  if (sent_paused_.exchange(want) == want && !again) return;
   SendAudioPaused();
+}
+
+void RemoteSession::SetAudioPaused(bool paused) {
+  audio_paused_ = paused;
+  UpdateAudioPaused(false);
+}
+
+void RemoteSession::CheckOutputMuted() {
+  int muted = -1;
+  if (options_.output_muted) {
+    muted = options_.output_muted();
+  } else {
+    std::lock_guard lock(mu_);
+    if (player_) muted = rda_audio_player_output_muted(player_);
+  }
+  const bool now = muted == 1;  // not known: as audible
+  if (output_muted_.exchange(now) == now) return;
+  if (options_.log) {
+    options_.log(now ? "sound: paused, this Mac's output is muted" : "sound: this Mac's output is audible again");
+  }
+  UpdateAudioPaused(false);
 }
 
 bool RemoteSession::audio_playing() const {
@@ -312,7 +338,7 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
     StartPlayer();
   }
   // The new place knows nothing of a pause asked for before.
-  if (session_.audio && audio_paused_) SendAudioPaused();
+  if (session_.audio && sent_paused_) UpdateAudioPaused(true);
   if (options_.log) options_.log("session moved: new picture connection");
   if (options_.on_moved) options_.on_moved(ready);
   return true;
@@ -340,9 +366,15 @@ void RemoteSession::KeepAlive() {
   constexpr auto kMediaGrace = std::chrono::milliseconds(1500);
   std::optional<Clock::time_point> media_down_since;
   std::string ended;
+  auto next_mute_check = Clock::now();
   while (!stop_ && ended.empty()) {
     auto r = ch.Receive(250);
     const auto now = Clock::now();
+    // Nobody hears it while this Mac's output is muted: pause the sound.
+    if (now >= next_mute_check) {
+      next_mute_check = now + std::chrono::seconds(1);
+      if (session().audio) CheckOutputMuted();
+    }
     switch (r.status) {
       case MessageChannel::Received::kMessage:
         last_heard = now;

@@ -773,3 +773,34 @@ TEST_F(MediaE2EAudio, AnOlderClientGetsNoSound) {
   rda_viewer_destroy(v);
   r.connection->Close("user_closed");
 }
+
+TEST_F(MediaE2EAudio, AMutedOutputHereSendsNothing) {
+  // docs/audio.md, 5.6: this Mac's output muted (as the player reads it,
+  // stood in for here): the sound is paused, and goes on once it is audible.
+  std::atomic<int> muted{0};
+  Frames frames;
+  auto o = Options(&frames);
+  o.audio = true;
+  o.audio_null_device = true;
+  o.output_muted = [&muted] { return muted.load(); };
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  ASSERT_TRUE(WaitFor([&] { return ViewerStats(s->viewer()).audio_packets > 0; }, 5s));
+  EXPECT_FALSE(s->audio_paused());
+  muted = 1;
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.state == RDA_AUDIO_STATE_PAUSED; }, 5s));
+  EXPECT_TRUE(s->audio_paused());
+  muted = -1;  // not known: as audible
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.state != RDA_AUDIO_STATE_PAUSED; }, 5s));
+  EXPECT_FALSE(s->audio_paused());
+  // The menu's pause and the muted output are two reasons: either keeps it paused.
+  s->SetAudioPaused(true);
+  muted = 1;
+  std::this_thread::sleep_for(1500ms);
+  muted = 0;
+  std::this_thread::sleep_for(1500ms);
+  EXPECT_EQ(media_->Status().audio_status.state, RDA_AUDIO_STATE_PAUSED);
+  s->SetAudioPaused(false);
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.state != RDA_AUDIO_STATE_PAUSED; }, 5s));
+}

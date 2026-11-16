@@ -660,6 +660,15 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 
 第 0–5 阶段按本文实现；第 6 阶段不做（D9）。下面是实现时和上文不同的地方（上文相应的位置已经改了的也列在这里），以及实测的数字。
 
+| 阶段 | 提交（rdaccel / rdmachine） | 内容 |
+| --- | --- | --- |
+| 0 | — / 本文 | 第 2、3、4 节的结果 |
+| 1 | 数据报 | 6.1–6.3、码率控制里扣掉声音 |
+| 2 | 声音（第 2 阶段） | Opus、包格式、发送端、接收端、C 接口、测试信号源、netsim、fuzz |
+| 3 | 1.13.0 | Process Tap、播放器、`RDA_AUDIO_SOURCE_SYSTEM`、权限、`serve` / `view --audio`、文档 |
+| 4 | — / 声音（第 4 阶段） | 修订 3、设置、`MediaHost`、`RemoteSession`、两端的菜单和浮窗、权限、Info.plist、安装包 |
+| 5 | 声音（第 5 阶段） / 4.4.0 | 5.5 慢链路降码率、5.6 客户端输出静音时暂停（`RemoteSession` 每秒只读地查一次）、7.4 和画面对时间的测试；11.3 的测试信号数字（真实使用的还没有，见下） |
+
 ### 和设计不同的地方
 
 | 哪里 | 设计 | 实现 | 为什么 |

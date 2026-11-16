@@ -53,6 +53,12 @@ class RemoteSession {
     // command-line client, tests: read and thrown away).
     bool audio = false;
     bool audio_null_device = false;
+    // Whether this computer's output is muted or at volume 0 (1), audible (0)
+    // or not known (-1): checked about once a second; while it is muted the
+    // sound is paused (nobody hears it; docs/audio.md, 5.6). Empty: the
+    // player's own read-only check (rda_audio_player_output_muted). Tests
+    // set it.
+    std::function<int()> output_muted;
     int udp_wait_ms = 4000;    // then fall back to TCP; 0 = no fallback
     // The session ended from the other side or the network: "server_closed",
     // "connection_lost", "media_lost", or the server's bye reason. Runs on
@@ -89,8 +95,11 @@ class RemoteSession {
   int64_t BulkQueuedBytes() const;
   // Sound: pause it (the user turned it off in the menu): the server sends
   // nothing meanwhile (kAudioControlMessageType). Said again after a move.
-  // Thread-safe.
+  // The sound is also paused while this computer's output is muted (see
+  // Options::output_muted). Thread-safe.
   void SetAudioPaused(bool paused);
+  // Paused now, for whichever reason.
+  bool audio_paused() const { return sent_paused_; }
   // Whether the current session plays sound (a player is running).
   bool audio_playing() const;
   // The current viewer, for statistics and tests; may change on a move.
@@ -138,6 +147,13 @@ class RemoteSession {
   std::vector<rda_viewer*> extras_;  // by extra display; null: not connected (guarded by mu_)
   rda_audio_player* player_ = nullptr;  // plays viewer_'s sound; destroyed before it (guarded by mu_)
   std::atomic<bool> audio_paused_{false};  // what the user asked for (SetAudioPaused)
+  std::atomic<bool> output_muted_{false};  // this computer's output is muted (KeepAlive checks)
+  std::atomic<bool> sent_paused_{false};   // what the server was last told
+  std::mutex pause_mu_;                    // keeps what is sent in order
+  // Tells the server when either reason changed what it should do; `again`:
+  // say it even if not (a new picture connection after a move).
+  void UpdateAudioPaused(bool again);
+  void CheckOutputMuted();
   int udp_wait_ms_ = 0;  // options_.udp_wait_ms, longer on a far link (Start)
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};
