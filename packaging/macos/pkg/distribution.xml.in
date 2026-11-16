@@ -5,6 +5,22 @@
   <conclusion file="conclusion.html" mime-type="text/html"/>
   <options customize="always" require-scripts="false" hostArchitectures="x86_64,arm64"/>
   <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <!-- Checked before anything else, with a message of its own: macOS 12 and
+       13 are not supported (from 4.3.0). The volume check below stays as a
+       second guard. -->
+  <installation-check script="checkMacOS()"/>
+  <script><![CDATA[
+function checkMacOS() {
+  if (system.compareVersions(system.version.ProductVersion, '@MIN_MACOS@') < 0) {
+    my.result.type = 'Fatal';
+    my.result.title = 'RDMachine 不支持这个 macOS 版本';
+    my.result.message = 'RDMachine 需要 macOS @MIN_MACOS@ 或更新的系统，这台 Mac 是 macOS ' +
+        system.version.ProductVersion + '。macOS 12 和 13 不再支持，请先升级系统。';
+    return false;
+  }
+  return true;
+}
+  ]]></script>
   <volume-check>
     <allowed-os-versions>
       <os-version min="@MIN_MACOS@"/>

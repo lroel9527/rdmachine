@@ -25,8 +25,8 @@ struct ClientOptions {
   int timeout_ms = 10000;  // per step
   // The step that starts the session: the server may build a desktop first
   // and, when that fails, put its displays back before sharing them as they
-  // are, which takes longer (the server gives its agent 45 s, daemon.h).
-  int session_timeout_ms = 50000;
+  // are, which takes longer (the server gives its agent 30 s, daemon.h).
+  int session_timeout_ms = 35000;
 };
 
 class ClientConnection {

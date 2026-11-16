@@ -1,13 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
 
-# Phase 1 targets macOS 12.3+ so the 2016 Intel MacBook Pro (macOS 12) can be
-# tested. rdaccel supports 12.3 from 1.0.1 (lroel9527/rdaccel#39).
-# Set before project() so it also applies to the rdaccel submodule.
-if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
+# macOS 14 or later (from 4.3.0; macOS 12 and 13 are not supported). Set
+# before project() so it also applies to the rdaccel submodule. A build
+# directory configured earlier keeps 12.3 in its cache: raised here too.
+if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
+   (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.0))
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(rdmachine VERSION 4.2.2 LANGUAGES C CXX)
+project(rdmachine VERSION 4.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

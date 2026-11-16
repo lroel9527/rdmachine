@@ -57,14 +57,11 @@ struct DaemonOptions {
   std::function<void(uint16_t port, bool offer_pairing_codes)> settings_changed;
   std::function<std::string()> fingerprint;                 // for the agents' menus
   std::function<uint16_t()> port;
-  // An agent starting a session takes a while. Worst case on macOS 12/13
-  // (virtual_desktop_mac.mm, rdaccel's capture fallback): a desktop tried
-  // twice and given up on (about 23 s: waiting for the display to be ready,
-  // for the arrangement to hold, removing it, putting the displays back),
-  // then ScreenCaptureKit given 1.5 s for a first frame before
-  // CGDisplayStream takes over, more if ScreenCaptureKit answers slowly.
-  // The client waits a little longer (control_client.h).
-  int reply_timeout_ms = 45000;
+  // An agent starting a session takes a while: building a desktop, and when
+  // that fails, putting the displays back (twice, see virtual_desktop_mac.mm)
+  // before sharing them as they are. The client waits a little longer
+  // (control_client.h).
+  int reply_timeout_ms = 30000;
 };
 
 class Daemon : public ServerDelegate {

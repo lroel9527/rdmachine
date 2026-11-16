@@ -627,14 +627,12 @@ std::optional<std::vector<std::string>> MacFileTarget::Publish(uint64_t announce
     NSString* folder_id = NS(copy_id);
     NSFileProviderDomain* domain = h.domain;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      if (@available(macOS 13.0, *)) {
-        [[NSFileProviderManager managerForDomain:domain]
-            requestDownloadForItemWithIdentifier:folder_id
-                                  requestedRange:NSMakeRange(NSNotFound, 0)
-                               completionHandler:^(NSError* e) {
-                                 if (e) Log("populating the copy's folder: " + Std(e.localizedDescription));
-                               }];
-      }
+      [[NSFileProviderManager managerForDomain:domain]
+          requestDownloadForItemWithIdentifier:folder_id
+                                requestedRange:NSMakeRange(NSNotFound, 0)
+                             completionHandler:^(NSError* e) {
+                               if (e) Log("populating the copy's folder: " + Std(e.localizedDescription));
+                             }];
       for (int i = 0; i < 50; ++i) {
         NSArray* names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:folder error:nil];
         if (names.count > 0) return;

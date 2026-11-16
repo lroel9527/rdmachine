@@ -2232,7 +2232,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _machinesTable.intercellSpacing = NSMakeSize(0, 2);
   _machinesTable.columnAutoresizingStyle = NSTableViewLastColumnOnlyAutoresizingStyle;
   _machinesTable.backgroundColor = NSColor.clearColor;
-  if (@available(macOS 11.0, *)) _machinesTable.style = NSTableViewStyleInset;
+  _machinesTable.style = NSTableViewStyleInset;
   _machinesTable.dataSource = self;
   _machinesTable.delegate = self;
   _machinesTable.target = self;

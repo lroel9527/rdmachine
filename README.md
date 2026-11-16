@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 12.3+），当前版本 4.2.2。rdmachine 按自用设计：登录过就可信，尽量少打扰。
+第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 14+；12 和 13 不支持，pkg 会拒绝安装），当前版本 4.3.0。rdmachine 按自用设计：登录过就可信，尽量少打扰。
 
 ## 功能
 
@@ -25,7 +25,7 @@
 - 被控的 Mac 勾 **RDMachine Server**：装完就作为服务运行（守护进程 + agent）；
 - 用来连接的 Mac 勾 **RDMachine**（客户端）；两个都勾也行。
 
-pkg 没有签名（签 pkg 要 Apple Developer 的安装器证书），第一次打开会被拦下：macOS 12–14 在 pkg 上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。也可以在终端里装：
+pkg 没有签名（签 pkg 要 Apple Developer 的安装器证书），第一次打开会被拦下：macOS 14 在 pkg 上右键“打开”；macOS 15 起去“系统设置 → 隐私与安全性”底部点“仍要打开”。也可以在终端里装：
 
 ```bash
 sudo installer -pkg RDMachine-版本号.pkg -target /
