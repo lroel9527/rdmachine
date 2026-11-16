@@ -1,5 +1,6 @@
 #include "rdmachine/control_client.h"
 
+#include <algorithm>
 #include <type_traits>
 
 namespace rdm {
@@ -117,7 +118,7 @@ ConnectResult ConnectAndStartSession(const ClientOptions& options) {
     result.error = "connection_closed";
     return result;
   }
-  if (!Next(ch, options.timeout_ms, &result, &m)) return result;
+  if (!Next(ch, std::max(options.timeout_ms, options.session_timeout_ms), &result, &m)) return result;
   const auto* ready = Expect<SessionReady>(m, &result);
   if (!ready) return result;
   result.session = *ready;

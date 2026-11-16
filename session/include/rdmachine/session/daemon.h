@@ -57,7 +57,10 @@ struct DaemonOptions {
   std::function<void(uint16_t port, bool offer_pairing_codes)> settings_changed;
   std::function<std::string()> fingerprint;                 // for the agents' menus
   std::function<uint16_t()> port;
-  int reply_timeout_ms = 20000;  // an agent starting a session (building a desktop) takes a while
+  // An agent starting a session takes a while: building a desktop, and when
+  // that fails, putting the displays back (twice, see virtual_desktop_mac.mm)
+  // before sharing them as they are.
+  int reply_timeout_ms = 30000;
 };
 
 class Daemon : public ServerDelegate {

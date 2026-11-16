@@ -1,5 +1,6 @@
 #include "rdmachine/session/remote_session.h"
 
+#include <algorithm>
 #include <chrono>
 
 #include "rdmachine/server_session.h"  // ExtraDisplaySecrets
@@ -196,7 +197,8 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
       result->error = "connection_closed";
       return nullptr;
     }
-    if (!AwaitReady(s->control_->channel(), connect_ms, result)) return nullptr;
+    if (!AwaitReady(s->control_->channel(), std::max(connect_ms, s->options_.control.session_timeout_ms), result))
+      return nullptr;
   }
   result->session = s->session_;
   if (s->clipboard_) s->clipboard_->Start();

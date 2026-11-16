@@ -48,6 +48,7 @@ using namespace std::chrono_literals;
 
 constexpr auto kSettleLimit = 4s;
 constexpr auto kModeListLimit = 1500ms;
+constexpr auto kTearDownLimit = 2s;
 
 template <class F>
 bool WaitFor(std::chrono::milliseconds limit, F done) {
@@ -127,10 +128,7 @@ std::string CgError(const char* what, CGError e) { return std::string(what) + " 
 class MacVirtualDesktop final : public VirtualDesktop {
  public:
   ~MacVirtualDesktop() override {
-    @autoreleasepool {
-      Restore();
-      display_ = nil;  // the display goes away with the object
-    }
+    TearDown();
     for (Saved& s : saved_) {
       if (s.mode) CGDisplayModeRelease(s.mode);
     }
@@ -172,25 +170,18 @@ class MacVirtualDesktop final : public VirtualDesktop {
         saved_.push_back(s);
       }
 
-      CGVirtualDisplayDescriptor* desc = [(CGVirtualDisplayDescriptor*)[descriptor_class alloc] init];
-      desc.queue = dispatch_queue_create("rdmachine.virtual-desktop", DISPATCH_QUEUE_SERIAL);
-      desc.name = extra_ ? [NSString stringWithFormat:@"RDMachine Desktop %d", number_] : @"RDMachine Desktop";
       // Room for any later Resize().
-      desc.maxPixelsWide = kMaxDesktopWidth;
-      desc.maxPixelsHigh = kMaxDesktopHeight;
-      // Nominal: about 110 points per inch, an ordinary desktop screen.
-      desc.sizeInMillimeters = CGSizeMake(DesktopPointsWide(d) * 25.4 / 110, DesktopPointsHigh(d) * 25.4 / 110);
-      // Always the same, so macOS knows the display again next time.
-      desc.vendorID = 0x5244;   // "RD"
-      desc.productID = 0x4d01;  // "M", 1
-      desc.serialNum = extra_ ? static_cast<unsigned int>(number_) : 1;
-      display_ = [(CGVirtualDisplay*)[display_class alloc] initWithDescriptor:desc];
-      if (!display_ || display_.displayID == kCGNullDirectDisplay) {
-        display_ = nil;
-        *error = "the system refused to create a virtual display";
-        return false;
-      }
-      return Apply(d, error);
+      if (Create(d, kMaxDesktopWidth, kMaxDesktopHeight, error) && Apply(d, error)) return true;
+      TearDown();
+      if (d.width >= kMaxDesktopWidth && d.height >= kMaxDesktopHeight) return false;
+      // Some Macs (older macOS, Intel graphics) do not take a display that
+      // may grow to 8K: once more with room for just this size. A later
+      // Resize() to a larger one then fails and the desktop stays as it is.
+      const std::string first = *error;
+      if (Create(d, d.width, d.height, error) && Apply(d, error)) return true;
+      TearDown();
+      *error = first + "; at most " + std::to_string(d.width) + "x" + std::to_string(d.height) + " pixels: " + *error;
+      return false;
     }
   }
 
@@ -214,6 +205,67 @@ class MacVirtualDesktop final : public VirtualDesktop {
     CGPoint origin = CGPointZero;
     CGDisplayModeRef mode = nullptr;  // owned
   };
+
+  // The virtual display itself, room for max_wide x max_high pixels.
+  bool Create(const DesktopSpec& d, int32_t max_wide, int32_t max_high, std::string* error) {
+    CGVirtualDisplayDescriptor* desc =
+        [(CGVirtualDisplayDescriptor*)[NSClassFromString(@"CGVirtualDisplayDescriptor") alloc] init];
+    desc.queue = dispatch_queue_create("rdmachine.virtual-desktop", DISPATCH_QUEUE_SERIAL);
+    desc.name = extra_ ? [NSString stringWithFormat:@"RDMachine Desktop %d", number_] : @"RDMachine Desktop";
+    desc.maxPixelsWide = static_cast<unsigned int>(max_wide);
+    desc.maxPixelsHigh = static_cast<unsigned int>(max_high);
+    // Nominal: about 110 points per inch, an ordinary desktop screen.
+    desc.sizeInMillimeters = CGSizeMake(DesktopPointsWide(d) * 25.4 / 110, DesktopPointsHigh(d) * 25.4 / 110);
+    // Always the same, so macOS knows the display again next time.
+    desc.vendorID = 0x5244;   // "RD"
+    desc.productID = 0x4d01;  // "M", 1
+    desc.serialNum = extra_ ? static_cast<unsigned int>(number_) : 1;
+    display_ = [(CGVirtualDisplay*)[NSClassFromString(@"CGVirtualDisplay") alloc] initWithDescriptor:desc];
+    if (!display_ || display_.displayID == kCGNullDirectDisplay) {
+      display_ = nil;
+      *error = "the system refused to create a virtual display";
+      return false;
+    }
+    return true;
+  }
+
+  // Puts the real displays back and removes the virtual one, then waits
+  // (briefly) until that has happened: a server that goes on to share the
+  // real display after a failed build must not start capturing it while it
+  // still mirrors a display that is going away (the picture stays black).
+  void TearDown() {
+    if (!display_) return;
+    const CGDirectDisplayID id = display_.displayID;
+    @autoreleasepool {
+      Restore();
+      display_ = nil;  // the display goes away with the object
+    }
+    WaitFor(kTearDownLimit, [&] {
+      for (CGDirectDisplayID o : OnlineDisplays()) {
+        if (o == id) return false;
+      }
+      for (const Saved& s : saved_) {
+        if (CGDisplayIsOnline(s.id) && CGDisplayMirrorsDisplay(s.id) != s.mirror_of) return false;
+      }
+      return true;
+    });
+  }
+
+  // Whether the virtual display is now the desktop being shared: at its
+  // size, and the main display. macOS 12 may keep reporting a real display
+  // as the main one although it mirrors the virtual display, which then is
+  // the only display that is not a mirror, at the origin: rdaccel's display
+  // 0 all the same, so that counts too.
+  bool IsTheDesktop(CGDirectDisplayID id, const DesktopSpec& d) const {
+    if (!SizeIs(id, d)) return false;
+    if (CGMainDisplayID() == id) return true;
+    const CGRect b = CGDisplayBounds(id);
+    if (b.origin.x != 0 || b.origin.y != 0 || CGDisplayMirrorsDisplay(id) != kCGNullDirectDisplay) return false;
+    for (const Saved& s : saved_) {
+      if (s.id != id && CGDisplayIsActive(s.id) && CGDisplayMirrorsDisplay(s.id) != id) return false;
+    }
+    return true;
+  }
 
   // Gives the display the one mode `d`, selects it, makes the display the
   // main one and has every real display mirror it; waits until it is so.
@@ -284,7 +336,7 @@ class MacVirtualDesktop final : public VirtualDesktop {
       spec_ = d;
       return true;
     }
-    if (!WaitFor(kSettleLimit, [&] { return SizeIs(id, d) && CGMainDisplayID() == id; })) {
+    if (!WaitFor(kSettleLimit, [&] { return IsTheDesktop(id, d); })) {
       *error = "the virtual display did not become the main display at " + FormatDesktopSpec(d) + " (" + Describe(id) +
                ")";
       return false;
