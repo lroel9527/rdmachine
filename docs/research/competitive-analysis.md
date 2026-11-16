@@ -2,6 +2,7 @@
 
 > 调研日期：2026-11-06。目的：为 rdmachine（开源的类 NoMachine 远程桌面，画面引擎依托 [rdaccel](https://github.com/lroel9527/rdaccel)）找出可借鉴的设计和差异化机会。
 > 各项目细节见后面的分章节；未能核实的事实在文中标注“待核实”。
+> SPICE 和 Xpra 的源码级对比另见 [spice-xpra.md](spice-xpra.md)（2026-11-16）。
 
 ## 1. 总览对比
 
