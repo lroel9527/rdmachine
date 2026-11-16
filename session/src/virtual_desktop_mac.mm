@@ -5,6 +5,7 @@
 #include <IOKit/pwr_mgt/IOPMLib.h>
 
 #include <chrono>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -49,6 +50,22 @@ using namespace std::chrono_literals;
 constexpr auto kSettleLimit = 4s;
 constexpr auto kModeListLimit = 1500ms;
 constexpr auto kTearDownLimit = 2s;
+// macOS 12 and 13 only (an Intel MacBook Pro with macOS 12.7, measured with
+// tools/compat_check): a new virtual display is not ready for a second or
+// two, and when it becomes ready the system arranges the displays its own
+// way (the built-in one main again, the new one beside it), undoing an
+// arrangement made before. So the server waits for it to be ready
+// (kReadyLimit), counts an arrangement only once it has held for
+// kStableFor, and tries once more if the system undid it.
+constexpr auto kReadyLimit = 4s;
+constexpr auto kStableFor = 1500ms;
+constexpr auto kOlderSettleLimit = 6s;
+
+// Before macOS 14: where the steps above are needed.
+bool OlderMacOS() {
+  if (@available(macOS 14.0, *)) return false;
+  return true;
+}
 
 template <class F>
 bool WaitFor(std::chrono::milliseconds limit, F done) {
@@ -170,17 +187,26 @@ class MacVirtualDesktop final : public VirtualDesktop {
         saved_.push_back(s);
       }
 
-      // Room for any later Resize().
-      if (Create(d, kMaxDesktopWidth, kMaxDesktopHeight, error) && Apply(d, error)) return true;
-      TearDown();
-      if (d.width >= kMaxDesktopWidth && d.height >= kMaxDesktopHeight) return false;
-      // Some Macs (older macOS, Intel graphics) do not take a display that
-      // may grow to 8K: once more with room for just this size. A later
+      // Room for any later Resize(). A Mac that does not take a display
+      // that may grow to 8K gets one with room for just this size; a later
       // Resize() to a larger one then fails and the desktop stays as it is.
-      const std::string first = *error;
-      if (Create(d, d.width, d.height, error) && Apply(d, error)) return true;
+      if (!Create(d, kMaxDesktopWidth, kMaxDesktopHeight, error)) {
+        if (d.width >= kMaxDesktopWidth && d.height >= kMaxDesktopHeight) return false;
+        const std::string first = *error;
+        if (!Create(d, d.width, d.height, error)) {
+          *error = first + "; at most " + std::to_string(d.width) + "x" + std::to_string(d.height) + " pixels: " + *error;
+          return false;
+        }
+      }
+      if (Apply(d, error, /*fresh=*/true)) return true;
+      if (OlderMacOS()) {
+        // The system may have rearranged the displays once the new one was
+        // ready (see kReadyLimit): it is ready now, so once more.
+        std::string again;
+        if (Apply(d, &again, /*fresh=*/false)) return true;
+        *error += "; once more: " + again;
+      }
       TearDown();
-      *error = first + "; at most " + std::to_string(d.width) + "x" + std::to_string(d.height) + " pixels: " + *error;
       return false;
     }
   }
@@ -191,9 +217,9 @@ class MacVirtualDesktop final : public VirtualDesktop {
     @autoreleasepool {
       if (d == spec_) return true;
       const DesktopSpec before = spec_;
-      if (Apply(d, error)) return true;
+      if (Apply(d, error, /*fresh=*/false)) return true;
       std::string ignored;
-      Apply(before, &ignored);
+      Apply(before, &ignored, /*fresh=*/false);
       return false;
     }
   }
@@ -229,21 +255,27 @@ class MacVirtualDesktop final : public VirtualDesktop {
     return true;
   }
 
-  // Puts the real displays back and removes the virtual one, then waits
+  // Removes the virtual display and puts the real displays back, then waits
   // (briefly) until that has happened: a server that goes on to share the
   // real display after a failed build must not start capturing it while it
   // still mirrors a display that is going away (the picture stays black).
+  // The virtual display goes first: the other way round, putting the real
+  // displays back took 10 s on macOS 12 (the screen black all along),
+  // against 0.4 s.
   void TearDown() {
     if (!display_) return;
     const CGDirectDisplayID id = display_.displayID;
     @autoreleasepool {
-      Restore();
       display_ = nil;  // the display goes away with the object
     }
     WaitFor(kTearDownLimit, [&] {
       for (CGDirectDisplayID o : OnlineDisplays()) {
         if (o == id) return false;
       }
+      return true;
+    });
+    Restore();
+    WaitFor(kTearDownLimit, [&] {
       for (const Saved& s : saved_) {
         if (CGDisplayIsOnline(s.id) && CGDisplayMirrorsDisplay(s.id) != s.mirror_of) return false;
       }
@@ -269,7 +301,8 @@ class MacVirtualDesktop final : public VirtualDesktop {
 
   // Gives the display the one mode `d`, selects it, makes the display the
   // main one and has every real display mirror it; waits until it is so.
-  bool Apply(const DesktopSpec& d, std::string* error) {
+  // `fresh`: the display was just created.
+  bool Apply(const DesktopSpec& d, std::string* error, bool fresh) {
     const CGDirectDisplayID id = display_.displayID;
     // The receivers are cast to their classes: with a plain `id` the compiler
     // may take another class's method of the same name, with other argument
@@ -299,6 +332,9 @@ class MacVirtualDesktop final : public VirtualDesktop {
       *error = "the virtual display did not come online (" + Describe(id) + ")";
       return false;
     }
+    // macOS 12/13: until the system has given the new display its mode
+    // itself (it starts at 1x1 points), it is not ready (kReadyLimit).
+    if (fresh && OlderMacOS() && !extra_) WaitFor(kReadyLimit, [&] { return SizeIs(id, d); });
 
     CGDisplayConfigRef config = nullptr;
     CGError e = CGBeginDisplayConfiguration(&config);
@@ -336,7 +372,23 @@ class MacVirtualDesktop final : public VirtualDesktop {
       spec_ = d;
       return true;
     }
-    if (!WaitFor(kSettleLimit, [&] { return IsTheDesktop(id, d); })) {
+    bool settled = false;
+    if (OlderMacOS()) {
+      // Only an arrangement that holds counts (see kReadyLimit).
+      std::optional<std::chrono::steady_clock::time_point> since;
+      WaitFor(kOlderSettleLimit, [&] {
+        if (!IsTheDesktop(id, d)) {
+          since.reset();
+          return false;
+        }
+        if (!since) since = std::chrono::steady_clock::now();
+        return std::chrono::steady_clock::now() - *since >= kStableFor;
+      });
+      settled = since && std::chrono::steady_clock::now() - *since >= kStableFor;
+    } else {
+      settled = WaitFor(kSettleLimit, [&] { return IsTheDesktop(id, d); });
+    }
+    if (!settled) {
       *error = "the virtual display did not become the main display at " + FormatDesktopSpec(d) + " (" + Describe(id) +
                ")";
       return false;
