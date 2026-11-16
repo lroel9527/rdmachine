@@ -398,9 +398,10 @@ class MacVirtualDesktop final : public VirtualDesktop {
   }
 
   // The real displays as they were: no longer mirrors of the virtual one,
-  // back in their places and modes.
+  // back in their places and modes. Called once the virtual display is gone
+  // (TearDown), so it must not depend on it. An extra display saves nothing.
   void Restore() {
-    if (!display_) return;
+    if (saved_.empty()) return;
     CGDisplayConfigRef config = nullptr;
     if (CGBeginDisplayConfiguration(&config) != kCGErrorSuccess) return;
     for (const Saved& s : saved_) {

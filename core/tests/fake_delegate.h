@@ -1,6 +1,8 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 #include "rdmachine/server_session.h"
 
@@ -20,6 +22,8 @@ class FakeDelegate : public ServerDelegate {
   }
   std::optional<SessionGrant> StartSession(const SessionRequest& request, const SessionSecrets& secrets,
                                            const SessionOrigin& origin, std::string* error) override {
+    // A start that takes a while (building a desktop), outside the lock.
+    if (const int ms = start_delay_ms.load(); ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
     std::lock_guard lock(mu);
     if (busy) {
       *error = "busy";
@@ -57,6 +61,7 @@ class FakeDelegate : public ServerDelegate {
     return c;
   }
 
+  std::atomic<int> start_delay_ms{0};
   std::mutex mu;
   bool busy = false;
   int starts = 0, ends = 0;

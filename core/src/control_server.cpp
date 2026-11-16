@@ -151,8 +151,11 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
         const auto now = Clock::now();
         switch (r.status) {
           case MessageChannel::Received::kMessage:
-            last_heard = now;
             out = session.Handle(*r.message);
+            // After handling, not before: starting a session can take
+            // longer than idle_timeout_ms (a desktop built, or given up on,
+            // on a slow Mac), and that time is not the client's silence.
+            last_heard = Clock::now();
             break;
           case MessageChannel::Received::kProtocolError:
             out = session.HandleBadMessage(r.error);

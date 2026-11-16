@@ -218,6 +218,42 @@ TEST_F(ControlTest, IdleConnectionGetsPingedThenClosed) {
   }
 }
 
+// A session start that takes longer than the idle timeout (a desktop built
+// and given up on a slow Mac) is not taken for silence once it is done: the
+// client hears nothing for a while after session_ready either.
+TEST_F(ControlTest, ASlowSessionStartIsNotIdle) {
+  server_.reset();
+  ControlServerOptions opts;
+  opts.bind_address = "127.0.0.1";
+  opts.port = 0;
+  opts.ping_interval_ms = 300;
+  opts.idle_timeout_ms = 600;
+  ControlServer server(delegate_, Identity(), opts);
+  std::string error;
+  ASSERT_TRUE(server.Start(&error)) << error;
+  delegate_.start_delay_ms = 1000;
+  ClientOptions o;  // as Options(), which needs server_
+  o.host = "127.0.0.1";
+  o.port = server.port();
+  o.client_name = "laptop";
+  o.auth.username = "alice";
+  o.auth.password = "secret";
+  o.trust_server = [](const std::string&) { return true; };
+  o.timeout_ms = 5000;
+  auto r = ConnectAndStartSession(o);
+  ASSERT_EQ(r.error, "") << r.detail;
+  // For a while after session_ready the client answers pings, as the real
+  // one does: no bye must come.
+  const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+  while (std::chrono::steady_clock::now() < end) {
+    auto m = r.connection->channel().Receive(100);
+    if (m.status == MessageChannel::Received::kTimeout) continue;
+    ASSERT_EQ(m.status, MessageChannel::Received::kMessage);
+    ASSERT_FALSE(std::holds_alternative<Bye>(*m.message)) << "closed as idle right after a slow start";
+    if (auto* ping = std::get_if<Ping>(&*m.message)) r.connection->channel().Send(Pong{ping->id});
+  }
+}
+
 TEST_F(ControlTest, StopWithOpenSession) {
   auto r = ConnectAndStartSession(Options());
   ASSERT_EQ(r.error, "") << r.detail;
