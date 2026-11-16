@@ -2,7 +2,7 @@
 
 把被控 Mac 的系统声音传到客户端播放。2026-11-16 lroel 提出；取代[决定](decisions.md)里“音频：第一阶段不做声音”。本文是实现依据：实现按它做，审查按它对。原来标了“待验证”的地方，第 0 阶段能在不出声的前提下验的都验了，结果写在原处（和设想不同的地方相应改了设计，也写在原处）；要有声音才能验的留给 lroel，列在第 13 节。原来要 lroel 定的取舍都定了，汇总在最后一节。
 
-版本：rdaccel 1.13.0，rdmachine 4.4.0，控制协议修订 3，最低系统 macOS 14.2。第 0–5 阶段已实现（2026-11-16），第 6 阶段（TCP 上的声音）按 D9 不做；实现时和本文不同的地方、实测的数字见第 17 节，要 lroel 在能出声时验的见第 13 节。
+版本：rdaccel 1.13.0，rdmachine 5.0.0，控制协议修订 3，最低系统 macOS 14.2。第 0–5 阶段已实现（2026-11-16），第 6 阶段（TCP 上的声音）按 D9 不做；实现时和本文不同的地方、实测的数字见第 17 节，要 lroel 在能出声时验的见第 13 节。
 
 ## 0. 硬性规则：任何测试都不许让这台 Mac 出声
 
@@ -636,7 +636,7 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 ## 15. 版本和文档
 
 - **rdaccel 1.13.0**（次版本：C 接口只有新增）。`rdaccel.h` 的版本宏、`CMakeLists.txt`、`CHANGELOG.md`、`NOTICE`（Opus）；最低 macOS 14.2（`CMakeLists.txt` 里的 14.0 两处、`docs/integration.md` 的平台表、`docs/building.md`）；`docs/design.md` 范围表里“音频”从“暂不做”移到“库”（采集、编码、传输、抖动缓冲）和“可选模块”（播放器）；`docs/architecture.md` 加“声音”一节、通道表后面加数据报、代码布局加 `core/audio/`；`docs/integration.md` 加声音的用法、线程和权限。
-- **rdmachine 4.4.0**。`CMakeLists.txt`（版本、14.2）、子模块指到 rdaccel 1.13.0；`docs/decisions.md`：“音频”一行改成新的决定并指向本文，“系统版本”一行改成 14.2 和原因（Process Tap），“rdaccel 改动”的边界不变；`docs/protocol.md`：标题和开头的修订说明加修订 3、`session_request` / `session_ready` 的表、新的“声音”一节（消息 `0x10013`）、“会话统计”的字段、“以后会加的”；`README.md`；安装包的 `welcome.html`。本文标题里的“设计，未实现”在第 4 阶段完成后去掉，【待验证】和【lroel 定】换成结果。
+- **rdmachine 5.0.0**。`CMakeLists.txt`（版本、14.2）、子模块指到 rdaccel 1.13.0；`docs/decisions.md`：“音频”一行改成新的决定并指向本文，“系统版本”一行改成 14.2 和原因（Process Tap），“rdaccel 改动”的边界不变；`docs/protocol.md`：标题和开头的修订说明加修订 3、`session_request` / `session_ready` 的表、新的“声音”一节（消息 `0x10013`）、“会话统计”的字段、“以后会加的”；`README.md`；安装包的 `welcome.html`。本文标题里的“设计，未实现”在第 4 阶段完成后去掉，【待验证】和【lroel 定】换成结果。
 - 发布照旧：两个仓库都提交、两边都推，只发 pkg。GitHub 是公开的：测试信号都是算出来的，不提交任何录下来的声音。
 
 ## 16. lroel 的决定（2026-11-16，都按推荐）
@@ -667,7 +667,7 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 | 2 | 声音（第 2 阶段） | Opus、包格式、发送端、接收端、C 接口、测试信号源、netsim、fuzz |
 | 3 | 1.13.0 | Process Tap、播放器、`RDA_AUDIO_SOURCE_SYSTEM`、权限、`serve` / `view --audio`、文档 |
 | 4 | — / 声音（第 4 阶段） | 修订 3、设置、`MediaHost`、`RemoteSession`、两端的菜单和浮窗、权限、Info.plist、安装包 |
-| 5 | 声音（第 5 阶段） / 4.4.0 | 5.5 慢链路降码率、5.6 客户端输出静音时暂停（`RemoteSession` 每秒只读地查一次）、7.4 和画面对时间的测试；11.3 的测试信号数字（真实使用的还没有，见下） |
+| 5 | 声音（第 5 阶段） / 5.0.0 | 5.5 慢链路降码率、5.6 客户端输出静音时暂停（`RemoteSession` 每秒只读地查一次）、7.4 和画面对时间的测试；11.3 的测试信号数字（真实使用的还没有，见下） |
 
 ### 和设计不同的地方
 
@@ -715,3 +715,4 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 | 权限：进程开始时缓存的“拒绝”永远不变（tap 根本不建）；进程运行中的拒绝看不出来 | 查到“拒绝”时照样建不静音的 tap（不会再询问），状态 `no_permission`，听到声音就算授权；运行中撤销的授权查不出来（TCC 仍说“没问过”），采集只是全是静音：服务端菜单在没确认权限时写“安静（也可能是没有系统声音录制权限）”，并提示在系统设置里改了之后要重开服务端 | 无（不能改这台 Mac 的授权来测） |
 | 60 ms 以内的输入空当不推进样本位置，时间线落后于采集时刻 | 超过四分之一帧且比上一块长的空当按静音补上 | `AudioGate.AShortGapStillMovesThePositionsOn` |
 | 测试里没有东西拦着让本机静音的 tap | `RDACCEL_AUDIO_NULL_OUTPUT`（CTest 给每个测试都设）或 `RDACCEL_AUDIO_NO_LOCAL_MUTE` 设了时，系统声音采集从不静音本机（只建 `CATapUnmuted`），记一行日志；`MediaE2E` 的基类默认用测试信号 | `PlatformAudioMac.UnderTheTestEnvironmentNoTapMutes`（只测决定函数，不建静音的 tap） |
+| 复查：权限没确认时每 5 秒重建一次，每次写一行“process tap running”（一小时约 720 行）；测试本机不静音的那个测试临时去掉了保护它的环境变量 | 日志内容变了才写；TCC 明说拒绝时重建间隔翻倍、最长 60 秒（授权后最多一分钟生效，未问过时仍是 5 秒）；判断拆成只看传入值的 `LocalMuteAllowedFor` / `TapMutesLocalWith`，测试不再改环境变量 | `PlatformAudioMac.UnderTheTestEnvironmentNoTapMutes` |

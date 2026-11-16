@@ -209,7 +209,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 ## 声音
 
-修订 3（4.4.0），设计和取舍见[声音](audio.md)。被控 Mac 的系统声音（Process Tap）用 Opus 编码，走 rdaccel 的数据报（不重传、排在画面前、加密），只有 UDP 上有；TCP 上没有声音。
+修订 3（5.0.0），设计和取舍见[声音](audio.md)。被控 Mac 的系统声音（Process Tap）用 Opus 编码，走 rdaccel 的数据报（不重传、排在画面前、加密），只有 UDP 上有；TCP 上没有声音。
 
 - **会话开始时**：客户端在 `session_request` 里带 `audio: true`（Mac 客户端：菜单 显示 → 播放远程电脑的声音，默认开；命令行客户端：`--audio`，永远用空设备）。服务端设置“把这台 Mac 的声音传给客户端”开着、不是登录窗口时开始传，`session_ready.audio` 为 `true`；否则 `false` 加 `audio_reason`。客户端只给主画面的 viewer 打开声音（rdaccel 的 `rda_viewer_config.audio`），扩展桌面的其余画面没有。rdaccel 在 viewer 连上、握手里说了要声音时才开始采集（本机静音也从那时起），viewer 走了就停。
 - **只在修订 ≥ 3 时用**：服务端在协商出的修订不够时把 `session_request.audio` 当成 false，回复里也不带这两个字段；旧服务端忽略这个字段、不回 `audio`，客户端就不开声音；旧客户端不发，服务端不采集。两个方向都照常工作，只是没有声音。

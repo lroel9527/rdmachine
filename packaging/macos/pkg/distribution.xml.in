@@ -6,7 +6,7 @@
   <options customize="always" require-scripts="false" hostArchitectures="x86_64,arm64"/>
   <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
   <!-- Checked before anything else, with a message of its own: macOS 12, 13
-       and 14 before 14.2 are not supported (from 4.4.0: the sound needs
+       and 14 before 14.2 are not supported (from 5.0.0: the sound needs
        14.2). The volume check below stays as a second guard. -->
   <installation-check script="checkMacOS()"/>
   <script><![CDATA[
