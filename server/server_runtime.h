@@ -25,6 +25,7 @@ struct SettingsOverrides {
   std::optional<ClipboardMode> clipboard_mode;
   std::optional<int32_t> fps;
   std::optional<int32_t> bitrate_kbps;
+  std::optional<VideoCodecChoice> video_codec;
 
   ServerSettings Apply(ServerSettings s) const;
   std::string Describe() const;  // "--port, --fps"; empty if none

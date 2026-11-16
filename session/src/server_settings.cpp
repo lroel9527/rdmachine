@@ -36,6 +36,9 @@ bool LoadServerSettings(const std::string& config_dir, ServerSettings* out, std:
   }
   num("fps", 0, 240, &out->fps);
   num("bitrate_kbps", 0, 1'000'000, &out->bitrate_kbps);
+  if (auto it = j.find("video_codec"); it != j.end() && it->is_string()) {
+    if (auto c = ParseVideoCodecChoice(it->get<std::string>())) out->video_codec = *c;
+  }
   return true;
 }
 
@@ -48,6 +51,7 @@ bool SaveServerSettings(const std::string& config_dir, const ServerSettings& s, 
       {"clipboard", ClipboardModeName(s.clipboard_mode)},
       {"fps", s.fps},
       {"bitrate_kbps", s.bitrate_kbps},
+      {"video_codec", VideoCodecChoiceName(s.video_codec)},
   };
   return WritePrivateFile(ServerSettingsPath(config_dir), j.dump(2) + "\n", error);
 }

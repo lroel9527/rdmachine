@@ -19,6 +19,7 @@
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
 #include "rdmachine/session/login_screen.h"
+#include "rdmachine/session/video_codec.h"
 #include "rdmachine/session/virtual_desktop.h"
 
 namespace rdm {
@@ -64,6 +65,7 @@ struct MediaHostOptions {
   std::function<LoginScreenState()> login_screen;
   int32_t fps = 0;           // 0 = rdaccel's default
   int64_t bitrate_bps = 0;   // 0 = rdaccel's default
+  VideoCodecChoice video_codec = VideoCodecChoice::kAuto;  // see video_codec.h
   std::function<void(const std::string&)> log;  // may be empty
 };
 

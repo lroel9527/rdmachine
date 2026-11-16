@@ -126,6 +126,7 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   s.clipboard_mode = ClipboardMode::kSend;
   s.fps = 30;
   s.bitrate_kbps = 6000;
+  s.video_codec = VideoCodecChoice::kH264;
   ASSERT_TRUE(SaveServerSettings(t.path() + "/new", s, &error)) << error;
   EXPECT_EQ(Mode(ServerSettingsPath(t.path() + "/new")), 0600);
   ServerSettings back;
@@ -134,13 +135,14 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
 
   // Out of range or wrong type: that key keeps its default; unknown keys are ignored.
   ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()),
-                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "x": 1})",
+                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "video_codec": "vp8", "x": 1})",
                                &error));
   ASSERT_TRUE(LoadServerSettings(t.path(), &back, &error)) << error;
   EXPECT_EQ(back.port, kDefaultPort);
   EXPECT_EQ(back.fps, 0);
   EXPECT_EQ(back.clipboard_mode, ClipboardMode::kBoth);
   EXPECT_TRUE(back.view_only);
+  EXPECT_EQ(back.video_codec, VideoCodecChoice::kAuto);
 
   // Not JSON: an error, so the app does not overwrite what the user wrote.
   ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()), "port = 4200", &error));

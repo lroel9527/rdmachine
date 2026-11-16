@@ -85,8 +85,14 @@ void StopApp() {
   NSPopUpButton* _clipboard;
   NSTextField* _fps;
   NSTextField* _bitrate;
+  NSPopUpButton* _codec;
   NSTextField* _note;
 }
+
+// The video codec popup's items, in order.
+static const rdm::VideoCodecChoice kCodecChoices[] = {rdm::VideoCodecChoice::kAuto, rdm::VideoCodecChoice::kHevc,
+                                                       rdm::VideoCodecChoice::kH264};
+static NSString* const kCodecTitles[] = {@"自动（推荐）", @"HEVC", @"H.264"};
 
 static NSTextField* NumberField(int lo, int hi) {
   NSTextField* f = [NSTextField textFieldWithString:@""];
@@ -125,6 +131,8 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   for (NSString* t : kClipboardTitles) [_clipboard addItemWithTitle:t];
   _fps = NumberField(0, 240);
   _bitrate = NumberField(0, 1000000);
+  _codec = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+  for (NSString* t : kCodecTitles) [_codec addItemWithTitle:t];
   _note = [NSTextField wrappingLabelWithString:@""];
   _note.textColor = NSColor.systemOrangeColor;
   _note.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
@@ -136,6 +144,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     @[ [NSTextField labelWithString:@"剪贴板："], _clipboard ],
     @[ [NSTextField labelWithString:@"帧率上限："], WithHint(_fps, @"fps，0 = 默认（60）") ],
     @[ [NSTextField labelWithString:@"码率上限："], WithHint(_bitrate, @"kbps，0 = 默认（8000）") ],
+    @[ [NSTextField labelWithString:@"视频编码："], WithHint(_codec, @"自动：HEVC，这台 Mac 编不快时用 H.264") ],
   ]];
   grid.rowSpacing = 10;
   grid.columnSpacing = 8;
@@ -166,6 +175,9 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   }
   _fps.integerValue = s.fps;
   _bitrate.integerValue = s.bitrate_kbps;
+  for (size_t i = 0; i < 3; ++i) {
+    if (kCodecChoices[i] == s.video_codec) [_codec selectItemAtIndex:static_cast<NSInteger>(i)];
+  }
   _note.stringValue = overrides.length
                           ? [NSString stringWithFormat:@"这次启动用了命令行参数 %@，对应的设置在退出前以命令行为准。", overrides]
                           : @"保存后服务会用新设置重新开始监听，正在进行的连接会断开。";
@@ -187,6 +199,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   s.clipboard_mode = kClipboardModes[std::clamp<NSInteger>(_clipboard.indexOfSelectedItem, 0, 3)];
   s.fps = static_cast<int32_t>(std::clamp<NSInteger>(_fps.integerValue, 0, 240));
   s.bitrate_kbps = static_cast<int32_t>(std::clamp<NSInteger>(_bitrate.integerValue, 0, 1000000));
+  s.video_codec = kCodecChoices[std::clamp<NSInteger>(_codec.indexOfSelectedItem, 0, 2)];
   if (self.onSave) self.onSave(s);
   [_window close];
 }

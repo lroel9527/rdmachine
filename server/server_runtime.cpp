@@ -12,6 +12,7 @@ ServerSettings SettingsOverrides::Apply(ServerSettings s) const {
   if (clipboard_mode) s.clipboard_mode = *clipboard_mode;
   if (fps) s.fps = *fps;
   if (bitrate_kbps) s.bitrate_kbps = *bitrate_kbps;
+  if (video_codec) s.video_codec = *video_codec;
   return s;
 }
 
@@ -28,6 +29,7 @@ std::string SettingsOverrides::Describe() const {
   add(clipboard_mode.has_value(), "--clipboard");
   add(fps.has_value(), "--fps");
   add(bitrate_kbps.has_value(), "--bitrate-kbps");
+  add(video_codec.has_value(), "--video-codec");
   return out;
 }
 
@@ -82,6 +84,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.extra_desktop = SystemExtraDesktop();
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;
+  mo.video_codec = s.video_codec;
   mo.log = options_.log;
   auto media = std::make_unique<MediaHost>(mo);
 

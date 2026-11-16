@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 12.3+），当前版本 4.1.3。rdmachine 按自用设计：登录过就可信，尽量少打扰。
+第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 12.3+），当前版本 4.2.0。rdmachine 按自用设计：登录过就可信，尽量少打扰。
 
 ## 功能
 
@@ -44,7 +44,7 @@ sudo installer -pkg RDMachine-版本号.pkg -target /
 - 看状态：监听的端口、谁从哪个地址连着、走 UDP 还是 TCP、连了多久，以及“断开当前连接”；
 - 生成配对码（自动复制，5 分钟内有效，用一次就失效）、复制本机指纹；
 - 看屏幕录制和辅助功能权限，没允许的话点一下打开对应的系统设置；
-- “设置…”：端口、是否允许配对码、只看不控、剪贴板方向、帧率和码率上限。保存在 `~/Library/Application Support/rdmachine/server-settings.json`；改了端口等设置后服务重新监听，正在进行的连接会断开。
+- “设置…”：端口、是否允许配对码、只看不控、剪贴板方向、帧率和码率上限、视频编码（自动 / HEVC / H.264：自动时用 HEVC，这台 Mac 的硬件 HEVC 编不快时才用 H.264；H.264 要两边都是 4.2.0 或更新）。保存在 `~/Library/Application Support/rdmachine/server-settings.json`；改了端口等设置后服务重新监听，正在进行的连接会断开。
 
 ### 客户端
 

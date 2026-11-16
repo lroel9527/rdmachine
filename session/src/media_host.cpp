@@ -25,6 +25,16 @@ static_assert(kClipboardHelloMessageType == RDA_MSG_USER_FIRST + 5 && kClipboard
 
 namespace {
 
+// The server's video codec setting in rdaccel's terms (rdaccel 1.11).
+int32_t RdaVideoCodec(VideoCodecChoice c) {
+  switch (c) {
+    case VideoCodecChoice::kHevc: return RDA_VIDEO_CODEC_HEVC;
+    case VideoCodecChoice::kH264: return RDA_VIDEO_CODEC_H264;
+    case VideoCodecChoice::kAuto: break;
+  }
+  return RDA_VIDEO_CODEC_AUTO;
+}
+
 // Overwrites a secret before it is freed (a plain fill may be optimized away).
 void Wipe(std::string& s) {
   volatile char* p = s.data();
@@ -494,6 +504,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   rda_host_config_default(&cfg);
   if (options_.fps > 0) cfg.fps = options_.fps;
   if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
+  cfg.video_codec = RdaVideoCodec(options_.video_codec);
   cfg.display_index = display_index;
   cfg.encryption_key = secrets.key.data();  // copied by rdaccel
   cfg.keep_serving = 0;                      // one viewer per session
@@ -921,6 +932,7 @@ void MediaHost::StartExtraHosts(const SessionRequest& request, const SessionSecr
     rda_host_config_default(&cfg);
     if (options_.fps > 0) cfg.fps = options_.fps;
     if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
+    cfg.video_codec = RdaVideoCodec(options_.video_codec);
     cfg.display_index = x->display_index;
     cfg.encryption_key = own.key.data();  // copied by rdaccel
     cfg.keep_serving = 0;

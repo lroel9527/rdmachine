@@ -2,7 +2,7 @@
 //
 //   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
-//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--headless]
+//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--video-codec=auto|hevc|h264] [--headless]
 //                    [--fingerprint] [--version] [--standalone]
 //   rdmachine-server --daemon [--port=N] [--config-dir=DIR]   (root, launchd)
 //   rdmachine-server --login-window                            (root, launchd)
@@ -117,6 +117,7 @@ int Usage() {
                "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
                "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
+               "                        [--video-codec=auto|hevc|h264]\n"
                "                        [--headless] [--fingerprint] [--version] [--standalone]\n"
                "       rdmachine-server --daemon [--port=N] [--config-dir=DIR]\n"
                "       rdmachine-server --login-window\n");
@@ -306,6 +307,10 @@ int main(int argc, char** argv) {
       ov.fps = std::atoi(v.c_str());
     } else if (Flag(a, "--bitrate-kbps", &v)) {
       ov.bitrate_kbps = std::atoi(v.c_str());
+    } else if (Flag(a, "--video-codec", &v)) {
+      auto c = rdm::ParseVideoCodecChoice(v);
+      if (!c) return Usage();
+      ov.video_codec = *c;
     } else if (Flag(a, "--clipboard", &v)) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();

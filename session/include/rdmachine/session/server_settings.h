@@ -8,6 +8,7 @@
 
 #include "rdmachine/clipboard_sync.h"
 #include "rdmachine/protocol.h"
+#include "rdmachine/session/video_codec.h"
 
 namespace rdm {
 
@@ -18,6 +19,7 @@ struct ServerSettings {
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
   int32_t fps = 0;           // 0 = rdaccel's default
   int32_t bitrate_kbps = 0;  // 0 = rdaccel's default
+  VideoCodecChoice video_codec = VideoCodecChoice::kAuto;
 
   bool operator==(const ServerSettings&) const = default;
 };
