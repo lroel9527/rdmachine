@@ -215,6 +215,8 @@ json ToAgentJson(const SessionGrant& g) {
   r.desktop = g.desktop;
   r.login_window = g.login_window;
   r.extra_displays = g.extra_displays;
+  r.audio = g.audio;
+  r.audio_reason = g.audio_reason;
   json j = json::parse(SerializeMessage(Message{r}));
   j.erase("key");  // all zero here; the daemon holds the real ones
   j.erase("auth_token");
@@ -239,6 +241,8 @@ std::optional<SessionGrant> SessionGrantFromAgentJson(const json& j) {
   g.desktop = r->desktop;
   g.login_window = r->login_window;
   g.extra_displays = r->extra_displays;
+  g.audio = r->audio;
+  g.audio_reason = r->audio_reason;
   return g;
 }
 

@@ -46,6 +46,13 @@ class RemoteSession {
     std::shared_ptr<FileTarget> file_target;
     std::string file_staging_dir;
     std::function<void(const std::string&)> log;  // may be empty
+    // Sound (docs/audio.md): ask for the server's sound (session_request.
+    // audio); when the session has it (session_ready.audio), the main
+    // picture's viewer takes it and a player plays it on this computer's
+    // default output device, or on none at all with audio_null_device (the
+    // command-line client, tests: read and thrown away).
+    bool audio = false;
+    bool audio_null_device = false;
     int udp_wait_ms = 4000;    // then fall back to TCP; 0 = no fallback
     // The session ended from the other side or the network: "server_closed",
     // "connection_lost", "media_lost", or the server's bye reason. Runs on
@@ -80,6 +87,12 @@ class RemoteSession {
   // there (-1: not known).
   rda_status SendBulkMessage(uint32_t type, const uint8_t* payload, size_t n);
   int64_t BulkQueuedBytes() const;
+  // Sound: pause it (the user turned it off in the menu): the server sends
+  // nothing meanwhile (kAudioControlMessageType). Said again after a move.
+  // Thread-safe.
+  void SetAudioPaused(bool paused);
+  // Whether the current session plays sound (a player is running).
+  bool audio_playing() const;
   // The current viewer, for statistics and tests; may change on a move.
   rda_viewer* viewer() const;
   SessionReady session() const;
@@ -106,6 +119,10 @@ class RemoteSession {
   // take the clipboard messages; the rest are passed on to options_.viewer.
   rda_viewer_config ViewerConfig();
   std::string MediaHostAddress() const;
+  // The player for viewer_ when the session has sound (mu_ held); and the
+  // paused state sent to the server.
+  void StartPlayer();
+  void SendAudioPaused();
   static void OnStreamInfo(void* user, int32_t width, int32_t height);
   static void OnFrame(void* user, const rda_image* bgra, const rda_rect* changed, size_t changed_count,
                       const rda_frame_info* info);
@@ -119,6 +136,8 @@ class RemoteSession {
   SessionReady session_;
   rda_viewer* viewer_ = nullptr;
   std::vector<rda_viewer*> extras_;  // by extra display; null: not connected (guarded by mu_)
+  rda_audio_player* player_ = nullptr;  // plays viewer_'s sound; destroyed before it (guarded by mu_)
+  std::atomic<bool> audio_paused_{false};  // what the user asked for (SetAudioPaused)
   int udp_wait_ms_ = 0;  // options_.udp_wait_ms, longer on a far link (Start)
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};

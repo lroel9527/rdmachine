@@ -16,4 +16,7 @@ include(GoogleTest)
 # One at a time: the end-to-end tests capture the real screen (two
 # ScreenCaptureKit streams starting at once can hang on macOS) and the Mac
 # clipboard tests share the system pasteboard.
-gtest_discover_tests(rdm_session_tests DISCOVERY_TIMEOUT 30 PROPERTIES RESOURCE_LOCK rdm_screen_and_pasteboard)
+# The sound player never opens an output device in a test (rdaccel's null
+# device, forced by the variable whatever a test asks for; docs/audio.md).
+gtest_discover_tests(rdm_session_tests DISCOVERY_TIMEOUT 30 PROPERTIES RESOURCE_LOCK rdm_screen_and_pasteboard
+                     ENVIRONMENT "RDACCEL_AUDIO_NULL_OUTPUT=1")

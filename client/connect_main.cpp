@@ -6,7 +6,7 @@
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
-//                     [--text-mode] [--set-text-mode=on|off] [--copy-files=PATH[,PATH...]]
+//                     [--text-mode] [--set-text-mode=on|off] [--copy-files=PATH[,PATH...]] [--audio]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -15,6 +15,9 @@
 // On macOS the clipboard is shared while connected (--clipboard, default
 // both); other systems have no clipboard backend yet.
 //
+// --audio asks for the server's sound and takes it on a null device: read in
+// real time and thrown away, never played (this tool opens no output
+// device); the sound's figures are printed at the end.
 // --copy-files=PATH[,PATH...] "copies" these files and folders on the client
 // a second after connecting, on a clipboard of its own (not the system's):
 // for testing a server pasting them in Finder (docs/file-paste.md). Use
@@ -153,7 +156,7 @@ int Usage() {
                "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
                "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n"
                "                         [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]\n"
-               "                         [--text-mode] [--set-text-mode=on|off]\n");
+               "                         [--text-mode] [--set-text-mode=on|off] [--audio]\n");
   return 2;
 }
 
@@ -204,6 +207,10 @@ int main(int argc, char** argv) {
     else if (Flag(a, "--tcp", nullptr)) c.request.transport = rdm::MediaTransport::kTcp;
     else if (Flag(a, "--view-only", nullptr)) c.request.view_only = true;
     else if (Flag(a, "--text-mode", nullptr)) c.request.text_mode = true;
+    else if (Flag(a, "--audio", nullptr)) {
+      opts.audio = true;
+      opts.audio_null_device = true;  // always: this tool never plays a sound
+    }
     else if (Flag(a, "--set-text-mode", &v)) {
       if (v != "on" && v != "off") return Usage();
       set_text_mode = v == "on";
@@ -413,6 +420,19 @@ int main(int argc, char** argv) {
     } else {
       std::printf("saved the last picture (%dx%d) to %s\n", stats.last_w, stats.last_h, save_frame.c_str());
     }
+  }
+  if (opts.audio) {
+    rda_viewer_stats vs{};
+    vs.struct_size = sizeof(vs);
+    rda_viewer* v = session->viewer();
+    if (v && rda_viewer_get_stats(v, &vs) != RDA_OK) vs = rda_viewer_stats{};
+    const rdm::SessionReady ready = session->session();
+    std::printf("sound: %s, %llu packets, %llu bytes, %llu concealed, %llu underruns, buffer %d ms, target %d ms\n",
+                ready.audio ? "on" : ("off (" + (ready.audio_reason.empty() ? std::string("older server") : ready.audio_reason) + ")").c_str(),
+                static_cast<unsigned long long>(vs.audio_packets), static_cast<unsigned long long>(vs.audio_bytes),
+                static_cast<unsigned long long>(vs.audio_lost), static_cast<unsigned long long>(vs.audio_underruns),
+                vs.audio_buffer_ms, vs.audio_target_ms);
+    std::fflush(stdout);
   }
   session->Close();
   return stats.frames >= want_frames && !resize_failed ? 0 : 1;

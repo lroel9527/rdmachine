@@ -19,6 +19,7 @@ add_library(rdm_core STATIC
   src/input_source_sync.cpp
   src/desktop.cpp
   src/picture_mode.cpp
+  src/audio_control.cpp
   src/session_stats.cpp
   src/login_keys.cpp
   src/agent_link.cpp)

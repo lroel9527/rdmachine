@@ -13,7 +13,8 @@ struct LiveStats {
   bool valid = false;      // false until two samples have been seen
   double encoded_fps = 0;  // frames sent to the viewer
   double captured_fps = 0; // frames the screen delivered
-  double bitrate_kbps = 0; // everything the host sent
+  double bitrate_kbps = 0; // everything the host sent (sound included)
+  double audio_kbps = 0;   // of that, the sound (rda_host_stats.audio_bytes)
   double target_kbps = 0;  // encoder budget (adaptive bitrate); 0 = fixed
   double bandwidth_kbps = 0;  // transport's estimate; 0 = not measured (TCP)
   double rtt_ms = 0;          // 0 = not measured (TCP)

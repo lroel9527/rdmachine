@@ -66,6 +66,13 @@ struct MediaHostOptions {
   int32_t fps = 0;           // 0 = rdaccel's default
   int64_t bitrate_bps = 0;   // 0 = rdaccel's default
   VideoCodecChoice video_codec = VideoCodecChoice::kAuto;  // see video_codec.h
+  // Sound (docs/audio.md): sent to a client that asks for it (not from the
+  // login window), with this computer silent meanwhile when mute_local_audio.
+  // audio_source: RDA_AUDIO_SOURCE_SYSTEM, or _TEST (a computed signal, for
+  // the automatic tests: no device is touched).
+  bool send_audio = true;
+  bool mute_local_audio = true;
+  int32_t audio_source = RDA_AUDIO_SOURCE_SYSTEM;
   std::function<void(const std::string&)> log;  // may be empty
 };
 
@@ -88,8 +95,19 @@ struct MediaHostStatus {
   // nothing fits, or not synced yet).
   std::string client_input_source;
   std::string input_source;
+  // Sound: the session has it (session_ready.audio), and rdaccel's state of
+  // it (zero when there is none).
+  bool audio = false;
+  // Without sound: why ("client": it did not ask; else as
+  // session_ready.audio_reason: disabled, login_window, unsupported).
+  std::string audio_reason;
+  rda_audio_status audio_status{};
   rda_host_stats stats{};         // cumulative; zero when not running
 };
+
+// The session statistics' word for the sound's state (docs/protocol.md):
+// off, starting, on, silent, paused, no_permission or failed.
+const char* AudioStateName(bool session_has_audio, const rda_audio_status& s);
 
 class MediaHost : public ServerDelegate {
  public:
@@ -178,6 +196,8 @@ class MediaHost : public ServerDelegate {
   // mu_): set once the host exists, cleared before it is destroyed.
   std::atomic<rda_host*> mode_host_{nullptr};
   std::atomic<bool> text_mode_{false};
+  std::atomic<bool> audio_{false};  // the running session has sound
+  std::string last_audio_state_;    // StatsLoop's thread only
   MediaHostStatus status_;  // guarded by mu_; stats filled in by Status()
   // What Status() last returned, for a caller that would otherwise wait.
   std::mutex snapshot_mu_;

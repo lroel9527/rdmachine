@@ -35,5 +35,9 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Apache License 2.0</string>
+	<!-- What the System Audio Recording prompt says (the sound, docs/audio.md).
+	     Without this key macOS refuses the permission without asking. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>RDMachine 把这台 Mac 的声音传给连接进来的客户端。</string>
 </dict>
 </plist>

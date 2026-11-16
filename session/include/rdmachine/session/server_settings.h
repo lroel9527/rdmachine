@@ -20,6 +20,11 @@ struct ServerSettings {
   int32_t fps = 0;           // 0 = rdaccel's default
   int32_t bitrate_kbps = 0;  // 0 = rdaccel's default
   VideoCodecChoice video_codec = VideoCodecChoice::kAuto;
+  // Sound (docs/audio.md): send this computer's sound to a client that asks
+  // for it, and keep this computer silent meanwhile (only while the sound
+  // really goes to a client).
+  bool send_audio = true;
+  bool mute_local_audio = true;
 
   bool operator==(const ServerSettings&) const = default;
 };

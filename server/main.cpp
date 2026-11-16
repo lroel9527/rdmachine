@@ -2,7 +2,8 @@
 //
 //   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
-//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--video-codec=auto|hevc|h264] [--headless]
+//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--video-codec=auto|hevc|h264]
+//                    [--audio=on|off] [--mute-local=on|off] [--headless]
 //                    [--fingerprint] [--version] [--standalone]
 //   rdmachine-server --daemon [--port=N] [--config-dir=DIR]   (root, launchd)
 //   rdmachine-server --login-window                            (root, launchd)
@@ -39,9 +40,14 @@
 // View-only sessions never take the client's clipboard. Only macOS has a
 // clipboard backend so far.
 //
-// macOS needs two permissions for the program that runs this: Screen
-// Recording (capture) and Accessibility (input; without it sessions are
-// view-only).
+// --audio sends this computer's sound to a client that asks for it (on by
+// default), --mute-local keeps this computer silent meanwhile (on by
+// default; only while the sound really goes to a client).
+//
+// macOS needs three permissions for the program that runs this: Screen
+// Recording (capture), Accessibility (input; without it sessions are
+// view-only) and System Audio Recording (sound; without it sessions have
+// none).
 #include <pthread.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -117,7 +123,7 @@ int Usage() {
                "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
                "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
-               "                        [--video-codec=auto|hevc|h264]\n"
+               "                        [--video-codec=auto|hevc|h264] [--audio=on|off] [--mute-local=on|off]\n"
                "                        [--headless] [--fingerprint] [--version] [--standalone]\n"
                "       rdmachine-server --daemon [--port=N] [--config-dir=DIR]\n"
                "       rdmachine-server --login-window\n");
@@ -311,6 +317,23 @@ int main(int argc, char** argv) {
       auto c = rdm::ParseVideoCodecChoice(v);
       if (!c) return Usage();
       ov.video_codec = *c;
+    } else if (Flag(a, "--audio", &v)) {
+      // Send this Mac's sound to a client that asks (docs/audio.md).
+      if (v != "on" && v != "off") return Usage();
+      ov.send_audio = v == "on";
+    } else if (Flag(a, "--mute-local", &v)) {
+      if (v != "on" && v != "off") return Usage();
+      ov.mute_local_audio = v == "on";
+    } else if (Flag(a, "--audio-source", &v)) {
+      // Hidden, for the automatic tests: a computed test signal that
+      // touches no device.
+      if (v == "test") {
+        ropts.audio_source = RDA_AUDIO_SOURCE_TEST;
+      } else if (v == "system") {
+        ropts.audio_source = RDA_AUDIO_SOURCE_SYSTEM;
+      } else {
+        return Usage();
+      }
     } else if (Flag(a, "--clipboard", &v)) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();

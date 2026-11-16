@@ -203,3 +203,31 @@ TEST(Messages, RejectsGarbage) {
 }
 
 }  // namespace
+
+TEST(Messages, SessionRequestAndReadyCarrySound) {
+  rdm::SessionRequest q;
+  EXPECT_EQ(rdm::SerializeMessage(q).find("audio"), std::string::npos);  // nothing new for old servers
+  EXPECT_FALSE(RoundTrip(q).audio);
+  q.audio = true;
+  EXPECT_TRUE(RoundTrip(q).audio);
+  EXPECT_FALSE(rdm::ParseMessage(R"({"type":"session_request","audio":"yes"})").message);
+
+  rdm::SessionReady r;
+  r.port = 4100;
+  r.displays.push_back({0, "x", 100, 100, 1.0});
+  std::string text = rdm::SerializeMessage(r);
+  EXPECT_EQ(text.find("audio"), std::string::npos);  // what an older server sends
+  auto back = std::get<rdm::SessionReady>(*rdm::ParseMessage(text).message);
+  EXPECT_FALSE(back.audio);
+  EXPECT_EQ(back.audio_reason, "");
+  r.audio_reason = "login_window";
+  back = std::get<rdm::SessionReady>(*rdm::ParseMessage(rdm::SerializeMessage(r)).message);
+  EXPECT_FALSE(back.audio);
+  EXPECT_EQ(back.audio_reason, "login_window");
+  r.audio = true;  // with sound there is no reason to give
+  text = rdm::SerializeMessage(r);
+  EXPECT_EQ(text.find("audio_reason"), std::string::npos);
+  back = std::get<rdm::SessionReady>(*rdm::ParseMessage(text).message);
+  EXPECT_TRUE(back.audio);
+  EXPECT_FALSE(rdm::ParseMessage(R"({"type":"session_ready","transport":"udp","port":1,"key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","auth_token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","displays":[],"audio":1})").message);
+}

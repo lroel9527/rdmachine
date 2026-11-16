@@ -26,6 +26,8 @@ struct SettingsOverrides {
   std::optional<int32_t> fps;
   std::optional<int32_t> bitrate_kbps;
   std::optional<VideoCodecChoice> video_codec;
+  std::optional<bool> send_audio;
+  std::optional<bool> mute_local_audio;
 
   ServerSettings Apply(ServerSettings s) const;
   std::string Describe() const;  // "--port, --fps"; empty if none
@@ -50,6 +52,9 @@ class ServerRuntime {
     std::string agent_kind;  // "aqua" or "loginwindow"
     std::string agent_socket = DefaultAgentSocketPath();
     SettingsOverrides overrides;
+    // The sound's source (hidden --audio-source=test, for the automatic
+    // tests: a computed signal, no device).
+    int32_t audio_source = RDA_AUDIO_SOURCE_SYSTEM;
     std::function<void(const std::string&)> log;
   };
 

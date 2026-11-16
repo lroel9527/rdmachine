@@ -4,6 +4,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+#include <dlfcn.h>
 #include <signal.h>
 
 #include <chrono>
@@ -41,6 +42,51 @@ NSString* InputSourceText(const rdm::MediaHostStatus& st) {
 NSString* GroupedCode(const std::string& code) {
   if (code.size() != 8) return NS(code);
   return [NSString stringWithFormat:@"%@ %@", NS(code.substr(0, 4)), NS(code.substr(4))];
+}
+
+// The System Audio Recording permission (TCC kTCCServiceAudioCapture): no
+// public call asks or tells, so TCC's own (private, looked up at run time;
+// docs/audio.md, D5). 0 granted, 1 denied, 2 not asked yet, -1 not known.
+// TCC answers each process from a cache: a choice made while the server
+// runs may show only after it restarts.
+void* TccHandle() {
+  static void* h = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_LAZY);
+  return h;
+}
+
+int AudioCapturePermission() {
+  using Fn = int (*)(CFStringRef, CFDictionaryRef);
+  static Fn preflight = TccHandle() ? reinterpret_cast<Fn>(dlsym(TccHandle(), "TCCAccessPreflight")) : nullptr;
+  if (!preflight) return -1;
+  const int r = preflight(CFSTR("kTCCServiceAudioCapture"), nullptr);
+  return r >= 0 && r <= 2 ? r : -1;
+}
+
+// Asks the user (once; the answer is remembered by macOS).
+void RequestAudioCapturePermission() {
+  using Fn = void (*)(CFStringRef, CFDictionaryRef, void (^)(Boolean));
+  static Fn request = TccHandle() ? reinterpret_cast<Fn>(dlsym(TccHandle(), "TCCAccessRequest")) : nullptr;
+  if (request) request(CFSTR("kTCCServiceAudioCapture"), nullptr, ^(Boolean) {});
+}
+
+// The sound's line in the menu (docs/audio.md, 10).
+NSString* AudioText(const rdm::MediaHostStatus& st) {
+  if (!st.audio) {
+    if (st.audio_reason == "disabled") return @"声音：未传（设置里关了）";
+    if (st.audio_reason == "login_window") return @"声音：未传（登录窗口）";
+    if (st.audio_reason == "unsupported") return @"声音：未传（这台 Mac 采集不了）";
+    return @"声音：未传（客户端没要）";
+  }
+  const rda_audio_status& a = st.audio_status;
+  switch (a.state) {
+    case RDA_AUDIO_STATE_RUNNING:
+      if (a.silent) return @"声音：安静";
+      return a.muted_local ? @"声音：正在传（本机不出声）" : @"声音：正在传";
+    case RDA_AUDIO_STATE_PAUSED: return @"声音：暂停（客户端听不到）";
+    case RDA_AUDIO_STATE_NO_PERMISSION: return @"声音：未传（没有系统声音录制权限）";
+    case RDA_AUDIO_STATE_FAILED: return [NSString stringWithFormat:@"声音：未传（%@）", NS(a.message)];
+    default: return @"声音：正在开始";
+  }
 }
 
 void Copy(NSString* text) {
@@ -86,6 +132,8 @@ void StopApp() {
   NSTextField* _fps;
   NSTextField* _bitrate;
   NSPopUpButton* _codec;
+  NSButton* _sendAudio;
+  NSButton* _muteLocal;
   NSTextField* _note;
 }
 
@@ -133,6 +181,12 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _bitrate = NumberField(0, 1000000);
   _codec = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   for (NSString* t : kCodecTitles) [_codec addItemWithTitle:t];
+  _sendAudio = [NSButton checkboxWithTitle:@"把这台 Mac 的声音传给客户端" target:self action:@selector(audioChanged:)];
+  _muteLocal = [NSButton checkboxWithTitle:@"传声音时这台 Mac 自己不出声" target:nil action:nil];
+  NSStackView* audio = [NSStackView stackViewWithViews:@[ _sendAudio, _muteLocal ]];
+  audio.orientation = NSUserInterfaceLayoutOrientationVertical;
+  audio.alignment = NSLayoutAttributeLeading;
+  audio.spacing = 6;
   _note = [NSTextField wrappingLabelWithString:@""];
   _note.textColor = NSColor.systemOrangeColor;
   _note.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
@@ -145,6 +199,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
     @[ [NSTextField labelWithString:@"帧率上限："], WithHint(_fps, @"fps，0 = 默认（60）") ],
     @[ [NSTextField labelWithString:@"码率上限："], WithHint(_bitrate, @"kbps，0 = 默认（8000）") ],
     @[ [NSTextField labelWithString:@"视频编码："], WithHint(_codec, @"自动：HEVC，这台 Mac 编不快时用 H.264") ],
+    @[ [NSTextField labelWithString:@"声音："], audio ],
   ]];
   grid.rowSpacing = 10;
   grid.columnSpacing = 8;
@@ -178,6 +233,9 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   for (size_t i = 0; i < 3; ++i) {
     if (kCodecChoices[i] == s.video_codec) [_codec selectItemAtIndex:static_cast<NSInteger>(i)];
   }
+  _sendAudio.state = s.send_audio ? NSControlStateValueOn : NSControlStateValueOff;
+  _muteLocal.state = s.mute_local_audio ? NSControlStateValueOn : NSControlStateValueOff;
+  _muteLocal.enabled = s.send_audio;
   _note.stringValue = overrides.length
                           ? [NSString stringWithFormat:@"这次启动用了命令行参数 %@，对应的设置在退出前以命令行为准。", overrides]
                           : @"保存后服务会用新设置重新开始监听，正在进行的连接会断开。";
@@ -190,6 +248,10 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   [_window close];
 }
 
+- (void)audioChanged:(id)sender {
+  _muteLocal.enabled = _sendAudio.state == NSControlStateValueOn;
+}
+
 - (void)save:(id)sender {
   [_window makeFirstResponder:nil];  // commit the field being edited
   rdm::ServerSettings s;
@@ -200,6 +262,8 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   s.fps = static_cast<int32_t>(std::clamp<NSInteger>(_fps.integerValue, 0, 240));
   s.bitrate_kbps = static_cast<int32_t>(std::clamp<NSInteger>(_bitrate.integerValue, 0, 1000000));
   s.video_codec = kCodecChoices[std::clamp<NSInteger>(_codec.indexOfSelectedItem, 0, 2)];
+  s.send_audio = _sendAudio.state == NSControlStateValueOn;
+  s.mute_local_audio = _muteLocal.state == NSControlStateValueOn;
   if (self.onSave) self.onSave(s);
   [_window close];
 }
@@ -343,6 +407,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
                                          st.transport == rdm::MediaTransport::kUdp ? @"UDP" : @"TCP", HMS(secs)]
         action:nullptr];
     [self add:[NSString stringWithFormat:@"键盘语言：%@", InputSourceText(st)] action:nullptr];
+    [self add:AudioText(st) action:nullptr];
     if (st.input_unavailable) {
       [self add:@"这次连接只能看不能控：没有辅助功能权限" action:@selector(openAccessibility:)];
     }
@@ -376,7 +441,10 @@ static NSView* WithHint(NSView* field, NSString* hint) {
       action:(capture ? nullptr : @selector(openScreenRecording:))];
   [self add:(input ? @"辅助功能：已允许" : @"辅助功能：未允许，只能看不能控（点此打开系统设置）")
       action:(input ? nullptr : @selector(openAccessibility:))];
-  if (!capture || !input) {
+  const int sound = AudioCapturePermission();
+  [self add:(sound == 0 ? @"系统声音录制：已允许" : @"系统声音录制：未允许（点此打开系统设置）")
+      action:(sound == 0 ? nullptr : @selector(openAudioCapture:))];
+  if (!capture || !input || sound != 0) {
     [self add:@"    在系统设置里打开 RDMachine Server 的开关；下次连接还不行就退出重开" action:nullptr];
   }
 
@@ -421,6 +489,12 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   CGRequestScreenCaptureAccess();  // adds the app to the list (asks once)
   [NSWorkspace.sharedWorkspace
       openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
+}
+
+- (void)openAudioCapture:(id)sender {
+  if (AudioCapturePermission() == 2) RequestAudioCapturePermission();  // asks once
+  [NSWorkspace.sharedWorkspace
+      openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture"]];
 }
 
 - (void)openAccessibility:(id)sender {
@@ -487,6 +561,8 @@ void RunMenuBarApp(ServerRuntime& runtime, const MenuBarAppInfo& info) {
     // every session view-only. Each request prompts only once per app.
     if (!CGPreflightScreenCaptureAccess()) CGRequestScreenCaptureAccess();
     if (!CGPreflightPostEventAccess()) CGRequestPostEventAccess();
+    // The sound's permission too, when sound is on and macOS never asked.
+    if (runtime.effective_settings().send_audio && AudioCapturePermission() == 2) RequestAudioCapturePermission();
 
     RDMMenuBarController* controller = [[RDMMenuBarController alloc] initWithRuntime:&runtime info:info];
     [NSApp run];

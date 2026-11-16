@@ -24,6 +24,12 @@ struct SessionStatsReport {
   std::string input_source;  // what the server selected for the client's; may be empty
   bool view_only = false;
   bool text_mode = false;  // the picture is sent in text mode (picture_mode.h)
+  // Sound (revision 3): "off", "starting", "on", "silent", "paused",
+  // "no_permission" or "failed"; empty from an older server. audio_kbps:
+  // the last second's sound bitrate, counted as bitrate_kbps is (it is also
+  // in bitrate_kbps).
+  std::string audio;
+  double audio_kbps = 0;
 
   bool operator==(const SessionStatsReport&) const = default;
 };

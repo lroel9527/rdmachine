@@ -18,6 +18,7 @@
 #include "fake_clipboard.h"
 #include "rdmachine/control_server.h"
 #include "rdmachine/desktop.h"
+#include "rdmachine/audio_control.h"
 #include "rdmachine/picture_mode.h"
 #include "rdmachine/session/media_host.h"
 #include "rdmachine/session_stats.h"
@@ -42,6 +43,8 @@ struct Frames {
   std::atomic<int> stats_reports{0};
   std::atomic<int> stats_width{0};
   std::atomic<bool> stats_text_mode{false};
+  std::mutex audio_mu;
+  std::string stats_audio;  // the last report's "audio" (under audio_mu)
   std::atomic<int> width{0};
   std::atomic<rda_status> disconnect_reason{RDA_OK};
   std::atomic<bool> disconnected{false};
@@ -57,6 +60,10 @@ void OnMessage(void* u, uint32_t type, const uint8_t* payload, size_t n) {
   if (!r) return;
   static_cast<Frames*>(u)->stats_width = r->width;
   static_cast<Frames*>(u)->stats_text_mode = r->text_mode;
+  {
+    std::lock_guard lock(static_cast<Frames*>(u)->audio_mu);
+    static_cast<Frames*>(u)->stats_audio = r->audio;
+  }
   ++static_cast<Frames*>(u)->stats_reports;
 }
 void OnState(void* u, rda_state s, rda_status reason) {
@@ -597,4 +604,172 @@ TEST_F(MediaE2E, ViewOnlySessionDoesNotTakeTheClientsClipboard) {
   std::this_thread::sleep_for(700ms);
   EXPECT_FALSE(server_clipboard_->promise());
   EXPECT_EQ(server_clipboard_->writes(), 0);
+}
+
+// ---- sound (docs/audio.md) ------------------------------------------------
+
+namespace {
+
+// The server's sound is rdaccel's computed test signal: no device is
+// touched on either side (the client plays on the null device).
+class MediaE2EAudio : public MediaE2E {
+ protected:
+  void Configure(MediaHostOptions& mo) override {
+    mo.audio_source = RDA_AUDIO_SOURCE_TEST;
+    mo.mute_local_audio = false;
+  }
+};
+
+class MediaE2EAudioLoginWindow : public MediaE2E {
+ protected:
+  void Configure(MediaHostOptions& mo) override {
+    mo.audio_source = RDA_AUDIO_SOURCE_TEST;
+    mo.login_window = true;
+    mo.login_screen = [] { return LoginScreenState{true, true}; };
+  }
+};
+
+rda_viewer_stats ViewerStats(rda_viewer* v) {
+  rda_viewer_stats s{};
+  s.struct_size = sizeof(s);
+  if (!v || rda_viewer_get_stats(v, &s) != RDA_OK) s = rda_viewer_stats{};
+  return s;
+}
+
+std::string StatsAudio(Frames& f) {
+  std::lock_guard lock(f.audio_mu);
+  return f.stats_audio;
+}
+
+}  // namespace
+
+TEST_F(MediaE2EAudio, SoundReachesTheClient) {
+  Frames frames;
+  auto o = Options(&frames);
+  o.audio = true;
+  o.audio_null_device = true;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_TRUE(s->session().audio);
+  EXPECT_TRUE(s->audio_playing());
+  EXPECT_TRUE(WaitFor([&] { return ViewerStats(s->viewer()).audio_packets > 0; }, 5s));
+  EXPECT_TRUE(WaitFor([&] {
+    const std::string a = StatsAudio(frames);
+    return a == "on" || a == "silent";
+  }));
+  const MediaHostStatus st = media_->Status();
+  EXPECT_TRUE(st.audio);
+  EXPECT_EQ(st.audio_status.frame_ms, 10);
+  EXPECT_GT(st.stats.audio_packets, 0u);
+  EXPECT_GE(st.stats.bytes_sent, st.stats.audio_bytes);
+  s->Close();
+  EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
+  EXPECT_FALSE(media_->Status().audio);
+}
+
+TEST_F(MediaE2EAudio, NoSoundForAClientThatDidNotAsk) {
+  Frames frames;
+  ConnectResult r;
+  auto s = RemoteSession::Start(Options(&frames), &r);  // audio = false
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_FALSE(s->session().audio);
+  EXPECT_EQ(s->session().audio_reason, "");  // it did not ask: no reason to give
+  EXPECT_FALSE(s->audio_playing());
+  EXPECT_TRUE(WaitFor([&] { return frames.stats_reports > 0; }));
+  std::this_thread::sleep_for(1500ms);
+  EXPECT_EQ(ViewerStats(s->viewer()).audio_packets, 0u);
+  const MediaHostStatus st = media_->Status();
+  EXPECT_FALSE(st.audio);
+  EXPECT_EQ(st.audio_reason, "client");
+  EXPECT_EQ(st.stats.audio_packets, 0u);
+  EXPECT_EQ(StatsAudio(frames), "off");
+}
+
+TEST_F(MediaE2EAudio, PausedSendsNothing) {
+  Frames frames;
+  auto o = Options(&frames);
+  o.audio = true;
+  o.audio_null_device = true;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  ASSERT_TRUE(WaitFor([&] { return ViewerStats(s->viewer()).audio_packets > 0; }, 5s));
+  s->SetAudioPaused(true);
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.state == RDA_AUDIO_STATE_PAUSED; }));
+  std::this_thread::sleep_for(300ms);  // what was on its way
+  const uint64_t before = media_->Status().stats.audio_packets;
+  std::this_thread::sleep_for(4500ms);  // longer than the test signal's loop: sound would have come
+  EXPECT_EQ(media_->Status().stats.audio_packets, before);
+  EXPECT_TRUE(WaitFor([&] { return StatsAudio(frames) == "paused"; }));
+  s->SetAudioPaused(false);
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().stats.audio_packets > before; }, 6s));
+}
+
+TEST_F(MediaE2EAudio, DataSaverSwitchesTheProfile) {
+  Frames frames;
+  auto o = Options(&frames);
+  o.audio = true;
+  o.audio_null_device = true;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  ASSERT_TRUE(WaitFor([&] { return ViewerStats(s->viewer()).audio_packets > 0; }, 5s));
+  EXPECT_EQ(media_->Status().audio_status.frame_ms, 10);
+  EXPECT_EQ(media_->Status().audio_status.profile, RDA_AUDIO_PROFILE_FULL);
+  const std::string payload = EncodePictureMode({true});
+  ASSERT_EQ(s->SendMessage(kPictureModeMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size()),
+            RDA_OK);
+  // From the next frame (the sound may be in a silent stretch: the profile
+  // shows at once, the frame length with the next sound).
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.profile == RDA_AUDIO_PROFILE_SAVER; }));
+  EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.frame_ms == 20; }, 6s));
+}
+
+TEST_F(MediaE2EAudioLoginWindow, NoSoundAtTheLoginWindow) {
+  Frames frames;
+  auto o = Options(&frames);
+  o.audio = true;
+  o.audio_null_device = true;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_TRUE(s->session().login_window);
+  EXPECT_FALSE(s->session().audio);
+  EXPECT_EQ(s->session().audio_reason, "login_window");
+  EXPECT_FALSE(s->audio_playing());
+  EXPECT_FALSE(media_->Status().audio);
+}
+
+TEST_F(MediaE2EAudio, AnOlderClientGetsNoSound) {
+  // A client whose rdaccel takes no sound (1.12 and older): it may put
+  // session_request.audio, but its viewer has no kCapAudio, so the server
+  // captures nothing and sends nothing.
+  ClientOptions c;
+  c.host = "127.0.0.1";
+  c.port = server_->port();
+  c.client_name = "older";
+  c.auth.username = "alice";
+  c.auth.password = "secret";
+  c.trust_server = [](const std::string&) { return true; };
+  c.request.audio = true;
+  ConnectResult r = ConnectAndStartSession(c);
+  ASSERT_TRUE(r.error.empty()) << r.error << ": " << r.detail;
+  EXPECT_TRUE(r.session.audio);
+  Frames frames;
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.user = &frames;
+  vc.on_frame = &OnFrame;
+  vc.audio = 0;  // as an older viewer: no sound in its handshake
+  rda_viewer* v = nullptr;
+  std::string error;
+  ASSERT_EQ(CreateSessionViewer("127.0.0.1", r.session, vc, &v, &error), RDA_OK) << error;
+  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
+  std::this_thread::sleep_for(1500ms);
+  const MediaHostStatus st = media_->Status();
+  EXPECT_EQ(st.audio_status.state, RDA_AUDIO_STATE_WAITING_PEER);
+  EXPECT_EQ(st.stats.audio_packets, 0u);
+  rda_viewer_destroy(v);
+  r.connection->Close("user_closed");
 }

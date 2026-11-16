@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "rdmachine/audio_control.h"
 #include "rdmachine/server_session.h"  // ExtraDisplaySecrets
 #include "rdmachine/session/viewer.h"
 
@@ -133,6 +134,7 @@ void RemoteSession::OnMessage(void* user, uint32_t type, const uint8_t* payload,
 
 std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResult* result) {
   const auto connect_start = std::chrono::steady_clock::now();
+  options.control.request.audio = options.audio;
   *result = ConnectAndStartSession(options.control);
   if (!result->error.empty()) return nullptr;
   const auto connect_took = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -174,7 +176,9 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
   for (int attempt = 0;; ++attempt) {
     s->session_ = result->session;
     std::string error;
-    if (CreateSessionViewer(s->MediaHostAddress(), s->session_, s->ViewerConfig(), &s->viewer_, &error) != RDA_OK) {
+    rda_viewer_config vc = s->ViewerConfig();
+    vc.audio = s->session_.audio ? 1 : 0;  // the main picture only
+    if (CreateSessionViewer(s->MediaHostAddress(), s->session_, vc, &s->viewer_, &error) != RDA_OK) {
       result->error = "media_failed";
       result->detail = error;
       return nullptr;
@@ -201,6 +205,11 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
       return nullptr;
   }
   result->session = s->session_;
+  {
+    std::lock_guard lock(s->mu_);
+    s->StartPlayer();
+  }
+  if (s->session_.audio && s->audio_paused_) s->SendAudioPaused();
   if (s->clipboard_) s->clipboard_->Start();
   s->thread_ = std::thread([raw = s.get()] { raw->KeepAlive(); });
   return s;
@@ -236,10 +245,40 @@ SessionReady RemoteSession::session() const {
   return session_;
 }
 
+void RemoteSession::StartPlayer() {
+  if (!session_.audio || !viewer_ || player_) return;
+  rda_audio_player_config pc;
+  rda_audio_player_config_default(&pc);
+  pc.null_device = options_.audio_null_device ? 1 : 0;
+  if (rda_audio_player_create(viewer_, &pc, &player_) != RDA_OK) {
+    player_ = nullptr;
+    if (options_.log) options_.log(std::string("sound: no player: ") + rda_last_error());
+    return;
+  }
+  if (options_.log) options_.log(options_.audio_null_device ? "sound: on (null device)" : "sound: on");
+}
+
+void RemoteSession::SendAudioPaused() {
+  const std::string payload = EncodeAudioControl({audio_paused_.load()});
+  SendMessage(kAudioControlMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+}
+
+void RemoteSession::SetAudioPaused(bool paused) {
+  if (audio_paused_.exchange(paused) == paused) return;
+  SendAudioPaused();
+}
+
+bool RemoteSession::audio_playing() const {
+  std::lock_guard lock(mu_);
+  return player_ != nullptr;
+}
+
 bool RemoteSession::FollowMove(const SessionReady& ready) {
   rda_viewer* fresh = nullptr;
   std::string error;
-  if (CreateSessionViewer(MediaHostAddress(), ready, ViewerConfig(), &fresh, &error) != RDA_OK) {
+  rda_viewer_config vc = ViewerConfig();
+  vc.audio = ready.audio ? 1 : 0;
+  if (CreateSessionViewer(MediaHostAddress(), ready, vc, &fresh, &error) != RDA_OK) {
     if (options_.log) options_.log("moved session: " + error);
     return false;
   }
@@ -257,13 +296,23 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
   }
   CloseExtras();  // the old desktop's extra displays are gone with it
   rda_viewer* old = nullptr;
+  rda_audio_player* old_player = nullptr;
   {
     std::lock_guard lock(mu_);
     old = viewer_;
+    old_player = player_;  // it plays the old viewer: goes before it
+    player_ = nullptr;
     viewer_ = fresh;
     session_ = ready;
   }
+  if (old_player) rda_audio_player_destroy(old_player);
   if (old) rda_viewer_destroy(old);  // no callback of it runs after this
+  {
+    std::lock_guard lock(mu_);
+    StartPlayer();
+  }
+  // The new place knows nothing of a pause asked for before.
+  if (session_.audio && audio_paused_) SendAudioPaused();
   if (options_.log) options_.log("session moved: new picture connection");
   if (options_.on_moved) options_.on_moved(ready);
   return true;
@@ -430,11 +479,15 @@ void RemoteSession::Close() {
   if (thread_.joinable()) thread_.join();
   CloseExtras();
   rda_viewer* v = nullptr;
+  rda_audio_player* p = nullptr;
   {
     std::lock_guard lock(mu_);
     v = viewer_;
     viewer_ = nullptr;
+    p = player_;
+    player_ = nullptr;
   }
+  if (p) rda_audio_player_destroy(p);  // before its viewer
   if (v) rda_viewer_destroy(v);
   if (control_) {
     control_->Close("user_closed");

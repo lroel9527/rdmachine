@@ -84,3 +84,20 @@ TEST(LiveStats, CountersStartingOverDoNotGoNegative) {
   EXPECT_DOUBLE_EQ(s.encoded_fps, 10);
   EXPECT_DOUBLE_EQ(s.recent_loss_pct, 1);
 }
+
+TEST(LiveStats, SoundBitrateIsPartOfTheTotal) {
+  LiveStatsSampler sampler;
+  const auto t0 = LiveStatsSampler::Clock::time_point() + 100s;
+  rda_host_stats a = Sample(0, 0, 0, 0);
+  sampler.Update(a, t0);
+  rda_host_stats b = Sample(60, 100'000, 500, 0);
+  b.audio_bytes = 20'000;  // also in bytes_sent
+  LiveStats s = sampler.Update(b, t0 + 1s);
+  EXPECT_DOUBLE_EQ(s.bitrate_kbps, 800);
+  EXPECT_DOUBLE_EQ(s.audio_kbps, 160);
+  // Silence: no sound bytes, no sound bitrate.
+  rda_host_stats c = Sample(120, 150'000, 900, 0);
+  c.audio_bytes = 20'000;
+  s = sampler.Update(c, t0 + 2s);
+  EXPECT_DOUBLE_EQ(s.audio_kbps, 0);
+}

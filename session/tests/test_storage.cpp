@@ -119,6 +119,8 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   ServerSettings s;
   ASSERT_TRUE(LoadServerSettings(t.path(), &s, &error)) << error;
   EXPECT_EQ(s, ServerSettings{});  // no file yet
+  EXPECT_TRUE(s.send_audio);        // sound on by default,
+  EXPECT_TRUE(s.mute_local_audio);  // and this computer silent while it is sent
 
   s.port = 4200;
   s.offer_pairing_codes = false;
@@ -127,6 +129,8 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   s.fps = 30;
   s.bitrate_kbps = 6000;
   s.video_codec = VideoCodecChoice::kH264;
+  s.send_audio = false;
+  s.mute_local_audio = false;
   ASSERT_TRUE(SaveServerSettings(t.path() + "/new", s, &error)) << error;
   EXPECT_EQ(Mode(ServerSettingsPath(t.path() + "/new")), 0600);
   ServerSettings back;
@@ -135,7 +139,7 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
 
   // Out of range or wrong type: that key keeps its default; unknown keys are ignored.
   ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()),
-                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "video_codec": "vp8", "x": 1})",
+                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "video_codec": "vp8", "send_audio": 0, "mute_local_audio": false, "x": 1})",
                                &error));
   ASSERT_TRUE(LoadServerSettings(t.path(), &back, &error)) << error;
   EXPECT_EQ(back.port, kDefaultPort);
@@ -143,6 +147,8 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   EXPECT_EQ(back.clipboard_mode, ClipboardMode::kBoth);
   EXPECT_TRUE(back.view_only);
   EXPECT_EQ(back.video_codec, VideoCodecChoice::kAuto);
+  EXPECT_TRUE(back.send_audio);  // not a boolean: the default
+  EXPECT_FALSE(back.mute_local_audio);
 
   // Not JSON: an error, so the app does not overwrite what the user wrote.
   ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()), "port = 4200", &error));

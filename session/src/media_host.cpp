@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "rdmachine/audio_control.h"
 #include "rdmachine/login_keys.h"
 #include "rdmachine/session/live_stats.h"
 #include "rdmachine/picture_mode.h"
@@ -19,11 +20,30 @@ static_assert(kInputSourceMessageType == RDA_MSG_USER_FIRST + 1, "an application
 static_assert(kSessionStatsMessageType == RDA_MSG_USER_FIRST + 2, "an application message type");
 static_assert(kDesktopRequestMessageType == RDA_MSG_USER_FIRST + 3, "an application message type");
 static_assert(kPictureModeMessageType == RDA_MSG_USER_FIRST + 4, "an application message type");
+static_assert(kAudioControlMessageType == RDA_MSG_USER_FIRST + 0x13, "an application message type");
 static_assert(kClipboardTextMessageType == RDA_MSG_CLIPBOARD_TEXT, "rdaccel's clipboard text message");
 static_assert(kClipboardHelloMessageType == RDA_MSG_USER_FIRST + 5 && kClipboardCancelMessageType == RDA_MSG_USER_FIRST + 9,
               "application message types");
 
+const char* AudioStateName(bool session_has_audio, const rda_audio_status& s) {
+  if (!session_has_audio) return "off";
+  switch (s.state) {
+    case RDA_AUDIO_STATE_WAITING_PEER:
+    case RDA_AUDIO_STATE_STARTING: return "starting";
+    case RDA_AUDIO_STATE_RUNNING: return s.silent ? "silent" : "on";
+    case RDA_AUDIO_STATE_PAUSED: return "paused";
+    case RDA_AUDIO_STATE_NO_PERMISSION: return "no_permission";
+    case RDA_AUDIO_STATE_FAILED: return "failed";
+    default: return "off";
+  }
+}
+
 namespace {
+
+// Bundle identifier of the client application: its own playback is left
+// out of the capture, so with client and server on one Mac the sound is not
+// captured again.
+constexpr const char* kClientBundleId = "org.rdmachine.client";
 
 // The server's video codec setting in rdaccel's terms (rdaccel 1.11).
 int32_t RdaVideoCodec(VideoCodecChoice c) {
@@ -143,6 +163,9 @@ MediaHostStatus MediaHost::Status() {
   if (host_) {
     s.media_connected = media_connected_;
     s.text_mode = text_mode_;
+    s.audio = audio_;
+    s.audio_status.struct_size = sizeof(s.audio_status);
+    if (rda_host_get_audio_status(host_, &s.audio_status) != RDA_OK) s.audio_status = rda_audio_status{};
     s.stats.struct_size = sizeof(s.stats);
     if (rda_host_get_stats(host_, &s.stats) != RDA_OK) s.stats = rda_host_stats{};
     char enc[64] = {};
@@ -197,9 +220,24 @@ void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, siz
     if (auto mode = DecodePictureMode(std::string(reinterpret_cast<const char*>(payload), n))) {
       if (rda_host* h = self->mode_host_.load()) {
         rda_host_set_text_mode(h, mode->text_mode ? 1 : 0);
+        // The data saver's sound goes with it (docs/audio.md, 11).
+        rda_host_set_audio_profile(h, mode->text_mode ? RDA_AUDIO_PROFILE_SAVER : RDA_AUDIO_PROFILE_FULL);
         if (self->text_mode_.exchange(mode->text_mode) != mode->text_mode) {
           self->Log(mode->text_mode ? "text mode on (asked by the client)" : "text mode off (asked by the client)");
         }
+      }
+    }
+  }
+  if (type == kAudioControlMessageType) {
+    // The client cannot hear it (sound off in its menu, its output muted):
+    // nothing is sent meanwhile. This computer stays muted all the same.
+    if (auto c = DecodeAudioControl(std::string(reinterpret_cast<const char*>(payload), n))) {
+      if (rda_host* h = self->mode_host_.load(); h && self->audio_) {
+        rda_audio_status st{};
+        st.struct_size = sizeof(st);
+        const bool was = rda_host_get_audio_status(h, &st) == RDA_OK && st.state == RDA_AUDIO_STATE_PAUSED;
+        rda_host_set_audio_paused(h, c->paused ? 1 : 0);
+        if (was != c->paused) self->Log(c->paused ? "sound paused (the client cannot hear it)" : "sound resumed");
       }
     }
   }
@@ -551,6 +589,33 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   // No display sleep while someone is connected: it would stop the capture.
   awake_ = KeepDisplaysAwake("rdmachine: a remote session is connected");
   text_mode_ = request.text_mode;
+  // Sound, for a client that asked (docs/audio.md): rdaccel captures once its
+  // viewer is connected and says it takes sound. Not from the login window,
+  // not when the server's setting is off; a failure costs the sound only.
+  audio_ = false;
+  if (request.audio) {
+    if (!options_.send_audio) {
+      grant.audio_reason = "disabled";
+    } else if (options_.login_window) {
+      grant.audio_reason = "login_window";
+    } else {
+      rda_audio_config ac;
+      rda_audio_config_default(&ac);
+      ac.source = options_.audio_source;
+      ac.profile = request.text_mode ? RDA_AUDIO_PROFILE_SAVER : RDA_AUDIO_PROFILE_FULL;
+      ac.mute_local = options_.mute_local_audio ? 1 : 0;
+      const char* exclude[] = {kClientBundleId};
+      ac.exclude_bundle_ids = exclude;
+      ac.exclude_bundle_id_count = 1;
+      if (rda_host_start_audio(host, &ac) == RDA_OK) {
+        audio_ = true;
+        grant.audio = true;
+      } else {
+        Log(std::string("sound unavailable: ") + rda_last_error());
+        grant.audio_reason = "unsupported";
+      }
+    }
+  }
   mode_host_ = host;
   status_ = MediaHostStatus{};
   status_.running = true;
@@ -559,6 +624,8 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   status_.view_only = injector == nullptr;
   status_.input_unavailable = !view_only && injector == nullptr;
   status_.started = std::chrono::steady_clock::now();
+  status_.audio = audio_;
+  status_.audio_reason = audio_ ? std::string() : request.audio ? grant.audio_reason : std::string("client");
   status_.width = infos[static_cast<size_t>(display_index)].width;
   status_.height = infos[static_cast<size_t>(display_index)].height;
   if (desktop) {
@@ -596,7 +663,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     clipboard_->Start();
   }
   Log("session started on display " + std::to_string(display_index) + (view_only ? " (view only)" : "") +
-      (request.text_mode ? " (text mode)" : "") + (options_.login_window ? " (login window)" : "") + ", media " +
+      (request.text_mode ? " (text mode)" : "") + (options_.login_window ? " (login window)" : "") +
+      (audio_ ? std::string(", sound") + (options_.mute_local_audio ? " (this Mac silent)" : "")
+              : request.audio ? ", no sound (" + grant.audio_reason + ")" : "") +
+      ", media " +
       (grant.transport == MediaTransport::kTcp ? "tcp" : "udp on " + media_where) + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
   StartExtraHosts(request, secrets, origin, injector != nullptr, &grant);
@@ -682,6 +752,20 @@ void MediaHost::StatsLoop() {
           }
           r.view_only = status_.view_only;
           r.text_mode = text_mode_;
+          rda_audio_status as{};
+          as.struct_size = sizeof(as);
+          if (rda_host_get_audio_status(host_, &as) != RDA_OK) as = rda_audio_status{};
+          r.audio = AudioStateName(audio_, as);
+          r.audio_kbps = ls.audio_kbps;
+          // The sound's state changes are logged once each (no permission
+          // and failures with their reason).
+          if (r.audio != last_audio_state_) {
+            if (audio_) {
+              Log("sound: " + r.audio + (as.message[0] ? std::string(" (") + as.message + ")" : std::string()) +
+                  (as.muted_local ? ", this Mac silent" : ""));
+            }
+            last_audio_state_ = r.audio;
+          }
           const std::string payload = EncodeSessionStats(r);
           // Before the viewer is connected this is RDA_ERR_BUSY: try next time.
           rda_host_send_message(host_, kSessionStatsMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
@@ -996,6 +1080,10 @@ void MediaHost::EndSession() {
     clipboard_host_ = nullptr;
     mode_host_ = nullptr;
     text_mode_ = false;
+    // The sound first: the capture ends and this computer's own sound is
+    // back before anything else goes.
+    if (audio_) rda_host_stop_audio(host);
+    audio_ = false;
     // Destroy the host under the lock so StartSession cannot bind the port
     // before it is free again.
     rda_host_destroy(host);

@@ -1,4 +1,4 @@
-# 控制协议（基础版本 0，修订 1）
+# 控制协议（基础版本 0，修订 3）
 
 rdmachine 的客户端和服务端之间有两条连接：
 
@@ -7,7 +7,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 控制连接先完成登录，再为这次会话生成一把新的 32 字节密钥和一个一次性令牌，经 TLS 交给客户端，客户端拿它们去建 rdaccel 连接。这样 rdaccel 每次都拿到新密钥，密码不会出现在 UDP 上，也不需要改 rdaccel（rdaccel 本身只有预共享密钥，没有前向保密和服务器身份，见 [rdaccel 能力评估](research/rdaccel-assessment.md)）。
 
-> **版本和兼容**（4.0.0 起）：`protocol` 是基础版本，固定为 0，两端必须一样；只有旧版本跟不上的改动才会换基础版本（没有计划）。在它之上兼容地加东西用**修订**：hello 和 server_hello 各带自己的 `revision`（没有就是 0，3.4 及更早），两边都按较小的那个用；修订 N 的功能只在协商出的修订不低于 N 时用，旧的一方没有这个功能，照常工作。修订加的字段和消息都是可选的，旧的一方忽略它们。所以新旧版本可以互连，不用两边同时升级。修订 0：3.4 及以前的一切（包括后来加的可选字段 `desktop`、`text_mode` 等）；修订 1：修订本身；修订 2：扩展桌面（见“扩展桌面”）；两者都从 4.0.0 起。实现在 `core/include/rdmachine/protocol.h`（`kProtocolRevision`、`NegotiatedRevision`）。
+> **版本和兼容**（4.0.0 起）：`protocol` 是基础版本，固定为 0，两端必须一样；只有旧版本跟不上的改动才会换基础版本（没有计划）。在它之上兼容地加东西用**修订**：hello 和 server_hello 各带自己的 `revision`（没有就是 0，3.4 及更早），两边都按较小的那个用；修订 N 的功能只在协商出的修订不低于 N 时用，旧的一方没有这个功能，照常工作。修订加的字段和消息都是可选的，旧的一方忽略它们。所以新旧版本可以互连，不用两边同时升级。修订 0：3.4 及以前的一切（包括后来加的可选字段 `desktop`、`text_mode` 等）；修订 1：修订本身；修订 2：扩展桌面（见“扩展桌面”）；两者都从 4.0.0 起。修订 3：声音（见“声音”），4.4.0 起。实现在 `core/include/rdmachine/protocol.h`（`kProtocolRevision`、`NegotiatedRevision`）。
 
 ## 一次连接的完整流程
 
@@ -123,6 +123,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `text_mode` | 布尔 | false | 以文字模式开始会话，见下文“文字模式” |
 | `desktop` | 对象 | 无 | 客户端要的桌面：`width`、`height`（像素，≥ 1）、`scale`（每点像素数，可省略，默认 1）。服务端按它建虚拟显示器并共享那块屏，这时 `display_index` 不起作用。见下文“请求桌面” |
 | `extra_desktops` | 数组 | 无 | 扩展桌面的其余显示器（修订 2，最多 3 项，要和 `desktop` 一起）。见下文“扩展桌面” |
+| `audio` | 布尔 | false | 客户端要被控 Mac 的声音（修订 3）。见下文“声音” |
 
 ### session_ready（服务端 → 客户端）
 
@@ -136,6 +137,8 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `desktop` | 对象，可选 | 为这次请求建好的桌面（`width`、`height`、`scale`，尺寸可能被调整过）。没有这个字段：客户端没请求，或者服务端建不了，画面是服务端自己的显示器，客户端按比例缩放显示 |
 | `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后会话迁移到他的桌面，见下文“会话迁移”。没有这个字段等于 `false` |
 | `extra_displays` | 数组，可选 | 为 `extra_desktops` 建好的显示器：`port`、`desktop`、`x`、`y`（修订 2）。密钥和令牌由会话的派生，见“扩展桌面” |
+| `audio` | 布尔，可选 | `true`：这次会话有声音（修订 3），客户端给主画面的 viewer 打开声音。没有这个字段等于 `false` |
+| `audio_reason` | 字符串，可选 | `audio` 不为 `true` 而客户端要了声音时说明原因：`disabled`（服务端设置关了）、`login_window`（登录窗口没有声音）、`unsupported`（系统或构建不支持）。没有权限不在这里说（会话中途可能授权），在会话统计里 |
 
 客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
@@ -203,6 +206,19 @@ rdmachine 的客户端和服务端之间有两条连接：
 - 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `text_mode` 和这条消息（画面照常，只是不省），旧客户端不发。
 
 实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/main.mm`（`toggleTextMode:`、`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。
+
+## 声音
+
+修订 3（4.4.0），设计和取舍见[声音](audio.md)。被控 Mac 的系统声音（Process Tap）用 Opus 编码，走 rdaccel 的数据报（不重传、排在画面前、加密），只有 UDP 上有；TCP 上没有声音。
+
+- **会话开始时**：客户端在 `session_request` 里带 `audio: true`（Mac 客户端：菜单 显示 → 播放远程电脑的声音，默认开；命令行客户端：`--audio`，永远用空设备）。服务端设置“把这台 Mac 的声音传给客户端”开着、不是登录窗口时开始传，`session_ready.audio` 为 `true`；否则 `false` 加 `audio_reason`。客户端只给主画面的 viewer 打开声音（rdaccel 的 `rda_viewer_config.audio`），扩展桌面的其余画面没有。rdaccel 在 viewer 连上、握手里说了要声音时才开始采集（本机静音也从那时起），viewer 走了就停。
+- **只在修订 ≥ 3 时用**：服务端在协商出的修订不够时把 `session_request.audio` 当成 false，回复里也不带这两个字段；旧服务端忽略这个字段、不回 `audio`，客户端就不开声音；旧客户端不发，服务端不采集。两个方向都照常工作，只是没有声音。
+- **会话中途**：rdaccel 应用消息，类型 `0x10013`（`RDA_MSG_USER_FIRST + 0x13`，`kAudioControlMessageType`），客户端到服务端，JSON `{"paused":false}`。`paused` 为真：用户在菜单里关了声音，或者客户端的默认输出静了音、音量为 0（没人听得到）。服务端调用 `rda_host_set_audio_paused`，不编码也不发；本机照旧静音。恢复时当成新的一段声音。不认识的字段忽略。会话迁移后客户端把暂停状态再发一次。
+- **档位**不单独传：服务端在会话开始时和每次收到文字模式消息时，`text_mode` 为真就用省流量的档位（20 ms 一帧、立体声 96 kbps），否则普通档位（10 ms、160 kbps）。
+- **本机静音**：服务端设置“传声音时这台 Mac 自己不出声”（默认开），只在声音真的在往客户端传的会话里，且确认有“系统声音录制”权限之后；客户端暂停期间照旧静音。
+- **守护进程**：`start_session.request` 原样带着 `audio`，`grant` 带回 `audio` / `audio_reason`；守护进程和 agent 之间没有新消息。
+
+实现：`core/include/rdmachine/audio_control.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`、`StatsLoop`、`EndSession`）；客户端在 `RemoteSession`（`Options::audio`、`SetAudioPaused`，播放器跟着 viewer 建和拆）和 `client/main.mm`（`togglePlaySound:`、浮窗的“声音”一项）。测试：`core/tests/test_audio_control.cpp`、`test_messages.cpp`、`test_server_session.cpp`（`SoundOnlyFromRevision3`）、`session/tests/test_media_e2e.cpp`（`MediaE2EAudio.*`）、`test_daemon_e2e.cpp`（`SoundGoesThroughTheDaemonAndFollowsTheMove`）、`tools/smoke_test.sh`。
 
 ## 守护进程和 agent
 
@@ -329,10 +345,13 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
 {"transport":"udp","width":2880,"height":1800,"encoded_fps":57.5,"captured_fps":60,
  "bitrate_kbps":3200,"target_kbps":8000,"bandwidth_kbps":120000,"rtt_ms":18.2,
  "recent_loss_pct":0.4,"total_loss_pct":1.5,"frames_dropped_congestion":3,
- "encoder":"VideoToolbox HEVC (low-latency)","input_source":"简体拼音","view_only":false,"text_mode":false}
+ "encoder":"VideoToolbox HEVC (low-latency)","input_source":"简体拼音","view_only":false,"text_mode":false,
+ "audio":"on","audio_kbps":162.5}
 ```
 
 速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是真正丢失的包：rdaccel 判定丢失并重传、之后又没有收到原包确认的（`packets_lost - packets_spurious`，rdaccel 1.3），只是晚到的不算。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。
+
+修订 3 加了声音的两项（旧客户端忽略）：`audio` 是声音的状态：`off`（这次会话没有声音）、`starting`、`on`（正在传）、`silent`（在传，但被控 Mac 现在没声音，一个包都不发）、`paused`（客户端暂停了）、`no_permission`（服务端没有“系统声音录制”权限）、`failed`（采集失败，rdaccel 每 2 秒再试）；`audio_kbps` 是最近一秒声音的码率，和 `bitrate_kbps` 同一个口径（也算在 `bitrate_kbps` 里）。Mac 客户端浮窗的“声音”一项（默认不显示）：`Audio: 96 kbps · buffer 32 ms · lost 0.1%`、`Audio: silent`、`Audio: paused`、`Audio: off (server setting)`、`Audio: off (server needs the System Audio Recording permission)`、`Audio: off (login window)`、`Audio: off (older server)`；码率来自服务端，缓冲和丢失来自本机的 `rda_viewer_stats`。
 
 ## 实现
 
@@ -366,3 +385,4 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
 - 被控端审批弹窗（NoMachine 的 0/1/2 三档）、双因素认证：以后。
 - 切换显示器：以后加消息类型。断线后自动重连不做（见[决定](decisions.md)的“下一步范围”）。
 - 请求桌面：Linux 服务端的虚拟屏；多块屏的桌面；会话期间不让被控端的真实屏幕显示画面（隐私屏）。
+- 声音：TCP 上的声音（UDP 不通退回 TCP 时，现在没有声音；[声音](audio.md)第 6.4 节有做法，等真的用到再做）；客户端麦克风传到被控端：不做。

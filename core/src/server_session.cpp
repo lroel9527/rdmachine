@@ -208,12 +208,21 @@ std::optional<SessionReady> ServerSession::TryStart(const SessionRequest& m, std
   ready.desktop = grant->desktop;
   ready.login_window = grant->login_window;
   ready.extra_displays = grant->extra_displays;
+  // Sound is revision 3: an older client neither asked (it cannot have) nor
+  // hears of it.
+  if (revision_ >= 3) {
+    ready.audio = grant->audio;
+    ready.audio_reason = grant->audio ? std::string() : grant->audio_reason;
+  }
   std::fill(secrets.key.begin(), secrets.key.end(), 0);
   return ready;
 }
 
-ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& m) {
-  if (m.display_index < 0) return Fail("no_display", "display_index must be >= 0");
+ServerSession::Output ServerSession::OnSessionRequest(const SessionRequest& request) {
+  if (request.display_index < 0) return Fail("no_display", "display_index must be >= 0");
+  SessionRequest m = request;
+  // Below revision 3 there is no sound, whatever the message says.
+  if (revision_ < 3) m.audio = false;
   last_request_ = m;
   std::string error;
   std::optional<SessionReady> ready = TryStart(m, &error);

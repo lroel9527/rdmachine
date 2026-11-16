@@ -193,6 +193,7 @@ json ToJson(const SessionRequest& m) {
   json j = {{"display_index", m.display_index}, {"transport", TransportName(m.transport)}, {"view_only", m.view_only}};
   if (m.desktop) j["desktop"] = ToJson(*m.desktop);
   if (m.text_mode) j["text_mode"] = true;
+  if (m.audio) j["audio"] = true;
   if (!m.extra_desktops.empty()) {
     json extras = json::array();
     for (const ExtraDesktop& e : m.extra_desktops) extras.push_back({{"desktop", ToJson(e.desktop)}, {"x", e.x}, {"y", e.y}});
@@ -213,6 +214,8 @@ json ToJson(const SessionReady& m) {
             {"displays", displays}};
   if (m.desktop) j["desktop"] = ToJson(*m.desktop);
   if (m.login_window) j["login_window"] = true;
+  if (m.audio) j["audio"] = true;
+  if (!m.audio && !m.audio_reason.empty()) j["audio_reason"] = m.audio_reason;
   if (!m.extra_displays.empty()) {
     json extras = json::array();
     for (const ExtraDisplay& e : m.extra_displays) {
@@ -298,7 +301,7 @@ ParseResult ParseSessionRequest(const json& j, Reader& r) {
   std::string transport = "udp";
   if (!r.Int("display_index", &display, false, 0, std::numeric_limits<int32_t>::max()) ||
       !r.Str("transport", &transport, false) || !r.Bool("view_only", &m.view_only, false) ||
-      !r.Bool("text_mode", &m.text_mode, false))
+      !r.Bool("text_mode", &m.text_mode, false) || !r.Bool("audio", &m.audio, false))
     return Bad(r.error);
   auto t = TransportFrom(transport);
   if (!t) return Bad("transport: unknown");
@@ -322,7 +325,8 @@ ParseResult ParseSessionReady(const json& j, Reader& r) {
   std::string transport;
   int64_t port = 0;
   if (!r.Str("transport", &transport) || !r.Int("port", &port, true, 1, 65535) || !r.Bytes("key", &m.key) ||
-      !r.Bytes("auth_token", &m.auth_token) || !r.Bool("login_window", &m.login_window, false))
+      !r.Bytes("auth_token", &m.auth_token) || !r.Bool("login_window", &m.login_window, false) ||
+      !r.Bool("audio", &m.audio, false) || !r.Str("audio_reason", &m.audio_reason, false))
     return Bad(r.error);
   auto t = TransportFrom(transport);
   if (!t) return Bad("transport: unknown");

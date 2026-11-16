@@ -356,3 +356,45 @@ TEST_F(ServerSessionTest, AnEndedSessionStopsWhenTheConnectionCloses) {
   EXPECT_EQ(delegate_.ends, 1);
 }
 
+
+TEST_F(ServerSessionTest, SoundOnlyFromRevision3) {
+  // A revision 2 client cannot ask for sound; whatever its request says, the
+  // session has none, and its session_ready says nothing about it.
+  {
+    auto s = Make();
+    s.Handle(ClientHello{0, "4.3 client", "4.3.0", 2});
+    s.Handle(Password("alice", "secret"));
+    SessionRequest req;
+    req.audio = true;
+    auto out = s.Handle(req);
+    ASSERT_EQ(out.send.size(), 1u);
+    EXPECT_FALSE(delegate_.last_request.audio);
+    const auto& ready = std::get<SessionReady>(out.send[0]);
+    EXPECT_FALSE(ready.audio);
+    EXPECT_EQ(ready.audio_reason, "");
+    EXPECT_EQ(SerializeMessage(Message{ready}).find("audio"), std::string::npos);
+  }
+  {
+    auto s = Make();
+    s.Handle(ClientHello{0, "4.4 client", "4.4.0", 3});
+    s.Handle(Password("alice", "secret"));
+    SessionRequest req;
+    req.audio = true;
+    auto out = s.Handle(req);
+    EXPECT_TRUE(delegate_.last_request.audio);
+    EXPECT_TRUE(std::get<SessionReady>(out.send.at(0)).audio);
+  }
+  {
+    // Asked for, but the server's setting is off: why it has none.
+    auto s = Make();
+    delegate_.no_audio = true;
+    s.Handle(ClientHello{0, "4.4 client", "4.4.0", 3});
+    s.Handle(Password("alice", "secret"));
+    SessionRequest req;
+    req.audio = true;
+    auto out = s.Handle(req);
+    const auto& ready = std::get<SessionReady>(out.send.at(0));
+    EXPECT_FALSE(ready.audio);
+    EXPECT_EQ(ready.audio_reason, "disabled");
+  }
+}

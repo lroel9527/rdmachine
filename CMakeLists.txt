@@ -1,14 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
 
-# macOS 14 or later (from 4.3.0; macOS 12 and 13 are not supported). Set
-# before project() so it also applies to the rdaccel submodule. A build
-# directory configured earlier keeps 12.3 in its cache: raised here too.
+# macOS 14.2 or later (from 4.4.0, for the sound's Process Tap; 4.3 needed
+# 14, macOS 12 and 13 are not supported). Set before project() so it also
+# applies to the rdaccel submodule. A build directory configured earlier
+# keeps 12.3 or 14.0 in its cache: raised here too.
 if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
-   (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.0))
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
+   (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.2))
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.2" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(rdmachine VERSION 4.3.0 LANGUAGES C CXX)
+project(rdmachine VERSION 4.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

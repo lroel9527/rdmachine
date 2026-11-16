@@ -87,6 +87,9 @@ struct SessionRequest {
   // More displays next to `desktop`, an extended desktop (at most
   // kMaxExtraDesktops; only with `desktop`). An older server ignores them.
   std::vector<ExtraDesktop> extra_desktops;
+  // The client wants this computer's sound (docs/protocol.md, "声音";
+  // revision 3). An older server ignores it.
+  bool audio = false;
 };
 
 struct DisplayInfo {
@@ -115,6 +118,13 @@ struct SessionReady {
   // The extra displays built for request.extra_desktops, in order (some may
   // be missing if they could not be built: fewer entries).
   std::vector<ExtraDisplay> extra_displays;
+  // This session has sound (revision 3): the client gives the main
+  // picture's viewer audio and plays it. When false, audio_reason may say
+  // why: "disabled" (the server's setting), "login_window", "unsupported".
+  // A missing permission is not said here (it can come during the session)
+  // but in the statistics.
+  bool audio = false;
+  std::string audio_reason;
 };
 
 struct Ping {

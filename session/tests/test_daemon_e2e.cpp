@@ -123,6 +123,7 @@ class DaemonE2E : public ::testing::Test {
     mo.inject_input = false;  // nothing is ever typed into the real screen
     mo.fps = 15;
     mo.login_window = login_window;
+    mo.audio_source = RDA_AUDIO_SOURCE_TEST;  // a computed signal: no device
     return mo;
   }
 
@@ -277,4 +278,33 @@ TEST_F(DaemonE2E, AServerThatComesBackKeepsTheSession) {
   EXPECT_EQ(seen_.Ended(), "");
   const int before = seen_.frames;
   EXPECT_TRUE(WaitFor([&] { return seen_.frames > before; }));
+}
+
+TEST_F(DaemonE2E, SoundGoesThroughTheDaemonAndFollowsTheMove) {
+  // session_request.audio reaches the agent through the daemon, and the
+  // grant brings session_ready.audio back: none at the login window, sound
+  // once the session has moved to the user's desktop.
+  auto o = Options("alice");
+  o.audio = true;
+  o.audio_null_device = true;
+  ConnectResult r;
+  session_ = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(session_) << r.error << ": " << r.detail;
+  EXPECT_TRUE(session_->session().login_window);
+  EXPECT_FALSE(session_->session().audio);
+  EXPECT_EQ(session_->session().audio_reason, "login_window");
+  EXPECT_FALSE(session_->audio_playing());
+
+  SetConsole(getuid(), "alice");
+  ASSERT_TRUE(WaitFor([&] { return seen_.moves.load() == 1; }, 30s)) << "ended: " << seen_.Ended();
+  EXPECT_TRUE(session_->session().audio);
+  EXPECT_EQ(session_->session().audio_reason, "");
+  EXPECT_TRUE(session_->audio_playing());
+  EXPECT_TRUE(user_media_->Status().audio);
+  EXPECT_TRUE(WaitFor([&] {
+    rda_viewer_stats vs{};
+    vs.struct_size = sizeof(vs);
+    rda_viewer* v = session_->viewer();
+    return v && rda_viewer_get_stats(v, &vs) == RDA_OK && vs.audio_packets > 0;
+  }, 8s));
 }

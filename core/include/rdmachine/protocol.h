@@ -18,7 +18,10 @@ inline constexpr int kProtocolVersion = 0;
 //   1  the revision itself (rdmachine 4.0)
 //   2  extended desktops: session_request.extra_desktops and
 //      session_ready.extra_displays (rdmachine 4.0)
-inline constexpr int kProtocolRevision = 2;
+//   3  sound: session_request.audio, session_ready.audio / audio_reason,
+//      the audio control message (audio_control.h) and the "audio" fields
+//      of the session statistics (rdmachine 4.4)
+inline constexpr int kProtocolRevision = 3;
 inline constexpr int NegotiatedRevision(int a, int b) { return a < b ? a : b; }
 
 inline constexpr uint16_t kDefaultPort = 4100;  // TCP control (TLS) and UDP media

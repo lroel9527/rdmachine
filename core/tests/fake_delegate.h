@@ -47,6 +47,8 @@ class FakeDelegate : public ServerDelegate {
     g.transport = request.transport;
     g.port = 4100;
     g.displays.push_back(DisplayInfo{0, "Built-in", 2880, 1800, 2.0});
+    g.audio = request.audio && !no_audio;
+    if (!g.audio) g.audio_reason = "disabled";
     return g;
   }
   void EndSession() override {
@@ -70,6 +72,7 @@ class FakeDelegate : public ServerDelegate {
   SessionOrigin last_origin;
   SessionCheck check;    // what CheckSession answers next
   int refuse_starts = 0;  // this many StartSession calls fail ("unavailable")
+  bool no_audio = false;  // the grant has no sound ("disabled") even when asked for
 };
 
 }  // namespace rdm::testing

@@ -13,6 +13,8 @@ ServerSettings SettingsOverrides::Apply(ServerSettings s) const {
   if (fps) s.fps = *fps;
   if (bitrate_kbps) s.bitrate_kbps = *bitrate_kbps;
   if (video_codec) s.video_codec = *video_codec;
+  if (send_audio) s.send_audio = *send_audio;
+  if (mute_local_audio) s.mute_local_audio = *mute_local_audio;
   return s;
 }
 
@@ -30,6 +32,8 @@ std::string SettingsOverrides::Describe() const {
   add(fps.has_value(), "--fps");
   add(bitrate_kbps.has_value(), "--bitrate-kbps");
   add(video_codec.has_value(), "--video-codec");
+  add(send_audio.has_value(), "--audio");
+  add(mute_local_audio.has_value(), "--mute-local");
   return out;
 }
 
@@ -85,6 +89,9 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.fps = s.fps;
   mo.bitrate_bps = static_cast<int64_t>(s.bitrate_kbps) * 1000;
   mo.video_codec = s.video_codec;
+  mo.send_audio = s.send_audio;
+  mo.mute_local_audio = s.mute_local_audio;
+  mo.audio_source = options_.audio_source;
   mo.log = options_.log;
   auto media = std::make_unique<MediaHost>(mo);
 

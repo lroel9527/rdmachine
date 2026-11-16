@@ -33,6 +33,7 @@ LiveStats LiveStatsSampler::Update(const rda_host_stats& s, Clock::time_point no
       out.encoded_fps = static_cast<double>(Delta(s.frames_encoded, prev_.frames_encoded)) / dt;
       out.captured_fps = static_cast<double>(Delta(s.frames_captured, prev_.frames_captured)) / dt;
       out.bitrate_kbps = static_cast<double>(Delta(s.bytes_sent, prev_.bytes_sent)) * 8.0 / 1000.0 / dt;
+      out.audio_kbps = static_cast<double>(Delta(s.audio_bytes, prev_.audio_bytes)) * 8.0 / 1000.0 / dt;
     }
     // rdaccel samples the transport only when a frame goes out, so on a
     // static screen the packet counters stand still: keep the last figure.

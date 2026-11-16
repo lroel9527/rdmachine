@@ -81,6 +81,18 @@ NSString* const kTextModeChanged = @"RDMTextModeChanged";
 
 bool TextMode() { return [NSUserDefaults.standardUserDefaults boolForKey:kTextModeKey]; }
 
+// View > Play Sound from Remote Computer (docs/audio.md): ask for the
+// server's sound and play it here. On unless turned off; remembered. Turning
+// it off pauses the running session's sound (the server sends nothing) and
+// leaves it out of later sessions; turning it on resumes it.
+NSString* const kPlaySoundKey = @"PlayRemoteSound";
+NSString* const kPlaySoundChanged = @"RDMPlaySoundChanged";
+
+bool PlaySound() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kPlaySoundKey] ? [d boolForKey:kPlaySoundKey] : true;
+}
+
 // View > Text Mode at Standard Resolution: in text mode, ask for a desktop
 // of one pixel per point even on a Retina screen. A 2x desktop has four
 // times the pixels to send; at 1x the text is the server's own 1x rendering
@@ -195,7 +207,7 @@ const StatsField kStatsFields[] = {
     {@"loss", @"丢包", true},      {@"bitrate", @"码率", false},
     {@"bandwidth", @"带宽", false},  {@"resolution", @"分辨率", false},
     {@"encoder", @"编码器", false},      {@"input", @"输入法", false},
-    {@"response", @"操作到画面", true},
+    {@"response", @"操作到画面", true},  {@"audio", @"声音", false},
 };
 const int kStatsOpacities[] = {15, 35, 60};  // background, percent
 
@@ -1150,6 +1162,11 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                          selector:@selector(sendPictureMode)
                                              name:kTextModeChanged
                                            object:nil];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(playSoundChanged)
+                                             name:kPlaySoundChanged
+                                           object:nil];
+  if (!PlaySound()) _session->SetAudioPaused(true);  // turned off while connecting
   [self sendInputSource:YES];
   [NSNotificationCenter.defaultCenter addObserver:self
                                          selector:@selector(checkDisplays)
@@ -1199,6 +1216,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kTextModeChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kPlaySoundChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kUseAllDisplaysChanged object:nil];
   if (_keyMonitor) {
@@ -1358,6 +1376,41 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [self desktopNeedsUpdate];
 }
 
+// Main thread. View > Play Sound changed: the running session's sound is
+// paused or resumed (a session that starts later asks for it or not).
+- (void)playSoundChanged {
+  if (_session) _session->SetAudioPaused(!PlaySound());
+}
+
+// The overlay's sound line (docs/audio.md, 10): the server's report, what
+// session_ready said, and this side's buffer and losses.
+- (NSString*)audioLine:(const rdm::SessionStatsReport&)r {
+  if (!_session) return @"Audio: –";
+  const rdm::SessionReady ready = _session->session();
+  if (!ready.audio) {
+    if (ready.audio_reason == "disabled") return @"Audio: off (server setting)";
+    if (ready.audio_reason == "login_window") return @"Audio: off (login window)";
+    if (ready.audio_reason == "unsupported") return @"Audio: off (server cannot capture)";
+    if (!PlaySound()) return @"Audio: off (turned off here)";
+    return @"Audio: off (older server)";
+  }
+  if (r.audio == "paused" || !PlaySound()) return @"Audio: paused";
+  if (r.audio == "silent") return @"Audio: silent";
+  if (r.audio == "no_permission") return @"Audio: off (server needs the System Audio Recording permission)";
+  if (r.audio == "failed") return @"Audio: off (server could not capture)";
+  if (r.audio == "starting" || r.audio.empty()) return @"Audio: starting";
+  rda_viewer_stats vs{};
+  vs.struct_size = sizeof(vs);
+  rda_viewer* v = _session->viewer();
+  if (!v || rda_viewer_get_stats(v, &vs) != RDA_OK) vs = rda_viewer_stats{};
+  // Concealed frames against frames played (about one per packet).
+  const double lost = vs.audio_packets ? 100.0 * static_cast<double>(vs.audio_lost) /
+                                             static_cast<double>(vs.audio_packets + vs.audio_lost)
+                                       : 0.0;
+  return [NSString stringWithFormat:@"Audio: %@ · buffer %d ms · lost %.1f%%", StatsKbps(r.audio_kbps),
+                                    vs.audio_buffer_ms, lost];
+}
+
 - (void)syncSettingChanged:(NSNotification*)note {
   _sentInputSource.clear();
   [self sendInputSource:YES];
@@ -1430,6 +1483,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   add(@"input", r.input_source.empty() ? @"输入法 –" : NS(r.input_source));
   const double response = _responseMs.load();
   add(@"response", response < 0 ? @"操作到画面 –" : [NSString stringWithFormat:@"操作到画面 %.0f ms", response]);
+  if ([on containsObject:@"audio"]) [lines addObject:[self audioLine:r]];
   if (lines.count == 0) {
     _statsLayer.hidden = YES;
     return;
@@ -2827,6 +2881,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleUseAllDisplays:)) {
     item.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(togglePlaySound:)) {
+    item.state = PlaySound() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextMode:)) {
     item.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextModeStandardResolution:)) {
@@ -2841,6 +2897,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
+}
+
+- (void)togglePlaySound:(NSMenuItem*)item {
+  const bool on = !PlaySound();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kPlaySoundKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kPlaySoundChanged object:nil];
 }
 
 - (void)toggleTextModeStandardResolution:(NSMenuItem*)item {
@@ -3021,6 +3084,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   textRes.indentationLevel = 1;
   textRes.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
   textRes.toolTip = @"开着省流量时，用 1 倍的桌面代替 Retina（2 倍）：像素只有四分之一，流量少很多；字会粗糙一些。";
+  NSMenuItem* sound = [view addItemWithTitle:@"播放远程电脑的声音" action:@selector(togglePlaySound:) keyEquivalent:@""];
+  sound.target = self;
+  sound.state = PlaySound() ? NSControlStateValueOn : NSControlStateValueOff;
+  sound.toolTip = @"那台 Mac 放的声音在这里播放（那台 Mac 自己默认不出声）。关掉后这次连接不再传声音，以后的连接也不要声音。";
   [view addItem:NSMenuItem.separatorItem];
   [view addItemWithTitle:@"按分组显示电脑" action:@selector(toggleGrouped:) keyEquivalent:@""].target = self;
   [view addItem:NSMenuItem.separatorItem];
@@ -3218,6 +3285,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   // server that cannot build one shares its display as it is.
   opts.control.request.desktop = reuse ? [remote viewDesktop] : [remote initialDesktop];
   opts.control.request.text_mode = TextMode();
+  // The server's sound, played on this Mac's default output (docs/audio.md).
+  opts.audio = PlaySound();
   // Full screen with more than one screen here: an extended desktop, a
   // server display for each screen.
   const BOOL fullScreen = reuse ? [remote wantsFullScreen] : [NSUserDefaults.standardUserDefaults boolForKey:kRemoteFullScreenKey];

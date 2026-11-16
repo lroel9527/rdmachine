@@ -22,6 +22,8 @@ TEST(SessionStats, RoundTrip) {
   r.input_source = "简体拼音";
   r.view_only = true;
   r.text_mode = true;
+  r.audio = "on";
+  r.audio_kbps = 162.5;
   auto back = DecodeSessionStats(EncodeSessionStats(r));
   ASSERT_TRUE(back);
   EXPECT_EQ(*back, r);
@@ -33,6 +35,9 @@ TEST(SessionStats, MissingFieldsKeepDefaultsAndBadInputFails) {
   EXPECT_EQ(r->transport, "tcp");
   EXPECT_EQ(r->rtt_ms, 0);
   EXPECT_LT(r->recent_loss_pct, 0);  // not measured
+  // An older server's report has no sound fields.
+  EXPECT_EQ(r->audio, "");
+  EXPECT_EQ(r->audio_kbps, 0);
   EXPECT_FALSE(DecodeSessionStats("not json"));
   EXPECT_FALSE(DecodeSessionStats("[]"));
 }

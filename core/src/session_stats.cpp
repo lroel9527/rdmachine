@@ -20,7 +20,9 @@ std::string EncodeSessionStats(const SessionStatsReport& r) {
                         {"encoder", r.encoder},
                         {"input_source", r.input_source},
                         {"view_only", r.view_only},
-                        {"text_mode", r.text_mode}}
+                        {"text_mode", r.text_mode},
+                        {"audio", r.audio},
+                        {"audio_kbps", r.audio_kbps}}
       .dump();
 }
 
@@ -54,6 +56,8 @@ std::optional<SessionStatsReport> DecodeSessionStats(const std::string& payload)
   integer("frames_dropped_congestion", &r.frames_dropped_congestion);
   text("encoder", &r.encoder);
   text("input_source", &r.input_source);
+  text("audio", &r.audio);
+  number("audio_kbps", &r.audio_kbps);
   if (auto it = j.find("view_only"); it != j.end() && it->is_boolean()) r.view_only = it->get<bool>();
   if (auto it = j.find("text_mode"); it != j.end() && it->is_boolean()) r.text_mode = it->get<bool>();
   return r;
