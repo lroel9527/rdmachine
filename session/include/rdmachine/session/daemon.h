@@ -58,7 +58,7 @@ struct DaemonOptions {
   std::function<std::string()> fingerprint;                 // for the agents' menus
   std::function<uint16_t()> port;
   // An agent starting a session takes a while: building a desktop, and when
-  // that fails, putting the displays back (twice, see virtual_desktop_mac.mm)
+  // that fails, putting the displays back (virtual_desktop_mac.mm)
   // before sharing them as they are. The client waits a little longer
   // (control_client.h).
   int reply_timeout_ms = 30000;
