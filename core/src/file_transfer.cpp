@@ -20,6 +20,7 @@
 #include "rdmachine/clipboard_sync.h"  // IsValidUtf8
 #include "rdmachine/clipboard_wire.h"  // data, ack and cancel encodings
 #include "rdmachine/random.h"
+#include "zstd.h"
 
 namespace rdm {
 namespace {
@@ -32,6 +33,15 @@ constexpr uint64_t kCongestionEveryUs = 50'000;
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
 // Often enough for a progress bar to move smoothly on a slow link.
 constexpr uint64_t kProgressEveryBytes = 256 * 1024;
+// Compression of the stream (zdata). Level 1: several hundred MB/s on one
+// core, so it never holds back a LAN, at most a few percent behind level 3.
+constexpr int kZstdLevel = 1;
+// A piece goes compressed only if that saves at least 1/32 of it.
+constexpr size_t kZstdMinSavingShift = 5;
+// After this many pieces in a row that did not shrink, the next kZstdSkip
+// go as they are without a try (a video: one probe per 4 MiB).
+constexpr int kZstdMissesBeforeSkip = 2;
+constexpr int kZstdSkip = 32;
 
 uint64_t SteadyUs() {
   return static_cast<uint64_t>(
@@ -178,7 +188,7 @@ std::string Errno(const std::string& what) { return what + ": " + strerror(errno
 
 }  // namespace
 
-bool IsFileMessage(uint32_t type) { return type >= kFileListRequestMessageType && type <= kFileCancelMessageType; }
+bool IsFileMessage(uint32_t type) { return type >= kFileListRequestMessageType && type <= kFileZDataMessageType; }
 
 bool IsSafeRelativePath(std::string_view p, bool allow_empty) {
   if (p.empty()) return allow_empty;
@@ -241,6 +251,7 @@ std::string EncodeFileFetch(const FileFetch& f) {
     }
     j["from"] = std::move(from);
   }
+  if (f.zstd) j["z"] = 1;
   return j.dump();
 }
 
@@ -256,6 +267,8 @@ std::optional<FileFetch> DecodeFileFetch(std::string_view payload) {
       f.from = std::move(r);
     }
   }
+  uint32_t z = 0;
+  f.zstd = Get(j, "z", &z) && z == 1;
   return f;
 }
 
@@ -591,8 +604,18 @@ struct FileTransfer::OutStream {
   bool end_queued = false;
   uint64_t sent = 0, acked = 0;
   bool all_sent = false;
-  std::deque<std::pair<uint64_t, uint64_t>> marks;  // (sent up to, at)
+  // What went on the wire (compressed pieces count as sent): the pacer's
+  // bytes. wire_acked follows acks through the marks.
+  uint64_t wire_sent = 0, wire_acked = 0;
+  struct Mark {
+    uint64_t sent, wire, at;
+  };
+  std::deque<Mark> marks;
   TransferPacer pacer;
+  // zdata (the fetch said the pasting side decodes it).
+  ZSTD_CCtx* zstd = nullptr;
+  std::string zbuf;
+  int zstd_misses = 0, zstd_skip = 0;
   uint64_t congestion_seen = 0;
   uint64_t congestion_checked_us = 0;
   uint64_t reported_us = 0;
@@ -600,6 +623,30 @@ struct FileTransfer::OutStream {
   explicit OutStream(const TransferPacer::Options& o) : pacer(o) {}
   ~OutStream() {
     if (fd >= 0) close(fd);
+    ZSTD_freeCCtx(zstd);
+  }
+
+  // The message for a piece of the stream: zdata when that is worth it,
+  // otherwise data.
+  std::string Pack(const std::string& chunk, uint32_t* type) {
+    *type = kFileDataMessageType;
+    if (!zstd) return EncodeClipboardData({id, sent}, chunk);
+    if (zstd_skip > 0) {
+      --zstd_skip;
+      return EncodeClipboardData({id, sent}, chunk);
+    }
+    zbuf.resize(ZSTD_compressBound(chunk.size()));
+    const size_t n = ZSTD_compressCCtx(zstd, zbuf.data(), zbuf.size(), chunk.data(), chunk.size(), kZstdLevel);
+    if (ZSTD_isError(n) || n > chunk.size() - (chunk.size() >> kZstdMinSavingShift)) {
+      if (++zstd_misses >= kZstdMissesBeforeSkip) {
+        zstd_misses = 0;
+        zstd_skip = kZstdSkip;
+      }
+      return EncodeClipboardData({id, sent}, chunk);
+    }
+    zstd_misses = 0;
+    *type = kFileZDataMessageType;
+    return EncodeClipboardData({id, sent}, std::string_view(zbuf.data(), n));
   }
 
   // Goes on from `from` if it is still what the pasting side has.
@@ -806,7 +853,10 @@ FileTransfer::FileTransfer(SendFn send, Options options) : send_(std::move(send)
   if (options_.target) options_.target->SetRequester(this);
 }
 
-FileTransfer::~FileTransfer() { Stop(); }
+FileTransfer::~FileTransfer() {
+  Stop();
+  ZSTD_freeDCtx(zstd_in_);
+}
 
 void FileTransfer::Stop() {
   // Fetches under way: what arrived stays in the staging folder, and the
@@ -902,6 +952,7 @@ void FileTransfer::StartNextStream() {
       continue;
     }
     if (f.from) out->ResumeFrom(*f.from);
+    if (f.zstd) out->zstd = ZSTD_createCCtx();
     if (out->resume_index > 0 || out->resume_offset > 0) {
       Log("sending " + out->root + ", going on from " + (f.from->path.empty() ? "the start" : f.from->path) + " at " +
           std::to_string(out->resume_offset));
@@ -912,8 +963,18 @@ void FileTransfer::StartNextStream() {
   }
 }
 
-bool FileTransfer::SendData(std::string_view payload) {
-  return options_.send_bulk ? options_.send_bulk(kFileDataMessageType, payload) : send_(kFileDataMessageType, payload);
+bool FileTransfer::SendData(uint32_t type, std::string_view payload) {
+  return options_.send_bulk ? options_.send_bulk(type, payload) : send_(type, payload);
+}
+
+std::string FileTransfer::SentLine(const OutStream& o) {
+  std::string line = "sent " + o.root + " (" + std::to_string(o.sent) + " bytes";
+  if (o.zstd && o.wire_sent < o.sent) {
+    char z[64];
+    snprintf(z, sizeof z, ", %.0f%% of that on the wire", 100.0 * static_cast<double>(o.wire_sent) / o.sent);
+    line += z;
+  }
+  return line + ")";
 }
 
 uint64_t FileTransfer::PumpBulk(uint64_t now, int64_t queued) {
@@ -945,21 +1006,24 @@ uint64_t FileTransfer::PumpBulk(uint64_t now, int64_t queued) {
     if (chunk.empty()) {
       o.all_sent = true;
       if (o.acked == o.sent) {
-        Log("sent " + o.root + " (" + std::to_string(o.sent) + " bytes)");
+        Log(SentLine(o));
         out_.reset();
         StartNextStream();
         return Now();
       }
       break;
     }
-    if (!SendData(EncodeClipboardData({o.id, o.sent}, chunk))) {
+    uint32_t type = 0;
+    const std::string msg = o.Pack(chunk, &type);
+    if (!SendData(type, msg)) {
       Log("sending stopped: the connection is gone");
       out_.reset();
       fetches_.clear();
       return now + 1'000'000;
     }
     o.sent += chunk.size();
-    queued += static_cast<int64_t>(chunk.size());
+    o.wire_sent += msg.size();
+    queued += static_cast<int64_t>(msg.size());
   }
   return o.all_sent ? now + 1'000'000 : now + kRefillUs;  // all sent: acknowledgements wake the thread
 }
@@ -991,8 +1055,8 @@ uint64_t FileTransfer::Pump(uint64_t now) {
   }
   std::string chunk;
   while (!o.all_sent) {
-    if (!o.pacer.CanSend(now, kChunk, o.sent - o.acked)) {
-      if (o.sent - o.acked + kChunk > o.pacer.Window()) return idle;  // waits for acknowledgements
+    if (!o.pacer.CanSend(now, kChunk, o.wire_sent - o.wire_acked)) {
+      if (o.wire_sent - o.wire_acked + kChunk > o.pacer.Window()) return idle;  // waits for acknowledgements
       return o.pacer.NextSendUs(now, kChunk);
     }
     std::string error;
@@ -1005,22 +1069,25 @@ uint64_t FileTransfer::Pump(uint64_t now) {
     if (chunk.empty()) {
       o.all_sent = true;
       if (o.acked == o.sent) {  // acknowledged already
-        Log("sent " + o.root + " (" + std::to_string(o.sent) + " bytes)");
+        Log(SentLine(o));
         out_.reset();
         StartNextStream();
         return Now();
       }
       break;
     }
-    if (!SendData(EncodeClipboardData({o.id, o.sent}, chunk))) {
+    uint32_t type = 0;
+    const std::string msg = o.Pack(chunk, &type);
+    if (!SendData(type, msg)) {
       Log("sending stopped: the connection is gone");
       out_.reset();
       fetches_.clear();
       return idle;
     }
-    o.pacer.OnSent(now, chunk.size());
+    o.pacer.OnSent(now, msg.size());
     o.sent += chunk.size();
-    o.marks.emplace_back(o.sent, now);
+    o.wire_sent += msg.size();
+    o.marks.push_back({o.sent, o.wire_sent, now});
     now = Now();
   }
   return idle;  // all sent: acknowledgements wake the thread
@@ -1032,14 +1099,16 @@ void FileTransfer::HandleAck(const std::string& payload, uint64_t now) {
   OutStream& o = *out_;
   if (a->bytes > o.sent || a->bytes < o.acked) return;
   uint64_t at = 0;
-  while (!o.marks.empty() && o.marks.front().first <= a->bytes) {
-    at = o.marks.front().second;
+  while (!o.marks.empty() && o.marks.front().sent <= a->bytes) {
+    at = o.marks.front().at;
+    o.wire_acked = o.marks.front().wire;
     o.marks.pop_front();
   }
   if (at != 0) o.pacer.OnAck(now, now - at);
   o.acked = a->bytes;
+  if (o.acked == o.sent) o.wire_acked = o.wire_sent;
   if (o.all_sent && o.acked == o.sent) {
-    Log("sent " + o.root + " (" + std::to_string(o.sent) + " bytes)");
+    Log(SentLine(o));
     out_.reset();
     StartNextStream();
   }
@@ -1126,7 +1195,7 @@ void FileTransfer::OnPosted(uint32_t kind, uint64_t key, uint32_t item, const st
   in->item = item;
   in->target = t;
   const std::string dir = ItemDir(key, item);
-  FileFetch f{announce, id, item, Resumes().Take(key, item)};
+  FileFetch f{announce, id, item, Resumes().Take(key, item), true};
   if (!f.from) RemoveTree(dir);  // a fetch that failed before
   if (!MakeDirs(dir)) {
     t->OnItemDone(key, item, "cannot write to the staging folder");
@@ -1160,13 +1229,30 @@ void FileTransfer::HandleList(const std::string& payload) {
   if (options_.target) options_.target->OnList(key, item, l->entries, l->error);
 }
 
-void FileTransfer::HandleData(const std::string& payload) {
+void FileTransfer::HandleData(const std::string& payload, bool compressed) {
   std::string_view bytes;
   auto h = DecodeClipboardData(payload, &bytes);
   if (!h) return;
   auto it = ins_.find(h->id);
   if (it == ins_.end()) return;  // a cancelled fetch's, late
   InStream& in = *it->second;
+  if (compressed) {
+    // One frame that says how big it is, and not bigger than a piece may be.
+    const unsigned long long size = ZSTD_getFrameContentSize(bytes.data(), bytes.size());
+    if (size == ZSTD_CONTENTSIZE_UNKNOWN || size == ZSTD_CONTENTSIZE_ERROR || size == 0 ||
+        size > kMaxFileDataPiece) {
+      FinishIncoming(h->id, "the peer sent malformed compressed data", true);
+      return;
+    }
+    if (!zstd_in_) zstd_in_ = ZSTD_createDCtx();
+    zbuf_in_.resize(static_cast<size_t>(size));
+    const size_t n = ZSTD_decompressDCtx(zstd_in_, zbuf_in_.data(), zbuf_in_.size(), bytes.data(), bytes.size());
+    if (ZSTD_isError(n) || n != size) {
+      FinishIncoming(h->id, "the peer sent malformed compressed data", true);
+      return;
+    }
+    bytes = std::string_view(zbuf_in_.data(), n);
+  }
   if (h->offset != in.received || bytes.empty()) {
     FinishIncoming(h->id, "the peer sent data out of order", true);
     return;
@@ -1222,7 +1308,10 @@ void FileTransfer::Handle(uint32_t type, const std::string& payload, uint64_t no
       HandleFetch(payload);
       return;
     case kFileDataMessageType:
-      HandleData(payload);
+      HandleData(payload, false);
+      return;
+    case kFileZDataMessageType:
+      HandleData(payload, true);
       return;
     case kFileAckMessageType:
       HandleAck(payload, now);

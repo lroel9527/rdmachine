@@ -12,7 +12,9 @@
 
 #include "fake_clipboard.h"
 #include "rdmachine/clipboard_sync.h"
+#include "rdmachine/clipboard_wire.h"
 #include "rdmachine/file_transfer.h"
+#include "zstd.h"
 
 using namespace rdm;
 
@@ -21,6 +23,30 @@ namespace {
 std::string Pattern(size_t n, int seed) {
   std::string s(n, '\0');
   for (size_t i = 0; i < n; ++i) s[i] = static_cast<char>((i * 131 + seed * 7 + i / 977) & 0xFF);
+  return s;
+}
+
+// Bytes that do not compress (splitmix64).
+std::string Noise(size_t n, uint64_t seed) {
+  std::string s(n, '\0');
+  uint64_t x = seed;
+  for (size_t i = 0; i < n; i += 8) {
+    uint64_t z = (x += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z ^= z >> 31;
+    for (size_t k = 0; k < 8 && i + k < n; ++k) s[i + k] = static_cast<char>(z >> (8 * k));
+  }
+  return s;
+}
+
+// Something like source code or a log: lines that repeat with variations.
+std::string Text(size_t n) {
+  std::string s;
+  for (int i = 0; s.size() < n; ++i) {
+    s += "  if (value_" + std::to_string(i % 97) + " > limit) return Error(\"line " + std::to_string(i) + "\");\n";
+  }
+  s.resize(n);
   return s;
 }
 
@@ -397,7 +423,8 @@ TEST(FileTransfer, APasteUnderWayGoesOnWhenEitherSideCopiesSomethingElse) {
 TEST(FileTransfer, AFetchCutShortGoesOnInTheNextSession) {
   TempDir src;
   mkdir((src.path + "/f").c_str(), 0755);
-  const std::string one = Pattern(2'000'000, 6), two = Pattern(9'000'000, 7), three = Pattern(500'000, 8);
+  // Noise: compressed, a regular pattern would arrive whole before the cut.
+  const std::string one = Noise(2'000'000, 6), two = Noise(9'000'000, 7), three = Noise(500'000, 8);
   WriteFile(src.path + "/f/1.bin", one);
   WriteFile(src.path + "/f/2.bin", two);
   WriteFile(src.path + "/f/3.bin", three);
@@ -448,13 +475,113 @@ TEST(FileTransfer, AFetchCutShortGoesOnInTheNextSession) {
   EXPECT_EQ(ReadFile(dir + "/3.bin"), three);
   uint64_t sent = 0;
   for (const auto& m : a->log) {
-    if (m.type == kFileDataMessageType) sent += m.payload.size();
+    if (m.type == kFileDataMessageType || m.type == kFileZDataMessageType) sent += m.payload.size();
   }
   EXPECT_LT(sent, one.size() + two.size() + three.size() - 3'000'000);
   // Every file was reported ready again (Finder may be waiting for any).
   int files = 0;
   for (const auto& [e, local] : target->ready) files += e.kind == FileKind::kFile;
   EXPECT_EQ(files, 3);
+}
+
+uint64_t DataBytes(const Side& s) {
+  uint64_t n = 0;
+  for (const auto& m : s.log) n += m.type == kFileDataMessageType || m.type == kFileZDataMessageType ? m.payload.size() : 0;
+  return n;
+}
+
+TEST(FileTransfer, FilesThatCompressGoCompressedAndTheRestAsTheyAre) {
+  TempDir src;
+  const std::string text = Text(3'000'000), noise = Noise(2'000'000, 11);
+  ASSERT_EQ(mkdir((src.path + "/f").c_str(), 0755), 0);
+  WriteFile(src.path + "/f/code.txt", text);
+  WriteFile(src.path + "/f/photo.jpg", noise);
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  Side a, b(Fast(target, staging.path));
+  a.sync.Begin();
+  b.sync.Begin();
+  ClipboardContent c;
+  c.files = {src.path + "/f"};
+  a.clipboard->CopyContent(c);
+  Exchange(a, b);
+  target->Fetch(0);
+  Exchange(a, b);
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  const std::string dir = staging.path + "/" + std::to_string(target->published) + "/0/f";
+  EXPECT_EQ(ReadFile(dir + "/code.txt"), text);
+  EXPECT_EQ(ReadFile(dir + "/photo.jpg"), noise);
+  EXPECT_GT(a.Count(kFileZDataMessageType), 0u);
+  // The text shrinks to a fraction; the noise costs no more than itself.
+  const uint64_t wire = DataBytes(a);
+  EXPECT_LT(wire, noise.size() + text.size() / 5);
+  EXPECT_GE(wire, noise.size());
+  // Most of the noise was not even tried: a probe now and then.
+  EXPECT_LT(a.Count(kFileZDataMessageType), text.size() / (128 * 1024) + 3);
+}
+
+TEST(FileTransfer, APastingSideThatDoesNotAskForCompressionGetsPlainData) {
+  TempDir src;
+  const std::string text = Text(1'000'000);
+  WriteFile(src.path + "/code.txt", text);
+  TempDir staging;
+  auto target = std::make_shared<FakeTarget>();
+  Side a, b(Fast(target, staging.path));
+  a.sync.Begin();
+  b.sync.Begin();
+  ClipboardContent c;
+  c.files = {src.path + "/code.txt"};
+  a.clipboard->CopyContent(c);
+  Exchange(a, b);
+  target->Fetch(0);
+  b.sync.PollOnce();  // the fetch goes out
+  // An older pasting side: its fetch has no "z".
+  int fetches = 0;
+  for (auto& m : b.sent) {
+    if (m.type != kFileFetchMessageType) continue;
+    auto f = DecodeFileFetch(m.payload);
+    ASSERT_TRUE(f && f->zstd);
+    f->zstd = false;
+    m.payload = EncodeFileFetch(*f);
+    ++fetches;
+  }
+  ASSERT_EQ(fetches, 1);
+  Exchange(a, b);
+  ASSERT_EQ(target->done, std::vector<std::string>{""});
+  EXPECT_EQ(ReadFile(staging.path + "/" + std::to_string(target->published) + "/0/code.txt"), text);
+  EXPECT_EQ(a.Count(kFileZDataMessageType), 0u);
+  EXPECT_GT(a.Count(kFileDataMessageType), 0u);
+}
+
+TEST(FileTransfer, MalformedOrOversizedCompressedDataFailsTheFetch) {
+  const std::string big(kMaxFileDataPiece + 1, 'a');
+  std::string bomb(ZSTD_compressBound(big.size()), '\0');
+  bomb.resize(ZSTD_compress(bomb.data(), bomb.size(), big.data(), big.size(), 1));
+  for (const std::string& bad : {std::string("not zstd at all"), bomb}) {
+    TempDir src;
+    WriteFile(src.path + "/x.txt", "hello");
+    TempDir staging;
+    auto target = std::make_shared<FakeTarget>();
+    Side a, b(Fast(target, staging.path));
+    a.sync.Begin();
+    b.sync.Begin();
+    ClipboardContent c;
+    c.files = {src.path + "/x.txt"};
+    a.clipboard->CopyContent(c);
+    Exchange(a, b);
+    target->Fetch(0);
+    b.sync.PollOnce();  // the fetch goes out
+    std::optional<FileFetch> f;
+    for (const auto& m : b.sent) {
+      if (m.type == kFileFetchMessageType) f = DecodeFileFetch(m.payload);
+    }
+    ASSERT_TRUE(f);
+    b.sent.clear();  // the copying side never hears of it
+    b.Receive(kFileZDataMessageType, EncodeClipboardData({f->id, 0}, bad));
+    b.sync.PollOnce();
+    ASSERT_EQ(target->done.size(), 1u);
+    EXPECT_NE(target->done[0], "");
+  }
 }
 
 TEST(FileTransfer, AFileChangedMeanwhileStartsOver) {

@@ -26,7 +26,8 @@ add_library(rdmachine::core ALIAS rdm_core)
 target_include_directories(rdm_core PUBLIC include)
 target_link_libraries(rdm_core
   PUBLIC nlohmann_json::nlohmann_json
-  PRIVATE mbedtls mbedx509 mbedcrypto)
+  PRIVATE mbedtls mbedx509 mbedcrypto libzstd_static)
+target_include_directories(rdm_core PRIVATE ${zstd_SOURCE_DIR}/lib)
 find_package(Threads REQUIRED)
 target_link_libraries(rdm_core PUBLIC Threads::Threads)
 target_compile_definitions(rdm_core PUBLIC RDM_VERSION_STRING="${PROJECT_VERSION}")

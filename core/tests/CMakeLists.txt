@@ -25,7 +25,8 @@ add_executable(rdm_core_tests
   test_picture_mode.cpp
   test_session_stats.cpp
   test_login_keys.cpp)
-target_link_libraries(rdm_core_tests PRIVATE rdmachine::core GTest::gtest_main)
+target_link_libraries(rdm_core_tests PRIVATE rdmachine::core GTest::gtest_main libzstd_static)
+target_include_directories(rdm_core_tests PRIVATE ${zstd_SOURCE_DIR}/lib)
 
 include(GoogleTest)
 gtest_discover_tests(rdm_core_tests)

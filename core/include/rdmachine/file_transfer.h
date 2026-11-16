@@ -18,6 +18,14 @@
 // data, ack and cancel have the clipboard's encoding (clipboard_wire.h)
 // under their own types; `id` is the fetch's.
 //
+// Compression: a fetch with "z":1 says the pasting side decodes Zstandard.
+// The copying side may then send any piece of the stream as "zdata" instead
+// of data: the same header (id, offset in the stream as it is uncompressed),
+// the bytes one Zstandard frame that records its uncompressed size. Pieces
+// that do not shrink (photos, videos, archives) go as plain data, so the
+// cost on such files is a probe now and then. Offsets and acks count the
+// uncompressed stream, so going on after a reconnect does not care.
+//
 // The stream of one item is a sequence of records, like a tar file:
 //   u32 (little endian) length of the header, the header (JSON), then
 //   `size` bytes of content for a regular file.
@@ -55,19 +63,23 @@
 
 #include "rdmachine/transfer_pacer.h"
 
+struct ZSTD_DCtx_s;
+
 namespace rdm {
 
-// rdaccel application message types (RDA_MSG_USER_FIRST + 12 ... + 17).
+// rdaccel application message types (RDA_MSG_USER_FIRST + 12 ... + 18).
 constexpr uint32_t kFileListRequestMessageType = 0x1000C;
 constexpr uint32_t kFileListMessageType = 0x1000D;
 constexpr uint32_t kFileFetchMessageType = 0x1000E;
 constexpr uint32_t kFileDataMessageType = 0x1000F;
 constexpr uint32_t kFileAckMessageType = 0x10010;
 constexpr uint32_t kFileCancelMessageType = 0x10011;
+constexpr uint32_t kFileZDataMessageType = 0x10012;  // data, Zstandard
 
 bool IsFileMessage(uint32_t type);
 
 // Limits, both ways.
+constexpr size_t kMaxFileDataPiece = 1 << 20;   // one data piece, uncompressed
 constexpr size_t kMaxAnnouncedFiles = 1000;      // top-level items of one copy
 constexpr size_t kMaxListedEntries = 100000;     // one item's tree
 constexpr size_t kMaxFilePathBytes = 4096;
@@ -139,6 +151,7 @@ struct FileFetch {
   uint64_t id = 0;
   uint32_t item = 0;
   std::optional<FileResumePoint> from;
+  bool zstd = false;  // the pasting side decodes zdata
   bool operator==(const FileFetch&) const = default;
 };
 std::string EncodeFileFetch(const FileFetch& f);
@@ -332,7 +345,7 @@ class FileTransfer : public FileRequester {
   void DropOutgoing(const std::string& reason, bool tell_peer);
   // Pasting side.
   void HandleList(const std::string& payload);
-  void HandleData(const std::string& payload);
+  void HandleData(const std::string& payload, bool compressed);
   void HandleCancel(const std::string& payload);
   void FinishIncoming(uint64_t id, const std::string& error, bool tell_peer);
   std::string ItemDir(uint64_t key, uint32_t item) const;
@@ -341,7 +354,8 @@ class FileTransfer : public FileRequester {
   uint64_t WireAnnounce(uint64_t key) const;
   void Log(const std::string& line);
   uint64_t Now() const;
-  bool SendData(std::string_view payload);
+  bool SendData(uint32_t type, std::string_view payload);
+  static std::string SentLine(const OutStream& o);
   // Pump with the transport's bulk queue known: fill it up to a target.
   uint64_t PumpBulk(uint64_t now, int64_t queued);
 
@@ -362,6 +376,8 @@ class FileTransfer : public FileRequester {
   std::map<uint64_t, std::pair<uint64_t, uint32_t>> lists_;  // list request id -> (key, item)
   std::map<uint64_t, std::unique_ptr<InStream>> ins_;       // fetch id -> stream
   std::set<std::pair<uint64_t, uint32_t>> fetching_;         // (key, item) asked for
+  ZSTD_DCtx_s* zstd_in_ = nullptr;                             // zdata
+  std::string zbuf_in_;
 };
 
 }  // namespace rdm
