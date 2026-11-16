@@ -22,6 +22,13 @@ struct AudioControl {
   bool operator==(const AudioControl&) const = default;
 };
 
+// The client overlay's line for a session without sound (docs/audio.md,
+// 10): why there is none. `revision`: what both sides speak (sound needs 3);
+// `requested`: whether this session asked for sound; `wanted_now`: whether
+// the user wants it now (View > Play Sound).
+std::string AudioOffLine(bool session_has_audio, const std::string& audio_reason, int revision, bool requested,
+                         bool wanted_now);
+
 // JSON: {"paused":false}
 std::string EncodeAudioControl(const AudioControl& m);
 // nullopt for anything that is not a JSON object; a missing or mistyped

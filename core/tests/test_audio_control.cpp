@@ -26,3 +26,17 @@ TEST(AudioControl, MissingUnknownOrMistypedFieldsKeepDefaults) {
   EXPECT_FALSE(rdm::DecodeAudioControl("not json"));
   EXPECT_FALSE(rdm::DecodeAudioControl(""));
 }
+
+TEST(AudioControl, TheOverlaySaysWhyThereIsNoSound) {
+  using rdm::AudioOffLine;
+  EXPECT_EQ(AudioOffLine(true, "", 3, true, true), "");
+  // Only a server below revision 3 is an older one.
+  EXPECT_EQ(AudioOffLine(false, "", 2, true, true), "Audio: off (older server)");
+  EXPECT_EQ(AudioOffLine(false, "disabled", 3, true, true), "Audio: off (server setting)");
+  EXPECT_EQ(AudioOffLine(false, "login_window", 3, true, true), "Audio: off (login window)");
+  EXPECT_EQ(AudioOffLine(false, "tcp", 3, true, true), "Audio: off (over TCP there is no sound)");
+  EXPECT_EQ(AudioOffLine(false, "unsupported", 3, true, true), "Audio: off (server cannot capture)");
+  EXPECT_EQ(AudioOffLine(false, "", 3, false, false), "Audio: off (turned off here)");
+  // Started with sound off, View > Play Sound turned on since: not "older server".
+  EXPECT_EQ(AudioOffLine(false, "", 3, false, true), "Audio: off (reconnect to hear sound)");
+}

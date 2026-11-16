@@ -138,7 +138,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后会话迁移到他的桌面，见下文“会话迁移”。没有这个字段等于 `false` |
 | `extra_displays` | 数组，可选 | 为 `extra_desktops` 建好的显示器：`port`、`desktop`、`x`、`y`（修订 2）。密钥和令牌由会话的派生，见“扩展桌面” |
 | `audio` | 布尔，可选 | `true`：这次会话有声音（修订 3），客户端给主画面的 viewer 打开声音。没有这个字段等于 `false` |
-| `audio_reason` | 字符串，可选 | `audio` 不为 `true` 而客户端要了声音时说明原因：`disabled`（服务端设置关了）、`login_window`（登录窗口没有声音）、`unsupported`（系统或构建不支持）。没有权限不在这里说（会话中途可能授权），在会话统计里 |
+| `audio_reason` | 字符串，可选 | `audio` 不为 `true` 而客户端要了声音时说明原因：`disabled`（服务端设置关了）、`login_window`（登录窗口没有声音）、`tcp`（画面走 TCP，TCP 上没有声音）、`unsupported`（系统或构建不支持）。没有权限不在这里说（会话中途可能授权），在会话统计里 |
 
 客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
@@ -351,7 +351,7 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
 
 速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是真正丢失的包：rdaccel 判定丢失并重传、之后又没有收到原包确认的（`packets_lost - packets_spurious`，rdaccel 1.3），只是晚到的不算。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。
 
-修订 3 加了声音的两项（旧客户端忽略）：`audio` 是声音的状态：`off`（这次会话没有声音）、`starting`、`on`（正在传）、`silent`（在传，但被控 Mac 现在没声音，一个包都不发）、`paused`（客户端暂停了）、`no_permission`（服务端没有“系统声音录制”权限）、`failed`（采集失败，rdaccel 每 2 秒再试）；`audio_kbps` 是最近一秒声音的码率，和 `bitrate_kbps` 同一个口径（也算在 `bitrate_kbps` 里）。Mac 客户端浮窗的“声音”一项（默认不显示）：`Audio: 96 kbps · buffer 32 ms · lost 0.1%`、`Audio: silent`、`Audio: paused`、`Audio: off (server setting)`、`Audio: off (server needs the System Audio Recording permission)`、`Audio: off (login window)`、`Audio: off (older server)`；码率来自服务端，缓冲和丢失来自本机的 `rda_viewer_stats`。
+修订 3 加了声音的两项（旧客户端忽略）：`audio` 是声音的状态：`off`（这次会话没有声音）、`starting`、`on`（正在传）、`silent`（在传，但被控 Mac 现在没声音，一个包都不发）、`paused`（客户端暂停了）、`no_permission`（服务端没有“系统声音录制”权限）、`failed`（采集失败，rdaccel 每 2 秒再试）；`audio_kbps` 是最近一秒声音的码率，和 `bitrate_kbps` 同一个口径（也算在 `bitrate_kbps` 里）。Mac 客户端浮窗的“声音”一项（默认不显示）：`Audio: 96 kbps · buffer 32 ms · lost 0.1%`、`Audio: silent`、`Audio: paused`、`Audio: off (server setting)`、`Audio: off (server needs the System Audio Recording permission)`、`Audio: off (login window)`、`Audio: off (over TCP there is no sound)`、`Audio: off (reconnect to hear sound)`（这次连接开始时菜单里关着声音，后来打开了）、`Audio: off (older server)`（只在协商出的修订低于 3 时）；码率来自服务端，缓冲和丢失来自本机的 `rda_viewer_stats`。
 
 ## 实现
 

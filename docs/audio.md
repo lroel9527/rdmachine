@@ -695,3 +695,23 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 - **抖动缓冲**：抖动 0 / 5 / 20 / 40 ms 时目标延迟 20 / 20 / 25 / 44 ms；40 ms 抖动时开头 2 秒（目标还在起始的 30 ms 时）补偿了 32 帧，之后没有；1% 丢包补偿 17 帧，带 RED 时 0 帧；300 ms 停顿后追回一次、欠载一次；±200 ppm 跑 10 分钟控制量平均 ±200 ppm，没有欠载、追赶和补偿。
 - **数据报**：画面占满 4 Mbps 时见上表。
 - **11.3 里测试信号对应的数字**（`tools/netsim_matrix.py --audio`，测试信号 4 秒里约 2 秒有声音，统计口径 / 线上，线上按每包 56 字节算）：普通模式 108 / 131 kbps，省流量模式 73 / 85 kbps；路径上有 1% 以上的丢包、冗余打开时普通模式 162–182 / 186–205 kbps，省流量约 120 / 132 kbps。1 Mbps 的路径上画面起步时会把瓶颈排满，声音在开头几秒有 1–2 次欠载、十来帧补偿（10 Mbps 上没有）。lroel 真实使用的数字（第 5 阶段要回填 11.3 的）还没有：要在真正连着用的时候从浮窗读（“声音”一项）。
+
+### 审查后的修正（2026-11-16）
+
+一次独立审查找出的问题，都已改正，各带一个没改时会失败的测试：
+
+| 问题 | 改法 | 测试 |
+| --- | --- | --- |
+| 解码端没拿到声音段的前一帧时（静音正好 200 ms：前一帧就是已经播过的 END 帧；或者新段的第一个包丢了），第一帧从全新的解码状态解出来，安静的声音先响一声：噪声峰值 0.003 时输出峰值 0.22（10 ms 一帧）和 0.106（20 ms），高出 31–37 dB，30–50 ms 才落下 | 每段开头 5 帧不做帧间预测（`OPUS_SET_PREDICTION_DISABLED`），这几帧多约 1% 的字节。选它而不是“紧接着 END 时接着用旧的段”：它同样管住第一个包丢了的情况，接收端不用为已经播过的位置开例外。改后两种情况和正常一样（审查用的程序：峰值 0.0055–0.0064，和第一段的 0.0054–0.0060 相同） | `AudioJitter.AQuietOnsetWithoutItsLeadInIsNoBurst`（两种档位、4 种内容：改前最响的 5 ms 高出 27–35 dB，改后不超过 +0.4 dB） |
+| 慢链路的降码率会卡在 32 kbps：只有声音在走时，带宽估计量到的就是声音自己（线上约 200 kbps），预算是负的，而且永远升不回去 | 只在路径确实满了（瓶颈有排队、或丢包 ≥ 1%）时降；不满就每 5 秒升一档，不管估计 | `AudioGate.TheSoundAloneDoesNotKeepItselfDown` |
+| 声音段中间暂停时没有 END：接收端补 5 帧、记一次欠载，目标上限放宽到 200 ms 30 秒 | 暂停时这一帧作为 END 发出 | `AudioJitter.APauseInTheMiddleOfASoundEndsItCleanly` |
+| 菜单里后来打开“播放远程电脑的声音”后浮窗说 `Audio: off (older server)` | 浮窗的原因由 `AudioOffLine()`（`audio_control.h`）给出：只有修订低于 3 才是 older server；这次没要过声音的是 `reconnect to hear sound` | `AudioControl.TheOverlaySaysWhyThereIsNoSound` |
+| 画面走 TCP 时会话仍然说有声音，浮窗一直 `Audio: starting` | `session_ready.audio = false`，`audio_reason = "tcp"`，rdaccel 的声音不开 | `MediaE2EAudio.NoSoundOverTcp` |
+| 加密层收 1100 字节的数据报，封好 1124，下层拒收 | 加密层最多 1076（`Transport::MaxDatagram()`）；声音包上限改成 1076（实际最多 1019） | `SecureTransport.DatagramsRoundTrip` |
+| 同一条连接上停了再开声音时 `audio_dropped_stale` 重复计数 | 开始时记下传输当时的计数，只算之后的 | — （同一连接上停开再计数的情况没有单独的测试） |
+| `Read` 一次要 1 万帧以上时超出重采样器的缓冲，多出的被跳过 | 分成 2048 帧一块 | `AudioJitter.ALargeReadIsWhole` |
+| `RDACCEL_AUDIO=OFF` 时 `submit_audio` 回 BUSY、`get_audio_status` 回 OK | 都回 `RDA_ERR_UNSUPPORTED` | `CApi.SoundIsUnsupportedWhenBuiltWithout`（在 OFF 的构建里跑） |
+| tap 的属性监听：拆监听时正在进行的回调可能碰到已经释放的对象 | 改用 block 监听，在自己的串行队列上；block 持有一个共享的“中转”，析构时在它的锁下把主人清空，正在进行的回调先做完 | 没有能稳定触发这个竞争的测试（要 coreaudiod 恰好在拆的那一刻回调） |
+| 权限：进程开始时缓存的“拒绝”永远不变（tap 根本不建）；进程运行中的拒绝看不出来 | 查到“拒绝”时照样建不静音的 tap（不会再询问），状态 `no_permission`，听到声音就算授权；运行中撤销的授权查不出来（TCC 仍说“没问过”），采集只是全是静音：服务端菜单在没确认权限时写“安静（也可能是没有系统声音录制权限）”，并提示在系统设置里改了之后要重开服务端 | 无（不能改这台 Mac 的授权来测） |
+| 60 ms 以内的输入空当不推进样本位置，时间线落后于采集时刻 | 超过四分之一帧且比上一块长的空当按静音补上 | `AudioGate.AShortGapStillMovesThePositionsOn` |
+| 测试里没有东西拦着让本机静音的 tap | `RDACCEL_AUDIO_NULL_OUTPUT`（CTest 给每个测试都设）或 `RDACCEL_AUDIO_NO_LOCAL_MUTE` 设了时，系统声音采集从不静音本机（只建 `CATapUnmuted`），记一行日志；`MediaE2E` 的基类默认用测试信号 | `PlatformAudioMac.UnderTheTestEnvironmentNoTapMutes`（只测决定函数，不建静音的 tap） |

@@ -31,7 +31,7 @@ struct SessionGrant {
   bool login_window = false;           // the picture is the login window
   std::vector<ExtraDisplay> extra_displays;  // built for request.extra_desktops
   bool audio = false;        // the session has sound (session_ready.audio)
-  std::string audio_reason;  // why not, when not: disabled, login_window, unsupported
+  std::string audio_reason;  // why not, when not: disabled, login_window, tcp, unsupported
 };
 
 // Who a session is for, as the control connection saw it (for status

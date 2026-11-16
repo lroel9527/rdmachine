@@ -75,11 +75,15 @@ NSString* AudioText(const rdm::MediaHostStatus& st) {
     if (st.audio_reason == "disabled") return @"声音：未传（设置里关了）";
     if (st.audio_reason == "login_window") return @"声音：未传（登录窗口）";
     if (st.audio_reason == "unsupported") return @"声音：未传（这台 Mac 采集不了）";
+    if (st.audio_reason == "tcp") return @"声音：未传（画面走 TCP，TCP 上没有声音）";
     return @"声音：未传（客户端没要）";
   }
   const rda_audio_status& a = st.audio_status;
   switch (a.state) {
     case RDA_AUDIO_STATE_RUNNING:
+      // Without the permission the capture hears only silence, and TCC may
+      // not tell this process of a change it made while running.
+      if (a.silent && AudioCapturePermission() != 0) return @"声音：安静（也可能是没有系统声音录制权限）";
       if (a.silent) return @"声音：安静";
       return a.muted_local ? @"声音：正在传（本机不出声）" : @"声音：正在传";
     case RDA_AUDIO_STATE_PAUSED: return @"声音：暂停（客户端听不到）";
@@ -444,6 +448,12 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   const int sound = AudioCapturePermission();
   [self add:(sound == 0 ? @"系统声音录制：已允许" : @"系统声音录制：未允许（点此打开系统设置）")
       action:(sound == 0 ? nullptr : @selector(openAudioCapture:))];
+  if (sound != 0) {
+    // macOS answers this question once per process: a change in System
+    // Settings shows here (and, for a refusal, in the session) only after
+    // a restart; a grant starts the sound anyway once something plays.
+    [self add:@"    在系统设置里改了之后，退出 RDMachine Server 再打开，这里才显示新的状态" action:nullptr];
+  }
   if (!capture || !input || sound != 0) {
     [self add:@"    在系统设置里打开 RDMachine Server 的开关；下次连接还不行就退出重开" action:nullptr];
   }

@@ -102,6 +102,10 @@ class RemoteSession {
   bool audio_paused() const { return sent_paused_; }
   // Whether the current session plays sound (a player is running).
   bool audio_playing() const;
+  // Whether this session asked for sound (Options::audio), and the protocol
+  // revision both sides speak (protocol.h; sound needs 3).
+  bool audio_requested() const { return options_.audio; }
+  int revision() const { return revision_; }
   // The current viewer, for statistics and tests; may change on a move.
   rda_viewer* viewer() const;
   SessionReady session() const;
@@ -155,6 +159,7 @@ class RemoteSession {
   void UpdateAudioPaused(bool again);
   void CheckOutputMuted();
   int udp_wait_ms_ = 0;  // options_.udp_wait_ms, longer on a far link (Start)
+  int revision_ = 0;     // negotiated at the hello
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};
   std::thread thread_;

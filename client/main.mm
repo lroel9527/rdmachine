@@ -44,6 +44,7 @@
 
 #include "rdmachine/desktop.h"
 #include "rdmachine/input_source_sync.h"
+#include "rdmachine/audio_control.h"
 #include "rdmachine/picture_mode.h"
 #include "rdmachine/protocol.h"
 #include "rdmachine/session_stats.h"
@@ -1388,11 +1389,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   if (!_session) return @"Audio: –";
   const rdm::SessionReady ready = _session->session();
   if (!ready.audio) {
-    if (ready.audio_reason == "disabled") return @"Audio: off (server setting)";
-    if (ready.audio_reason == "login_window") return @"Audio: off (login window)";
-    if (ready.audio_reason == "unsupported") return @"Audio: off (server cannot capture)";
-    if (!PlaySound()) return @"Audio: off (turned off here)";
-    return @"Audio: off (older server)";
+    return NS(rdm::AudioOffLine(false, ready.audio_reason, _session->revision(), _session->audio_requested(),
+                                PlaySound()));
   }
   if (r.audio == "paused" || !PlaySound()) return @"Audio: paused";
   if (r.audio == "silent") return @"Audio: silent";

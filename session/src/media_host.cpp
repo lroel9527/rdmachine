@@ -598,6 +598,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       grant.audio_reason = "disabled";
     } else if (options_.login_window) {
       grant.audio_reason = "login_window";
+    } else if (grant.transport == MediaTransport::kTcp) {
+      // rdaccel carries sound in datagrams, which TCP has not (D9): the
+      // client must not wait for sound that cannot come.
+      grant.audio_reason = "tcp";
     } else {
       rda_audio_config ac;
       rda_audio_config_default(&ac);

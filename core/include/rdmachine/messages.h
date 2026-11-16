@@ -120,7 +120,8 @@ struct SessionReady {
   std::vector<ExtraDisplay> extra_displays;
   // This session has sound (revision 3): the client gives the main
   // picture's viewer audio and plays it. When false, audio_reason may say
-  // why: "disabled" (the server's setting), "login_window", "unsupported".
+  // why: "disabled" (the server's setting), "login_window", "tcp" (the
+  // picture goes over TCP, which carries no sound), "unsupported".
   // A missing permission is not said here (it can come during the session)
   // but in the statistics.
   bool audio = false;

@@ -101,6 +101,10 @@ class MediaE2E : public ::testing::Test {
       return false;
     };
     mo.clipboard = server_clipboard_;
+    // Sound, if a test asks for it, is rdaccel's computed test signal: no
+    // test captures this Mac's sound, let alone mutes it.
+    mo.audio_source = RDA_AUDIO_SOURCE_TEST;
+    mo.mute_local_audio = false;
     Configure(mo);
     media_ = std::make_unique<MediaHost>(mo);
     std::string error;
@@ -803,4 +807,28 @@ TEST_F(MediaE2EAudio, AMutedOutputHereSendsNothing) {
   EXPECT_EQ(media_->Status().audio_status.state, RDA_AUDIO_STATE_PAUSED);
   s->SetAudioPaused(false);
   EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.state != RDA_AUDIO_STATE_PAUSED; }, 5s));
+}
+
+TEST_F(MediaE2EAudio, NoSoundOverTcp) {
+  // The picture over TCP carries no sound: the session says so, rdaccel's
+  // sound is not started, and the client does not wait for it.
+  Frames frames;
+  auto o = Options(&frames);
+  o.audio = true;
+  o.audio_null_device = true;
+  o.control.request.transport = MediaTransport::kTcp;
+  ConnectResult r;
+  auto s = RemoteSession::Start(std::move(o), &r);
+  ASSERT_TRUE(s) << r.error << ": " << r.detail;
+  EXPECT_EQ(s->session().transport, MediaTransport::kTcp);
+  EXPECT_FALSE(s->session().audio);
+  EXPECT_EQ(s->session().audio_reason, "tcp");
+  EXPECT_FALSE(s->audio_playing());
+  EXPECT_TRUE(WaitFor([&] { return frames.stats_reports > 0; }));
+  const MediaHostStatus st = media_->Status();
+  EXPECT_FALSE(st.audio);
+  EXPECT_EQ(st.audio_reason, "tcp");
+  EXPECT_EQ(st.audio_status.state, RDA_AUDIO_STATE_OFF);
+  EXPECT_EQ(StatsAudio(frames), "off");
+  EXPECT_EQ(s->revision(), kProtocolRevision);
 }

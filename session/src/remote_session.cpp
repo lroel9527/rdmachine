@@ -152,6 +152,7 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
         std::clamp<long long>(2 * connect_took, s->options_.udp_wait_ms, std::max(s->options_.udp_wait_ms, 15000)));
   }
   s->control_ = std::move(result->connection);
+  s->revision_ = result->revision;
   const int connect_ms = s->options_.control.timeout_ms;
   if (s->options_.clipboard && s->options_.clipboard_mode != ClipboardMode::kOff) {
     ClipboardSync::Options so;
