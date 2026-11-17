@@ -27,6 +27,10 @@ option(RDM_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_compile_options(-Wall -Wextra)
+# The client and the server link the whole of rdaccel and the session library,
+# each using half of it (the viewer or the host): the linker drops the rest
+# (about a fifth of the server, a third of the client).
+add_link_options(LINKER:-dead_strip)
 # Keep the build machine's folders out of the binaries (__FILE__ in
 # dependencies such as Mbed TLS, debug info): paths become relative.
 add_compile_options(-ffile-prefix-map=${CMAKE_BINARY_DIR}/=

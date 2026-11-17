@@ -18,7 +18,9 @@
 #                signs ad hoc: fine for a quick test, but macOS then asks for
 #                the permissions again after every rebuild.
 #   --keychain   keychain holding the identity (default: the search list)
-#   --build      configure and build a universal Release build first
+#   --build      configure and build a universal build first, optimised for
+#                size (MinSizeRel: as fast as -O3 in rdaccel's bench, and
+#                the same output)
 #   --pkg        also write dist/RDMachine-VERSION.pkg, the installer: the
 #                server (app, daemon and agents, started at once: what
 #                rdmachine-service install does) and the client, each a
@@ -50,7 +52,7 @@ while [ $# -gt 0 ]; do
     --keychain=*) keychain=${1#*=}; shift ;;
     --build) do_build=1; shift ;;
     --pkg) do_pkg=1; shift ;;
-    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,7 +68,7 @@ min_macos=$(sed -n 's/.*set(CMAKE_OSX_DEPLOYMENT_TARGET "\([0-9.]*\)".*/\1/p' CM
 build_no=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 
 if [ "$do_build" = 1 ]; then
-  cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DRDM_BUILD_TESTS=OFF
+  cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DRDM_BUILD_TESTS=OFF
   cmake --build "$build_dir" -j "$(sysctl -n hw.ncpu)"
 fi
 bin="$build_dir/bin"
@@ -90,6 +92,7 @@ make_app() {
   shift 4
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   ditto "$bin/$exe" "$app/Contents/MacOS/$exe"
+  strip -x "$app/Contents/MacOS/$exe"  # no local symbols in what is shipped (before signing)
   local r
   for r in "$@"; do
     case "$r" in
@@ -106,6 +109,7 @@ make_app() {
   local appex="$app/Contents/PlugIns/RDMachine Files.appex"
   mkdir -p "$appex/Contents/MacOS"
   ditto "$bin/rdmachine-files-ext" "$appex/Contents/MacOS/rdmachine-files-ext"
+  strip -x "$appex/Contents/MacOS/rdmachine-files-ext"
   sed -e "s/@BUNDLE_ID@/$id.files/" -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build_no/" \
       -e "s/@MIN_MACOS@/$min_macos/" "$pkg/files-Info.plist.in" >"$appex/Contents/Info.plist"
   plutil -lint -s "$appex/Contents/Info.plist"
@@ -125,6 +129,7 @@ make_app "RDMachine.app" rdmachine-client org.rdmachine.client client-Info.plist
 make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Info.plist.in "$pkg/rdmachine-service" "$pkg/icons/RDMachineServer.icns"
 
 ditto "$bin/rdmachine-connect" "$out/rdmachine-connect"
+strip -x "$out/rdmachine-connect"
 codesign "${sign_args[@]}" --identifier org.rdmachine.connect "$out/rdmachine-connect"
 install -m 755 "$pkg/rdmachine-server.sh" "$out/rdmachine-server.sh"
 install -m 755 "$pkg/rdmachine-service" "$out/rdmachine-service"
