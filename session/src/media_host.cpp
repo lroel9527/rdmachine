@@ -529,7 +529,6 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   rda_host_config_default(&cfg);
   if (options_.fps > 0) cfg.fps = options_.fps;
   if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
-  cfg.video_codec = RDA_VIDEO_CODEC_HEVC;  // every Mac macOS 14 runs on encodes it in hardware
   cfg.display_index = display_index;
   cfg.encryption_key = secrets.key.data();  // copied by rdaccel
   cfg.keep_serving = 0;                      // one viewer per session
@@ -1000,7 +999,6 @@ void MediaHost::StartExtraHosts(const SessionRequest& request, const SessionSecr
     rda_host_config_default(&cfg);
     if (options_.fps > 0) cfg.fps = options_.fps;
     if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
-    cfg.video_codec = RDA_VIDEO_CODEC_HEVC;  // every Mac macOS 14 runs on encodes it in hardware
     cfg.display_index = x->display_index;
     cfg.encryption_key = own.key.data();  // copied by rdaccel
     cfg.keep_serving = 0;
