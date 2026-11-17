@@ -301,7 +301,7 @@ nonce：第 0 字节 0xFE（通道号用 0–7，不会撞），第 16–23 字�
 
 ### 6.4 TCP 退回时
 
-第 6 阶段，**先不做**（D9，lroel 定：等真的在 TCP 上用到再说；现在 TCP 上就没有声音，状态是 `waiting_peer`）。以后要做时的做法：新的可靠通道 `Channel::kAudio = 7`（`kChannelCount` 变 8；`SecureTransport` 的各个数组跟着变），内容是 `[长度 u16][5.1 的包]` 连着放；`TcpTransport`、`LocalPipe` 报 `CarriesAudioChannel()`，这时也声明 `kCapAudio`。TCP 丢包时会一顿一顿地到，接收端超出上限的旧声音直接跳过（7.2）。旧的 TCP 对端遇到不认识的通道号会断开，所以同样只在协商后才用。
+第 6 阶段，**不做**（D9，lroel 定：先是“等真的在 TCP 上用到再说”；2026-11-17 定为不做：只在 Tailscale 里用，画面一直走 UDP，见[决定](decisions.md)的“范围收口”。TCP 上没有声音，状态是 `waiting_peer`）。当时设想的做法，留作记录：新的可靠通道 `Channel::kAudio = 7`（`kChannelCount` 变 8；`SecureTransport` 的各个数组跟着变），内容是 `[长度 u16][5.1 的包]` 连着放；`TcpTransport`、`LocalPipe` 报 `CarriesAudioChannel()`，这时也声明 `kCapAudio`。TCP 丢包时会一顿一顿地到，接收端超出上限的旧声音直接跳过（7.2）。旧的 TCP 对端遇到不认识的通道号会断开，所以同样只在协商后才用。
 
 ## 7. 接收端（rdaccel，`core/audio/`）
 
@@ -631,7 +631,7 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 | 3 | rdaccel：Process Tap 采集、播放器（真设备 + 空设备）、`RDA_AUDIO_SOURCE_SYSTEM`、权限状态；`examples/serve`、`view` 加 `--audio`（`view` 默认空设备，`--audio-device` 才开真设备） | 12.3 通过；`grep -rnE "afplay|NSSound|NSBeep|AudioServicesPlay|AVAudioPlayer|\bsay\b" tests tools examples` 没有结果；`grep` 不到对音量和静音属性的写操作；rdaccel 1.13.0 的 CHANGELOG 和文档改完 |
 | 4 | rdmachine：最低系统 14.2、修订 3、设置、`MediaHost`、`RemoteSession`、客户端菜单和浮窗、服务端菜单和权限、Info.plist、安装包的检查脚本 | 12.4 通过；`tools/smoke_test.sh` 通过；pkg 能装、`rdmachine-service status` 正常；文档改完；交给 lroel 做第 13 节的 1–5、7、9–11 |
 | 5 | 客户端听不到时暂停（5.6）、链路很慢时降码率（5.5）、A/V 对齐（7.4）、按 lroel 实际使用的数字回填 11.3 | 对应的单元测试；第 13 节的 6、8；11.3 的表更新为实测 |
-| 6 | TCP 上的声音（6.4），如果 lroel 要 | `test_tcp_transport.cpp` 和 e2e 里 TCP 的一例；UDP 的数字不变 |
+| 6 | TCP 上的声音（6.4）：不做（2026-11-17） | `test_tcp_transport.cpp` 和 e2e 里 TCP 的一例；UDP 的数字不变 |
 
 ## 15. 版本和文档
 
@@ -651,7 +651,7 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 | D6 | 客户端静音或音量为 0 时自动暂停发送 | 做 |
 | D7 | 静音门限 | −90 dBFS（2⁻¹⁵）、尾巴 200 ms |
 | D8 | Opus 由 rdaccel 在配置时下载，universal 构建关掉内联指令 | 下载（FetchContent），关掉内联指令 |
-| D9 | TCP 上要不要声音（第 6 阶段） | 先不做 |
+| D9 | TCP 上要不要声音（第 6 阶段） | 不做（2026-11-17 确认） |
 | D10 | 声音早于画面超过 20 ms 时最多推迟 120 ms 去对齐 | 做 |
 | D11 | 普通模式 10 ms 一帧、160 kbps | 如上 |
 | D12 | 第 0 阶段在这台 Mac 上弹一次“系统声音录制”的询问；第 13 节由 lroel 在能出声时亲自验 | 同意；询问已弹过一次，lroel 点了允许（见第 2 节） |
