@@ -168,12 +168,9 @@ ctest --test-dir build
 
 | 文档 | 内容 |
 | --- | --- |
-| [第一阶段的决定](docs/decisions.md) | 范围、语言、界面、认证、端口、会话模型 |
+| [决定](docs/decisions.md) | 范围、语言、界面、认证、端口、会话模型 |
 | [控制协议 v0](docs/protocol.md) | 登录、密钥下发、会话控制的线上格式 |
 | [文件复制粘贴](docs/file-paste.md) | 只在粘贴时才传，File Provider 占位文件；苹果的做法、实验结果和实现 |
-| [NoMachine 功能清单](docs/research/nomachine-features.md) | 调研：NoMachine 有哪些功能，P0/P1/P2 |
-| [rdaccel 能力评估](docs/research/rdaccel-assessment.md) | 调研：rdaccel 能做到什么、缺什么 |
-| [同类开源方案](docs/research/competitive-analysis.md) | 调研：RustDesk、VNC、xrdp、Guacamole、X2Go、Sunshine |
 
 ## 许可
 
