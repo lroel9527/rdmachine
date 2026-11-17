@@ -19,7 +19,6 @@
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
 #include "rdmachine/session/login_screen.h"
-#include "rdmachine/session/video_codec.h"
 #include "rdmachine/session/virtual_desktop.h"
 
 namespace rdm {
@@ -27,9 +26,8 @@ namespace rdm {
 struct MediaHostOptions {
   std::string server_name;
   // rdaccel listens here: UDP on the control port (a different protocol, so
-  // no clash), TCP fallback on the next port (docs/protocol.md).
+  // no clash; docs/protocol.md).
   uint16_t udp_port = kDefaultPort;
-  uint16_t tcp_port = kDefaultPort + 1;
   // Password check. Default: PAM (`pam_service`, empty = DefaultPamService())
   // and, in M0, only the account the server runs as (not_console_user).
   std::function<bool(const std::string& user, const std::string& password, std::string* error)> check_password;
@@ -48,8 +46,7 @@ struct MediaHostOptions {
   // Empty = requests are not honoured: the display is shared as it is.
   VirtualDesktopFactory virtual_desktop;
   // Extra displays of an extended desktop (request.extra_desktops); each is
-  // served on a port of its own: udp_port + 2 + i (UDP or TCP as the main
-  // picture). Empty: none are built.
+  // served on a port of its own: udp_port + 2 + i. Empty: none are built.
   ExtraDesktopFactory extra_desktop;
   // The server runs in the login window session (docs/decisions.md, "登录
   // 窗口和锁屏"): any account on this computer may log in with its password
@@ -65,7 +62,6 @@ struct MediaHostOptions {
   std::function<LoginScreenState()> login_screen;
   int32_t fps = 0;           // 0 = rdaccel's default
   int64_t bitrate_bps = 0;   // 0 = rdaccel's default
-  VideoCodecChoice video_codec = VideoCodecChoice::kAuto;  // see video_codec.h
   // Sound (docs/audio.md): sent to a client that asks for it (not from the
   // login window), with this computer silent meanwhile when mute_local_audio.
   // audio_source: RDA_AUDIO_SOURCE_SYSTEM, or _TEST (a computed signal, for
@@ -81,7 +77,6 @@ struct MediaHostStatus {
   bool running = false;          // an rdaccel host exists (session started)
   bool media_connected = false;  // the viewer's picture connection is up
   SessionOrigin origin;
-  MediaTransport transport = MediaTransport::kUdp;
   bool view_only = false;          // in effect (asked for, or no input injection)
   bool text_mode = false;          // the picture is sent in text mode (docs/protocol.md, "文字模式")
   bool input_unavailable = false;  // control was wanted but input injection failed

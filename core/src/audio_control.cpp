@@ -10,7 +10,6 @@ std::string AudioOffLine(bool session_has_audio, const std::string& audio_reason
   if (revision < 3) return "Audio: off (older server)";
   if (audio_reason == "disabled") return "Audio: off (server setting)";
   if (audio_reason == "login_window") return "Audio: off (login window)";
-  if (audio_reason == "tcp") return "Audio: off (over TCP there is no sound)";
   if (audio_reason == "unsupported") return "Audio: off (server cannot capture)";
   if (!wanted_now) return "Audio: off (turned off here)";
   // Started with sound off here, turned on since: the next connection has it.

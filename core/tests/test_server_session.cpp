@@ -11,20 +11,13 @@ namespace {
 
 class ServerSessionTest : public ::testing::Test {
  protected:
-  ServerSession Make(bool pairing = true) {
-    return ServerSession(delegate_, ServerGuards{&limiter_, pairing ? &pairing_ : nullptr}, "10.0.0.2",
-                         [this] { return now_; });
+  ServerSession Make() {
+    return ServerSession(delegate_, ServerGuards{&limiter_}, "10.0.0.2", [this] { return now_; });
   }
   static Auth Password(std::string user, std::string pass) {
     Auth a;
     a.username = std::move(user);
     a.password = std::move(pass);
-    return a;
-  }
-  static Auth Code(std::string code) {
-    Auth a;
-    a.method = AuthMethod::kPairingCode;
-    a.code = std::move(code);
     return a;
   }
   static const AuthResult& AsAuthResult(const ServerSession::Output& out) {
@@ -39,7 +32,6 @@ class ServerSessionTest : public ::testing::Test {
 
   FakeDelegate delegate_;
   FailureLimiter limiter_;
-  PairingCodes pairing_;
   Clock::time_point now_ = Clock::time_point() + 1000h;
 };
 
@@ -51,7 +43,6 @@ TEST_F(ServerSessionTest, HappyPathWithPassword) {
   ASSERT_EQ(out.send.size(), 1u);
   const auto& hello = std::get<ServerHello>(out.send[0]);
   EXPECT_EQ(hello.server_name, "test-mac");
-  EXPECT_EQ(hello.auth_methods, (std::vector{AuthMethod::kPassword, AuthMethod::kPairingCode}));
   EXPECT_FALSE(out.close);
 
   EXPECT_TRUE(AsAuthResult(s.Handle(Password("alice", "secret"))).ok);
@@ -68,7 +59,6 @@ TEST_F(ServerSessionTest, HappyPathWithPassword) {
   EXPECT_NE(ready.key, ready.auth_token);
   EXPECT_TRUE(delegate_.last_request.view_only);
   EXPECT_EQ(s.state(), ServerSession::State::kInSession);
-  EXPECT_EQ(delegate_.last_origin.method, AuthMethod::kPassword);
   EXPECT_EQ(delegate_.last_origin.username, "alice");
   EXPECT_EQ(delegate_.last_origin.peer_ip, "10.0.0.2");
 
@@ -179,24 +169,6 @@ TEST_F(ServerSessionTest, RateLimited) {
   EXPECT_TRUE(AsAuthResult(s.Handle(Password("alice", "secret"))).ok);
 }
 
-TEST_F(ServerSessionTest, PairingCode) {
-  auto s = Make();
-  s.Handle(ClientHello{});
-  EXPECT_EQ(AsAuthResult(s.Handle(Code("12345678"))).error, "code_expired");  // none issued
-  std::string code = pairing_.Issue(now_);
-  EXPECT_TRUE(AsAuthResult(s.Handle(Code(code))).ok);
-  s.Handle(SessionRequest{});
-  EXPECT_EQ(delegate_.last_origin.method, AuthMethod::kPairingCode);
-  EXPECT_EQ(delegate_.last_origin.username, "");
-}
-
-TEST_F(ServerSessionTest, PairingCodeOff) {
-  auto s = Make(false);
-  auto out = s.Handle(ClientHello{});
-  EXPECT_EQ(std::get<ServerHello>(out.send[0]).auth_methods, std::vector{AuthMethod::kPassword});
-  EXPECT_EQ(AsAuthResult(s.Handle(Code("12345678"))).error, "method_unsupported");
-}
-
 TEST_F(ServerSessionTest, StartSessionErrors) {
   auto s = Make();
   s.Handle(ClientHello{});
@@ -213,11 +185,11 @@ TEST_F(ServerSessionTest, SecondRequestReplacesSession) {
   s.Handle(Password("alice", "secret"));
   s.Handle(SessionRequest{});
   const auto first_key = delegate_.last_secrets.key;
-  SessionRequest tcp;
-  tcp.transport = MediaTransport::kTcp;
-  auto out = s.Handle(tcp);
+  SessionRequest again;
+  again.view_only = true;
+  auto out = s.Handle(again);
   const auto& ready = std::get<SessionReady>(out.send.at(0));
-  EXPECT_EQ(ready.transport, MediaTransport::kTcp);
+  EXPECT_TRUE(delegate_.last_request.view_only);
   EXPECT_NE(ready.key, first_key);
   EXPECT_EQ(delegate_.starts, 2);
   EXPECT_EQ(delegate_.ends, 1);
@@ -315,12 +287,13 @@ TEST_F(ServerSessionTest, ARequestWhileMovingIsWhatStartsAgain) {
   delegate_.check = {SessionCheck::Action::kMove, "user_logged_in"};
   s.Tick();
   ASSERT_EQ(s.state(), ServerSession::State::kMoving);
-  SessionRequest tcp;
-  tcp.transport = MediaTransport::kTcp;
-  EXPECT_TRUE(s.Handle(tcp).send.empty());
+  SessionRequest again;
+  again.view_only = true;
+  EXPECT_TRUE(s.Handle(again).send.empty());
   auto out = s.Tick();
   ASSERT_EQ(out.send.size(), 1u);
-  EXPECT_EQ(std::get<SessionReady>(out.send[0]).transport, MediaTransport::kTcp);
+  EXPECT_TRUE(std::holds_alternative<SessionReady>(out.send[0]));
+  EXPECT_TRUE(delegate_.last_request.view_only);
 }
 
 TEST_F(ServerSessionTest, ByeWhileMovingEndsNothingTwice) {

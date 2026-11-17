@@ -1,8 +1,8 @@
 // rdmachine-server: shares this computer's screen with rdmachine clients.
 //
-//   rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]
+//   rdmachine-server [--port=4100] [--bind=ADDR]
 //                    [--view-only] [--pam-service=NAME] [--config-dir=DIR]
-//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE] [--video-codec=auto|hevc|h264]
+//                    [--fps=N] [--bitrate-kbps=N] [--clipboard=MODE]
 //                    [--audio=on|off] [--mute-local=on|off] [--headless]
 //                    [--fingerprint] [--version] [--standalone]
 //   rdmachine-server --daemon [--port=N] [--config-dir=DIR]   (root, launchd)
@@ -19,17 +19,16 @@
 //   standalone      no daemon (or --standalone): its own control server, as
 //                   before 3.0.
 //
-// On macOS it puts an icon in the menu bar: connection status, pairing codes,
-// the fingerprint, disconnect, settings and a floating statistics panel for
-// debugging (server/mac_app.mm). --headless runs without it, as on Linux.
+// It puts an icon in the menu bar: connection status, the fingerprint,
+// disconnect, settings and a floating statistics panel for debugging
+// (server/mac_app.mm). --headless runs without it.
 // Settings live in <config dir>/server-settings.json (the menu bar app edits
 // them); the options above override them for one run.
 //
 // Listens for control connections (TLS 1.3, TCP --port) and serves one
-// session at a time over rdaccel (UDP --port, TCP fallback --port + 1).
-// Clients log in with the password of the account this server runs as, or
-// with a pairing code: --pairing-code prints one at start, and pressing Enter
-// prints a new one. The first run creates the server's identity in the
+// session at a time over rdaccel (UDP --port).
+// Clients log in with the password of the account this server runs as.
+// The first run creates the server's identity in the
 // config directory; --fingerprint prints it for comparing with what clients
 // show.
 //
@@ -37,14 +36,13 @@
 // files only as their names) with the client: both (default), send (only
 // from this computer to the client), receive (only from the client) or off.
 // What is copied only crosses when it is pasted on the other side.
-// View-only sessions never take the client's clipboard. Only macOS has a
-// clipboard backend so far.
+// View-only sessions never take the client's clipboard.
 //
 // --audio sends this computer's sound to a client that asks for it (on by
 // default), --mute-local keeps this computer silent meanwhile (on by
 // default; only while the sound really goes to a client).
 //
-// macOS needs three permissions for the program that runs this: Screen
+// It needs three permissions for the program that runs this: Screen
 // Recording (capture), Accessibility (input; without it sessions are
 // view-only) and System Audio Recording (sound; without it sessions have
 // none).
@@ -64,10 +62,8 @@
 #include <string>
 #include <thread>
 
-#if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
-#endif
 
 #include <rdaccel/rdaccel.h>
 
@@ -79,9 +75,7 @@
 #include "rdmachine/session/config_store.h"
 #include "rdmachine/session/system_auth.h"
 #include "server_runtime.h"
-#if defined(__APPLE__)
 #include "mac_app.h"
-#endif
 
 namespace {
 
@@ -120,10 +114,10 @@ std::string HostName() {
 
 int Usage() {
   std::fprintf(stderr,
-               "usage: rdmachine-server [--port=4100] [--bind=ADDR] [--pairing-code] [--no-pairing]\n"
+               "usage: rdmachine-server [--port=4100] [--bind=ADDR]\n"
                "                        [--view-only] [--pam-service=NAME] [--config-dir=DIR]\n"
                "                        [--fps=N] [--bitrate-kbps=N] [--clipboard=both|send|receive|off]\n"
-               "                        [--video-codec=auto|hevc|h264] [--audio=on|off] [--mute-local=on|off]\n"
+               "                        [--audio=on|off] [--mute-local=on|off]\n"
                "                        [--headless] [--fingerprint] [--version] [--standalone]\n"
                "       rdmachine-server --daemon [--port=N] [--config-dir=DIR]\n"
                "       rdmachine-server --login-window\n");
@@ -132,8 +126,8 @@ int Usage() {
 
 // Blocks until SIGINT or SIGTERM. The signals are blocked first, in main()
 // before any thread starts, so that every thread inherits the mask and
-// sigwait() gets them. (macOS: RunMenuBarApp / RunHeadlessApp; the main
-// thread runs AppKit's loop there, which rdaccel's input injector needs to
+// sigwait() gets them. (Only the daemon waits here; otherwise the main
+// thread runs AppKit's loop in RunMenuBarApp / RunHeadlessApp, which rdaccel's input injector needs to
 // switch input sources and the process needs to follow display changes.)
 sigset_t StopSignals() {
   sigset_t set;
@@ -151,7 +145,7 @@ void WaitForSignal() {
 
 // --daemon: the network side of a server installed by rdmachine-service.
 int RunDaemon(const std::string& config_dir, std::optional<uint16_t> port_override, const std::string& pam_service,
-              const std::string& socket_path, bool issue_code) {
+              const std::string& socket_path) {
   // Before any thread starts, so that sigwait() gets the signals.
   const sigset_t stop = StopSignals();
   pthread_sigmask(SIG_BLOCK, &stop, nullptr);
@@ -176,12 +170,10 @@ int RunDaemon(const std::string& config_dir, std::optional<uint16_t> port_overri
   auto start_server = [&](std::string* err) {
     rdm::ControlServerOptions co;
     co.port = settings.port;
-    co.offer_pairing_codes = settings.offer_pairing_codes;
     auto s = std::make_unique<rdm::ControlServer>(*daemon, *identity, co);
     if (!s->Start(err)) return false;
     server = std::move(s);
-    Log("listening on port " + std::to_string(server->port()) +
-        (settings.offer_pairing_codes ? "" : ", no pairing codes"));
+    Log("listening on port " + std::to_string(server->port()));
     return true;
   };
 
@@ -195,28 +187,19 @@ int RunDaemon(const std::string& config_dir, std::optional<uint16_t> port_overri
     std::lock_guard l(mu);
     return server ? server->port() : settings.port;
   };
-  d.issue_pairing_code = [&] {
-    std::lock_guard l(mu);
-    return server ? server->IssuePairingCode() : std::string();
-  };
-  d.pairing_code_remaining_ms = [&]() -> int64_t {
-    std::lock_guard l(mu);
-    return server ? std::chrono::duration_cast<std::chrono::milliseconds>(server->PairingCodeRemaining()).count() : 0;
-  };
   d.close_connections = [&] {
     std::lock_guard l(mu);
     if (server) server->CloseConnections();
   };
-  d.settings_changed = [&](uint16_t port, bool offer) {
+  d.settings_changed = [&](uint16_t port) {
     if (port_override) return;  // the command line wins
     // Not on the agent's reader thread: restarting the server ends the
     // session, which waits for that agent's answer.
-    std::thread([&, port, offer] {
+    std::thread([&, port] {
       std::lock_guard l(mu);
-      if (port == settings.port && offer == settings.offer_pairing_codes) return;
+      if (port == settings.port) return;
       rdm::ServerSettings next = settings;
       next.port = port;
-      next.offer_pairing_codes = offer;
       std::string err;
       if (server) server->Stop();
       server.reset();
@@ -254,10 +237,6 @@ int RunDaemon(const std::string& config_dir, std::optional<uint16_t> port_overri
     }
   }
   Log("rdmachine daemon " + std::string(rdm::VersionString()) + ", fingerprint " + fingerprint);
-  if (issue_code) {
-    std::lock_guard l(mu);
-    if (server) Log("pairing code: " + server->IssuePairingCode() + " (valid 5 minutes)");
-  }
   WaitForSignal();
   Log("shutting down");
   {
@@ -275,7 +254,7 @@ int main(int argc, char** argv) {
   rdm::ServerRuntime::Options ropts;
   rdm::SettingsOverrides& ov = ropts.overrides;
   std::string config_dir = rdm::DefaultConfigDir();
-  bool print_fingerprint = false, issue_code = false, headless = false, config_dir_given = false;
+  bool print_fingerprint = false, headless = false, config_dir_given = false;
   bool daemon_mode = false, standalone = false;
   std::string v;
   for (int i = 1; i < argc; ++i) {
@@ -298,10 +277,6 @@ int main(int argc, char** argv) {
       ov.port = static_cast<uint16_t>(p);
     } else if (Flag(a, "--bind", &v)) {
       ropts.bind_address = v;
-    } else if (Flag(a, "--pairing-code", nullptr)) {
-      issue_code = true;
-    } else if (Flag(a, "--no-pairing", nullptr)) {
-      ov.offer_pairing_codes = false;
     } else if (Flag(a, "--view-only", nullptr)) {
       ov.view_only = true;
     } else if (Flag(a, "--pam-service", &v)) {
@@ -313,10 +288,6 @@ int main(int argc, char** argv) {
       ov.fps = std::atoi(v.c_str());
     } else if (Flag(a, "--bitrate-kbps", &v)) {
       ov.bitrate_kbps = std::atoi(v.c_str());
-    } else if (Flag(a, "--video-codec", &v)) {
-      auto c = rdm::ParseVideoCodecChoice(v);
-      if (!c) return Usage();
-      ov.video_codec = *c;
     } else if (Flag(a, "--audio", &v)) {
       // Send this Mac's sound to a client that asks (docs/audio.md).
       if (v != "on" && v != "off") return Usage();
@@ -334,6 +305,10 @@ int main(int argc, char** argv) {
       } else {
         return Usage();
       }
+    } else if (Flag(a, "--test-password", &v)) {
+      // Hidden, for tools/smoke_test.sh (standalone only): see
+      // ServerRuntime::Options::test_password.
+      ropts.test_password = v;
     } else if (Flag(a, "--clipboard", &v)) {
       auto m = rdm::ParseClipboardMode(v);
       if (!m) return Usage();
@@ -367,7 +342,7 @@ int main(int argc, char** argv) {
       std::printf("%s\n", rdm::FormatFingerprint(rdm::CertificateFingerprint(identity->cert_pem).value_or("?")).c_str());
       return 0;
     }
-    return RunDaemon(config_dir, ov.port, ropts.pam_service, ropts.agent_socket, issue_code);
+    return RunDaemon(config_dir, ov.port, ropts.pam_service, ropts.agent_socket);
   }
   // A user's session: an agent of the daemon when one is installed.
   struct stat sock {};
@@ -375,7 +350,7 @@ int main(int argc, char** argv) {
     ropts.agent_kind = "aqua";
   }
   const bool agent = !ropts.agent_kind.empty();
-#if defined(__APPLE__)
+  if (!ropts.test_password.empty() && (agent || !standalone)) return Usage();
   // The desktop session's agent: one LaunchAgent plist serves every user, so
   // launchd cannot name a log in each home. Write to ~/Library/Logs here,
   // starting afresh once it passes 5 MB.
@@ -389,15 +364,11 @@ int main(int argc, char** argv) {
       if (std::freopen(path.c_str(), big ? "w" : "a", stderr)) setvbuf(stderr, nullptr, _IOLBF, 0);
     }
   }
-#endif
-  if (issue_code && (ov.offer_pairing_codes == false || ropts.login_window)) return Usage();
 
-#if defined(__APPLE__)
   if (!headless && rdm::AnotherInstanceRunning()) {
     Log("rdmachine-server already runs in this session; leaving it to that one");
     return 0;  // a clean exit: a LaunchAgent with KeepAlive SuccessfulExit=false does not restart it
   }
-#endif
   std::string error;
   std::optional<rdm::TlsIdentity> identity;
   std::string fingerprint = "?";
@@ -420,10 +391,6 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-#if !defined(__APPLE__)
-  const sigset_t stop = StopSignals();
-  pthread_sigmask(SIG_BLOCK, &stop, nullptr);
-#endif
   rda_set_log(&RdaLog, nullptr, RDA_LOG_WARN);
   ropts.config_dir = config_dir;
   ropts.server_name = HostName();
@@ -441,9 +408,7 @@ int main(int argc, char** argv) {
   }
   if (!started) {
     std::fprintf(stderr, "rdmachine-server: %s\n", error.c_str());
-#if defined(__APPLE__)
     if (!headless && !by_launchd) rdm::ShowStartupError(error);
-#endif
     return 1;  // launchd starts it again (KeepAlive: SuccessfulExit = false)
   }
   if (agent) {
@@ -459,15 +424,6 @@ int main(int argc, char** argv) {
   }
   Log("fingerprint: " + fingerprint);
   if (const std::string o = ov.Describe(); !o.empty()) Log("command line overrides the saved settings: " + o);
-  if (issue_code) {
-    Log("pairing code: " + runtime.IssuePairingCode() + " (valid 5 minutes; press Enter for a new one)");
-    std::thread([&runtime] {
-      std::string line;
-      while (std::getline(std::cin, line)) Log("pairing code: " + runtime.IssuePairingCode());
-    }).detach();
-  }
-
-#if defined(__APPLE__)
   if (!headless) {
     rdm::MenuBarAppInfo info;
     info.fingerprint = fingerprint;
@@ -477,10 +433,6 @@ int main(int argc, char** argv) {
   } else {
     rdm::RunHeadlessApp();  // until SIGINT or SIGTERM
   }
-#else
-  (void)headless;
-  WaitForSignal();
-#endif
   Log("shutting down");
   runtime.Stop();
   return 0;

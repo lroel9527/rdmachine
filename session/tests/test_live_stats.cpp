@@ -67,7 +67,7 @@ TEST(LiveStats, StaticScreenKeepsLastLossFigure) {
   EXPECT_DOUBLE_EQ(s.recent_loss_pct, 10);
 }
 
-TEST(LiveStats, TcpHasNoLossFigures) {
+TEST(LiveStats, NoLossFiguresWhileThePathIsNotMeasured) {
   LiveStatsSampler sampler;
   const auto t0 = LiveStatsSampler::Clock::time_point() + 100s;
   sampler.Update(Sample(0, 0, 0, 0), t0);

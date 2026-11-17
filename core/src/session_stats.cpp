@@ -5,7 +5,7 @@
 namespace rdm {
 
 std::string EncodeSessionStats(const SessionStatsReport& r) {
-  return nlohmann::json{{"transport", r.transport},
+  return nlohmann::json{{"transport", "udp"},  // read by clients before 6.0
                         {"width", r.width},
                         {"height", r.height},
                         {"encoded_fps", r.encoded_fps},
@@ -42,7 +42,6 @@ std::optional<SessionStatsReport> DecodeSessionStats(const std::string& payload)
     auto it = j.find(k);
     if (it != j.end() && it->is_number_integer()) *out = it->get<std::remove_pointer_t<decltype(out)>>();
   };
-  text("transport", &r.transport);
   integer("width", &r.width);
   integer("height", &r.height);
   number("encoded_fps", &r.encoded_fps);

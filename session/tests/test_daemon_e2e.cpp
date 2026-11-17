@@ -2,7 +2,7 @@
 // window agent and a user agent (each a MediaHost capturing the real screen,
 // input off), and a RemoteSession following its session from the login
 // window to the user's session when the console changes hands. Needs screen
-// capture (RDM_TEST_CAPTURE=1 on macOS, DISPLAY on Linux).
+// capture (RDM_TEST_CAPTURE=1).
 #include <gtest/gtest.h>
 #include <unistd.h>
 
@@ -24,11 +24,7 @@ using namespace std::chrono_literals;
 namespace {
 
 bool HaveDisplay() {
-#if defined(__APPLE__)
   return std::getenv("RDM_TEST_CAPTURE") != nullptr;
-#else
-  return std::getenv("DISPLAY") != nullptr;
-#endif
 }
 
 template <class F>
@@ -119,7 +115,6 @@ class DaemonE2E : public ::testing::Test {
     MediaHostOptions mo;
     mo.server_name = "test";
     mo.udp_port = media_port_;  // both agents use the same ports, one at a time
-    mo.tcp_port = static_cast<uint16_t>(media_port_ + 1);
     mo.inject_input = false;  // nothing is ever typed into the real screen
     mo.fps = 15;
     mo.login_window = login_window;
@@ -227,28 +222,6 @@ TEST_F(DaemonE2E, WithoutAnAgentForTheConsoleTheStartIsUnavailable) {
   SetConsole(getuid(), "alice");
   ConnectResult r = ConnectAndStartSession(Options("alice").control);
   EXPECT_EQ(r.error, "unavailable");
-}
-
-TEST_F(DaemonE2E, APairingCodeLoginStaysOnTheDesktopItWasShownOn) {
-  SetConsole(getuid(), "alice");
-  RemoteSession::Options o = Options("alice");
-  o.control.auth.method = AuthMethod::kPairingCode;
-  o.control.auth.code = server_->IssuePairingCode();
-  ConnectResult r;
-  session_ = RemoteSession::Start(std::move(o), &r);
-  ASSERT_TRUE(session_) << r.error << ": " << r.detail;
-  EXPECT_TRUE(WaitFor([&] { return seen_.frames > 0; }));
-  std::this_thread::sleep_for(1s);  // several CheckSession rounds
-  EXPECT_EQ(seen_.Ended(), "");
-  EXPECT_TRUE(user_media_->session_running());
-  // alice logs out: the login window is no one's, so the session follows.
-  SetConsole(0, "");
-  ASSERT_TRUE(WaitFor([&] { return seen_.moves.load() == 1; }, 30s)) << "ended: " << seen_.Ended();
-  EXPECT_TRUE(seen_.moved_to_login_window);
-  // bob logs in there: not the desktop the code was for.
-  SetConsole(getuid(), "bob");
-  ASSERT_TRUE(WaitFor([&] { return !seen_.Ended().empty(); }, 10s));
-  EXPECT_EQ(seen_.Ended(), "console_changed");
 }
 
 TEST_F(DaemonE2E, QuittingTheServerOfTheSessionEndsItAtOnce) {

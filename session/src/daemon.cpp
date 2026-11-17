@@ -181,20 +181,7 @@ void Daemon::Handle(const std::shared_ptr<Agent>& agent, const json& m) {
   // Requests from the menu bar of the console user's session only.
   const ConsoleOwner console = Console();
   const bool console_agent = agent->kind == "aqua" && agent->uid == console.uid;
-  if (type == "issue_pairing_code") {
-    json reply = {{"type", "pairing_code"}, {"id", m.value("id", 0)}};
-    if (console_agent && options_.issue_pairing_code) {
-      reply["code"] = options_.issue_pairing_code();
-      if (options_.pairing_code_remaining_ms) reply["remaining_ms"] = options_.pairing_code_remaining_ms();
-    } else {
-      reply["code"] = "";
-    }
-    agent->channel->Send(reply);
-  } else if (type == "pairing_code_status") {
-    json reply = {{"type", "pairing_code"}, {"id", m.value("id", 0)}, {"code", ""}};
-    reply["remaining_ms"] = console_agent && options_.pairing_code_remaining_ms ? options_.pairing_code_remaining_ms() : 0;
-    agent->channel->Send(reply);
-  } else if (type == "disconnect") {
+  if (type == "disconnect") {
     if (console_agent && options_.close_connections) {
       Log("disconnected by the user at this computer");
       options_.close_connections();
@@ -202,7 +189,7 @@ void Daemon::Handle(const std::shared_ptr<Agent>& agent, const json& m) {
   } else if (type == "settings") {
     if (console_agent && options_.settings_changed && m.contains("port") && m["port"].is_number_integer()) {
       const int64_t port = m["port"].get<int64_t>();
-      if (port > 0 && port < 65535) options_.settings_changed(static_cast<uint16_t>(port), m.value("offer_pairing_codes", true));
+      if (port > 0 && port < 65535) options_.settings_changed(static_cast<uint16_t>(port));
     }
   } else if (type == "leaving") {
     agent->leaving = true;  // quit or stopped on purpose; see CheckSession
@@ -293,7 +280,7 @@ std::optional<SessionGrant> Daemon::StartSession(const SessionRequest& request, 
     // The password goes along only on the first start after the login: a
     // session that moves to the login window (the user logged out) must not
     // log them straight back in.
-    if (origin.method == AuthMethod::kPassword && pending_login_.username == origin.username &&
+    if (pending_login_.username == origin.username &&
         !pending_login_.password.empty() &&
         std::chrono::steady_clock::now() - pending_login_.at < kPendingLoginLifetime) {
       login = pending_login_;
@@ -357,7 +344,7 @@ void Daemon::EndSession() {
   }
   if (!agent || agent->gone) return;
   // Waits for the agent to let go of the media ports, so a session started
-  // right after (a move, or TCP after UDP) can bind them.
+  // right after (a move) can bind them.
   if (!Request(agent, {{"type", "end_session"}}, 5000)) Log("the agent did not confirm the end of the session");
 }
 
@@ -402,11 +389,6 @@ SessionCheck Daemon::CheckSession(const SessionOrigin& origin) {
                        : session_agent_->gone && session_agent_->uid == console.uid ? "agent_restarted"
                                                                                     : "user_switched";
   return {SessionCheck::Action::kMove, reason};
-}
-
-std::string Daemon::PairingAccount() {
-  // The code was shown on the console user's menu bar: their desktop.
-  return Console().user;
 }
 
 int Daemon::agent_count() {

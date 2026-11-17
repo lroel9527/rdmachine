@@ -24,14 +24,13 @@ struct SessionSecrets {
 SessionSecrets ExtraDisplaySecrets(const SessionSecrets& session, size_t index);
 
 struct SessionGrant {
-  MediaTransport transport = MediaTransport::kUdp;
   uint16_t port = 0;
   std::vector<DisplayInfo> displays;
   std::optional<DesktopSpec> desktop;  // built for request.desktop
   bool login_window = false;           // the picture is the login window
   std::vector<ExtraDisplay> extra_displays;  // built for request.extra_desktops
   bool audio = false;        // the session has sound (session_ready.audio)
-  std::string audio_reason;  // why not, when not: disabled, login_window, tcp, unsupported
+  std::string audio_reason;  // why not, when not: disabled, login_window, unsupported
 };
 
 // Who a session is for, as the control connection saw it (for status
@@ -42,11 +41,8 @@ struct SessionOrigin {
   // picture is served from it too, so the client gets its packets from the
   // address it expects (several network interfaces: see MediaHost).
   std::string local_ip;
-  AuthMethod method = AuthMethod::kPassword;
-  std::string username;  // empty for pairing-code logins
-  // The account whose desktop this login is for: the username, or for a
-  // pairing code whoever owned the console when it was used
-  // (ServerDelegate::PairingAccount; empty: unknown or the login window).
+  std::string username;
+  // The account whose desktop this login is for: the username.
   std::string account;
 };
 
@@ -77,8 +73,6 @@ class ServerDelegate {
                                                    const SessionOrigin& origin, std::string* error) = 0;
   // The control connection of a started session ended.
   virtual void EndSession() = 0;
-  // The account a pairing code just used logs in to (SessionOrigin::account).
-  virtual std::string PairingAccount() { return {}; }
   // Asked a few times a second while a session runs or is moving (see
   // SessionCheck). The default keeps every session where it is.
   virtual SessionCheck CheckSession(const SessionOrigin& origin) {
@@ -89,7 +83,6 @@ class ServerDelegate {
 
 struct ServerGuards {
   FailureLimiter* limiter = nullptr;      // required
-  PairingCodes* pairing = nullptr;        // null: pairing codes not offered
   // A logged-in client asks for a session while another connection holds
   // one: end that one (it hears bye "session_replaced") and wait until it
   // has; false if it did not go. Empty: the newcomer gets "busy".

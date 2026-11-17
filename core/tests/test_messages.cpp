@@ -55,30 +55,29 @@ TEST(Messages, ExtendedDesktopRoundTrip) {
   EXPECT_FALSE(r.message);
 }
 
-TEST(Messages, ServerHelloSkipsUnknownAuthMethods) {
-  auto r = rdm::ParseMessage(
-      R"({"type":"server_hello","protocol":0,"server_name":"mbp","server_version":"0.1.0",)"
-      R"("auth_methods":["passkey","pairing_code","password"]})");
-  ASSERT_TRUE(r.message) << r.error;
-  const auto& s = std::get<rdm::ServerHello>(*r.message);
-  ASSERT_EQ(s.auth_methods.size(), 2u);
-  EXPECT_EQ(s.auth_methods[0], rdm::AuthMethod::kPairingCode);
-  EXPECT_EQ(s.auth_methods[1], rdm::AuthMethod::kPassword);
-}
-
-TEST(Messages, AuthCarriesOnlyTheFieldsOfItsMethod) {
-  rdm::Auth pw{rdm::AuthMethod::kPassword, "alice", "s3cret", ""};
+TEST(Messages, AuthIsAPasswordAndNothingElse) {
+  rdm::Auth pw{"alice", "s3cret"};
   auto out = RoundTrip(pw);
   EXPECT_EQ(out.username, "alice");
   EXPECT_EQ(out.password, "s3cret");
-
-  rdm::Auth code{rdm::AuthMethod::kPairingCode, "", "", "4821-0937"};
-  const std::string text = rdm::SerializeMessage(code);
-  EXPECT_EQ(text.find("password"), std::string::npos);
-  EXPECT_EQ(RoundTrip(code).code, "4821-0937");
+  // Servers before 6.0 read the method.
+  EXPECT_NE(rdm::SerializeMessage(pw).find(R"("method":"password")"), std::string::npos);
 
   EXPECT_FALSE(rdm::ParseMessage(R"({"type":"auth","method":"password","username":"a"})").message);
+  // What a client before 6.0 may still send: pairing codes are gone.
+  EXPECT_FALSE(rdm::ParseMessage(R"({"type":"auth","method":"pairing_code","code":"48210937"})").message);
   EXPECT_FALSE(rdm::ParseMessage(R"({"type":"auth","method":"telepathy"})").message);
+}
+
+TEST(Messages, WhatClientsBefore6StillNeed) {
+  // They read the list of login methods and the picture's transport.
+  const std::string hello = rdm::SerializeMessage(rdm::ServerHello{});
+  EXPECT_NE(hello.find(R"("auth_methods":["password"])"), std::string::npos);
+  const std::string ready = rdm::SerializeMessage(rdm::SessionReady{});
+  EXPECT_NE(ready.find(R"("transport":"udp")"), std::string::npos);
+  // They ask for TCP when UDP did not get through: there is none.
+  EXPECT_FALSE(rdm::ParseMessage(R"({"type":"session_request","transport":"tcp"})").message);
+  EXPECT_TRUE(rdm::ParseMessage(R"({"type":"session_request","transport":"udp"})").message);
 }
 
 TEST(Messages, AuthResult) {
@@ -97,11 +96,9 @@ TEST(Messages, SessionRequestDefaults) {
   ASSERT_TRUE(r.message) << r.error;
   const auto& s = std::get<rdm::SessionRequest>(*r.message);
   EXPECT_EQ(s.display_index, 0);
-  EXPECT_EQ(s.transport, rdm::MediaTransport::kUdp);
   EXPECT_FALSE(s.view_only);
-  auto out = RoundTrip(rdm::SessionRequest{1, rdm::MediaTransport::kTcp, true, std::nullopt});
+  auto out = RoundTrip(rdm::SessionRequest{1, true, std::nullopt});
   EXPECT_EQ(out.display_index, 1);
-  EXPECT_EQ(out.transport, rdm::MediaTransport::kTcp);
   EXPECT_TRUE(out.view_only);
   EXPECT_FALSE(out.text_mode);
 }
@@ -154,7 +151,6 @@ TEST(Messages, SessionReadyCarriesKeyAndToken) {
   for (size_t i = 0; i < s.auth_token.size(); ++i) s.auth_token[i] = uint8_t(255 - i);
   s.displays.push_back({0, "Built-in Retina Display", 2880, 1800, 2.0});
   auto out = RoundTrip(s);
-  EXPECT_EQ(out.transport, rdm::MediaTransport::kUdp);
   EXPECT_EQ(out.port, 4100);
   EXPECT_EQ(out.key, s.key);
   EXPECT_EQ(out.auth_token, s.auth_token);

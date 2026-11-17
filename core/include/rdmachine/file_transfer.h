@@ -48,7 +48,7 @@
 // on its clipboard, so a paste that is under way goes on when either side
 // copies something else, and after a reconnect.
 //
-// Platform independent: plain POSIX files (macOS and Linux).
+// Plain POSIX files.
 #include <cstdint>
 #include <deque>
 #include <functional>

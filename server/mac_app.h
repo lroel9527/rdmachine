@@ -1,6 +1,6 @@
 #pragma once
 // The server's macOS user interface: an icon in the menu bar (status,
-// pairing codes, fingerprint, disconnect, permissions, settings) and a
+// fingerprint, disconnect, permissions, settings) and a
 // floating statistics panel for debugging. The server itself is
 // ServerRuntime; this file only shows and edits it.
 #include <string>

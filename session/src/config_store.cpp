@@ -16,20 +16,11 @@ std::string DefaultConfigDir() {
   if (const char* d = std::getenv("RDMACHINE_CONFIG_DIR"); d && *d) return d;
   const char* home = std::getenv("HOME");
   const std::string h = home ? home : ".";
-#if defined(__APPLE__)
   return h + "/Library/Application Support/rdmachine";
-#else
-  if (const char* x = std::getenv("XDG_CONFIG_HOME"); x && *x) return std::string(x) + "/rdmachine";
-  return h + "/.config/rdmachine";
-#endif
 }
 
 std::string SystemConfigDir() {
-#if defined(__APPLE__)
   return "/Library/Application Support/rdmachine";
-#else
-  return "/etc/rdmachine";
-#endif
 }
 
 bool MakeDirs(const std::string& dir, std::string* error) {

@@ -10,9 +10,7 @@
 #include <cerrno>
 #include <cstring>
 
-#if defined(__APPLE__)
 #include <sys/ucred.h>
-#endif
 
 #include "rdmachine/base64.h"
 
@@ -177,7 +175,6 @@ int UnixConnect(const std::string& path, std::string* error) {
 
 std::optional<PeerCredentials> PeerOf(int fd) {
   PeerCredentials c;
-#if defined(__APPLE__)
   uid_t uid = 0;
   gid_t gid = 0;
   if (getpeereid(fd, &uid, &gid) != 0) return std::nullopt;
@@ -185,13 +182,6 @@ std::optional<PeerCredentials> PeerOf(int fd) {
   pid_t pid = 0;
   socklen_t len = sizeof pid;
   if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) == 0) c.pid = pid;
-#else
-  struct ucred cred {};
-  socklen_t len = sizeof cred;
-  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) return std::nullopt;
-  c.uid = cred.uid;
-  c.pid = cred.pid;
-#endif
   return c;
 }
 
@@ -209,7 +199,6 @@ std::optional<SessionRequest> SessionRequestFromAgentJson(const json& j) {
 
 json ToAgentJson(const SessionGrant& g) {
   SessionReady r;
-  r.transport = g.transport;
   r.port = g.port;
   r.displays = g.displays;
   r.desktop = g.desktop;
@@ -235,7 +224,6 @@ std::optional<SessionGrant> SessionGrantFromAgentJson(const json& j) {
   auto* r = std::get_if<SessionReady>(&*parsed.message);
   if (!r) return std::nullopt;
   SessionGrant g;
-  g.transport = r->transport;
   g.port = r->port;
   g.displays = r->displays;
   g.desktop = r->desktop;
@@ -266,7 +254,6 @@ std::optional<SessionSecrets> SessionSecretsFromAgentJson(const json& j) {
 
 json ToAgentJson(const SessionOrigin& o) {
   return {{"peer_ip", o.peer_ip},
-          {"method", o.method == AuthMethod::kPairingCode ? "pairing_code" : "password"},
           {"username", o.username},
           {"account", o.account},
           {"local_ip", o.local_ip}};
@@ -276,7 +263,6 @@ SessionOrigin SessionOriginFromAgentJson(const json& j) {
   SessionOrigin o;
   if (!j.is_object()) return o;
   o.peer_ip = j.value("peer_ip", "");
-  o.method = j.value("method", "password") == "pairing_code" ? AuthMethod::kPairingCode : AuthMethod::kPassword;
   o.username = j.value("username", "");
   o.account = j.value("account", "");
   o.local_ip = j.value("local_ip", "");

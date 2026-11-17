@@ -37,7 +37,7 @@ class VirtualDesktop {
 using VirtualDesktopFactory =
     std::function<std::unique_ptr<VirtualDesktop>(const DesktopSpec& planned, std::string* error)>;
 
-// This platform's factory; empty where there is none (Linux for now).
+// The system's factory (CGVirtualDisplay).
 VirtualDesktopFactory SystemVirtualDesktop();
 
 // One more display of an extended desktop (docs/protocol.md, "扩展桌面"):

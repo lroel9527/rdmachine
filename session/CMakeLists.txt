@@ -1,7 +1,6 @@
 # Session library: everything between the protocol core and a user interface
-# that needs rdaccel or the OS (PAM login, the rdaccel host and viewer, the
-# server identity and the client's known hosts). Plain C++ on macOS and Linux,
-# so it can also be tested end to end on Linux against an X server (Xvfb).
+# that needs rdaccel or macOS (PAM login, the rdaccel host and viewer, the
+# server identity and the client's known hosts).
 add_library(rdm_session STATIC
   src/config_store.cpp
   src/live_stats.cpp
@@ -13,19 +12,15 @@ add_library(rdm_session STATIC
   src/remote_session.cpp
   src/daemon.cpp
   src/agent_host.cpp)
-if(APPLE)
-  target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
-    src/file_target_mac.mm)
-  set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
-    src/file_target_mac.mm
-    PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-  # The XPC protocol shared with the File Provider extension.
-  target_include_directories(rdm_session PRIVATE ${PROJECT_SOURCE_DIR}/fileprovider)
-  target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security"
-    "-framework FileProvider" "-framework IOKit")
-else()
-  target_sources(rdm_session PRIVATE src/system_clipboard.cpp src/virtual_desktop.cpp src/login_screen.cpp src/code_identity.cpp)
-endif()
+target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
+  src/file_target_mac.mm)
+set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
+  src/file_target_mac.mm
+  PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+# The XPC protocol shared with the File Provider extension.
+target_include_directories(rdm_session PRIVATE ${PROJECT_SOURCE_DIR}/fileprovider)
+target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security"
+  "-framework FileProvider" "-framework IOKit")
 add_library(rdmachine::session ALIAS rdm_session)
 target_include_directories(rdm_session PUBLIC include)
 target_link_libraries(rdm_session PUBLIC rdmachine::core rdaccel::rdaccel PRIVATE pam)

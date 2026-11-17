@@ -3,7 +3,7 @@
 // "剪贴板"): text, rich text and images. Platform independent: the system
 // clipboard comes in through the Clipboard interface (NSPasteboard on macOS)
 // and messages go out through a send function (rdaccel application
-// messages, see clipboard_wire.h), so the logic is tested on Linux with an
+// messages, see clipboard_wire.h), so the logic is tested with an
 // in-memory clipboard.
 //
 // Nothing leaves a computer until the other side pastes it. Each side polls

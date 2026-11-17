@@ -128,8 +128,6 @@ ServerSession::Output ServerSession::OnHello(const ClientHello& m) {
   ServerHello hello;
   hello.server_name = delegate_.ServerName();
   hello.server_version = VersionString();
-  hello.auth_methods.push_back(AuthMethod::kPassword);
-  if (guards_.pairing) hello.auth_methods.push_back(AuthMethod::kPairingCode);
   Output out;
   out.send.push_back(hello);
   if (m.protocol != kProtocolVersion) {
@@ -151,26 +149,8 @@ ServerSession::Output ServerSession::OnAuth(const Auth& m) {
     return {{r}, false};
   }
   std::string error;
-  bool ok = false;
-  if (m.method == AuthMethod::kPassword) {
-    ok = !m.username.empty() && delegate_.CheckPassword(m.username, m.password, &error);
-    if (!ok && error.empty()) error = "bad_credentials";
-  } else if (!guards_.pairing) {
-    return {{Refused("method_unsupported")}, false};
-  } else {
-    switch (guards_.pairing->Check(m.code, now)) {
-      case PairingCodes::Result::kOk:
-        ok = true;
-        break;
-      case PairingCodes::Result::kWrong:
-        error = "bad_credentials";
-        break;
-      case PairingCodes::Result::kExpired:
-      case PairingCodes::Result::kNone:
-        error = "code_expired";
-        break;
-    }
-  }
+  const bool ok = !m.username.empty() && delegate_.CheckPassword(m.username, m.password, &error);
+  if (!ok && error.empty()) error = "bad_credentials";
   if (!ok) {
     guards_.limiter->RecordFailure(peer_ip_, now);
     return {{Refused(error)}, false};
@@ -178,9 +158,8 @@ ServerSession::Output ServerSession::OnAuth(const Auth& m) {
   guards_.limiter->RecordSuccess(peer_ip_);
   origin_.peer_ip = peer_ip_;
   origin_.local_ip = local_ip_;
-  origin_.method = m.method;
-  origin_.username = m.method == AuthMethod::kPassword ? m.username : std::string();
-  origin_.account = m.method == AuthMethod::kPassword ? m.username : delegate_.PairingAccount();
+  origin_.username = m.username;
+  origin_.account = m.username;
   state_ = State::kExpectSessionRequest;
   AuthResult r;
   r.ok = true;
@@ -200,7 +179,6 @@ std::optional<SessionReady> ServerSession::TryStart(const SessionRequest& m, std
     return std::nullopt;
   }
   SessionReady ready;
-  ready.transport = grant->transport;
   ready.port = grant->port;
   ready.key = secrets.key;
   ready.auth_token = secrets.auth_token;

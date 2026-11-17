@@ -8,8 +8,7 @@ rda_status CreateSessionViewer(const std::string& host, const SessionReady& read
   std::string addr = host;
   if (addr.size() > 2 && addr.front() == '[' && addr.back() == ']') addr = addr.substr(1, addr.size() - 2);
   rda_transport* transport = nullptr;
-  rda_status s = ready.transport == MediaTransport::kTcp ? rda_tcp_connect(addr.c_str(), ready.port, &transport)
-                                                         : rda_udp_connect(addr.c_str(), ready.port, &transport);
+  rda_status s = rda_udp_connect(addr.c_str(), ready.port, &transport);
   if (s != RDA_OK) {
     if (error) *error = std::string("media connect: ") + rda_last_error();
     return s;

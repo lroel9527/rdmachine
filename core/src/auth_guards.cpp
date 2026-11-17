@@ -47,68 +47,6 @@ void FailureLimiter::RecordSuccess(const std::string& source) {
 // ---------------------------------------------------------------------------
 // PairingCodes
 
-PairingCodes::PairingCodes(Clock::duration lifetime, int max_wrong) : lifetime_(lifetime), max_wrong_(max_wrong) {}
-
-std::string PairingCodes::Issue(Clock::time_point now) {
-  // 8 uniformly random digits: rejection-sample bytes below 250 (= 25 * 10).
-  std::string code;
-  while (code.size() < 8) {
-    uint8_t b[16];
-    if (!RandomBytes(b)) return {};
-    for (uint8_t v : b) {
-      if (v < 250 && code.size() < 8) code += static_cast<char>('0' + v % 10);
-    }
-  }
-  std::lock_guard lock(mu_);
-  code_ = code;
-  expires_ = now + lifetime_;
-  wrong_ = 0;
-  return code;
-}
-
-void PairingCodes::Revoke() {
-  std::lock_guard lock(mu_);
-  code_.clear();
-}
-
-bool PairingCodes::active(Clock::time_point now) {
-  std::lock_guard lock(mu_);
-  return !code_.empty() && now < expires_;
-}
-
-Clock::duration PairingCodes::remaining(Clock::time_point now) {
-  std::lock_guard lock(mu_);
-  if (code_.empty() || now >= expires_) return Clock::duration::zero();
-  return expires_ - now;
-}
-
-PairingCodes::Result PairingCodes::Check(const std::string& code, Clock::time_point now) {
-  std::lock_guard lock(mu_);
-  if (code_.empty()) return Result::kNone;
-  if (now >= expires_) {
-    code_.clear();
-    return Result::kExpired;
-  }
-  // Ignore spaces and dashes people type to group the digits.
-  std::string typed;
-  for (char c : code) {
-    if (c != ' ' && c != '-') typed += c;
-  }
-  uint8_t diff = typed.size() == code_.size() ? 0 : 1;
-  for (size_t i = 0; i < code_.size(); ++i) {
-    diff |= static_cast<uint8_t>((i < typed.size() ? typed[i] : 0) ^ code_[i]);
-  }
-  if (diff == 0) {
-    code_.clear();  // used once
-    return Result::kOk;
-  }
-  if (++wrong_ >= max_wrong_) code_.clear();
-  return Result::kWrong;
-}
-
-// ---------------------------------------------------------------------------
-// OneTimeTokens
-
 OneTimeTokens::OneTimeTokens(Clock::duration lifetime) : lifetime_(lifetime) {}
 
 void OneTimeTokens::Add(const Token& token, Clock::time_point now) {

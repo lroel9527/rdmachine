@@ -24,23 +24,19 @@ struct ClientHello {
   int revision = kProtocolRevision;  // absent on the wire: 0
 };
 
-enum class AuthMethod { kPassword, kPairingCode };
-
 // Server -> client, answer to ClientHello.
 struct ServerHello {
   int protocol = kProtocolVersion;
   std::string server_name;
   std::string server_version;
-  std::vector<AuthMethod> auth_methods;  // what the server accepts, in its order of preference
   int revision = kProtocolRevision;  // absent on the wire: 0
 };
 
-// Client -> server.
+// Client -> server: the password of an account on the server's computer
+// (the only way to log in since 6.0; pairing codes are gone).
 struct Auth {
-  AuthMethod method = AuthMethod::kPassword;
-  std::string username;  // kPassword
-  std::string password;  // kPassword
-  std::string code;      // kPairingCode
+  std::string username;
+  std::string password;
 };
 
 // Server -> client.
@@ -49,8 +45,6 @@ struct AuthResult {
   std::string error;                    // when !ok: see docs/protocol.md "Error codes"
   std::optional<int64_t> retry_after_ms;  // when rate limited
 };
-
-enum class MediaTransport { kUdp, kTcp };
 
 // One more display of an extended desktop (docs/protocol.md, "扩展桌面";
 // protocol revision 2): its size, and where it sits next to the main one.
@@ -75,7 +69,6 @@ struct ExtraDisplay {
 // Client -> server, after a successful AuthResult.
 struct SessionRequest {
   int32_t display_index = 0;  // 0 = main display
-  MediaTransport transport = MediaTransport::kUdp;
   bool view_only = false;
   // The desktop the client wants (docs/protocol.md, "请求桌面"): the server
   // builds a virtual display of this shape and shares that; display_index is
@@ -100,9 +93,10 @@ struct DisplayInfo {
   double scale = 1.0;  // pixels per point
 };
 
-// Server -> client: everything the client needs to create the rdaccel viewer.
+// Server -> client: everything the client needs to create the rdaccel
+// viewer. The picture goes over rdaccel's UDP transport (the TCP fallback
+// went with 6.0: inside Tailscale UDP always passes).
 struct SessionReady {
-  MediaTransport transport = MediaTransport::kUdp;
   uint16_t port = 0;
   std::array<uint8_t, kSessionKeyBytes> key{};         // fresh per session
   std::array<uint8_t, kAuthTokenBytes> auth_token{};   // one use, short-lived
@@ -120,8 +114,7 @@ struct SessionReady {
   std::vector<ExtraDisplay> extra_displays;
   // This session has sound (revision 3): the client gives the main
   // picture's viewer audio and plays it. When false, audio_reason may say
-  // why: "disabled" (the server's setting), "login_window", "tcp" (the
-  // picture goes over TCP, which carries no sound), "unsupported".
+  // why: "disabled" (the server's setting), "login_window", "unsupported".
   // A missing permission is not said here (it can come during the session)
   // but in the statistics.
   bool audio = false;

@@ -1,8 +1,8 @@
 // rdmachine-connect: command-line client for testing a server without the
 // window: logs in, receives the picture, prints what arrives, and quits.
 //
-//   rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]
-//                     [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]
+//   rdmachine-connect HOST[:PORT] [--user=NAME] [--accept-new-host]
+//                     [--view-only] [--display=N] [--frames=N] [--seconds=N]
 //                     [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y]
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
@@ -12,8 +12,7 @@
 // A first-time server fingerprint is shown and must be confirmed (or
 // --accept-new-host); it is then pinned in the known-hosts file. Exits 0
 // once --frames pictures arrived (default 1), 1 on failure or timeout.
-// On macOS the clipboard is shared while connected (--clipboard, default
-// both); other systems have no clipboard backend yet.
+// The clipboard is shared while connected (--clipboard, default both).
 //
 // --audio asks for the server's sound and takes it on a null device: read in
 // real time and thrown away, never played (this tool opens no output
@@ -152,8 +151,8 @@ bool Flag(const char* arg, const char* name, std::string* value) {
 
 int Usage() {
   std::fprintf(stderr,
-               "usage: rdmachine-connect HOST[:PORT] [--user=NAME | --code=DIGITS] [--accept-new-host]\n"
-               "                         [--tcp] [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
+               "usage: rdmachine-connect HOST[:PORT] [--user=NAME] [--accept-new-host]\n"
+               "                         [--view-only] [--display=N] [--frames=N] [--seconds=N]\n"
                "                         [--known-hosts=PATH] [--clipboard=both|send|receive|off] [--click=X,Y] [--save-frame=PATH] [--send-input-source=JSON]\n"
                "                         [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]\n"
                "                         [--text-mode] [--set-text-mode=on|off] [--audio]\n");
@@ -190,7 +189,7 @@ bool SplitHostPort(const std::string& s, std::string* host, uint16_t* port) {
 int main(int argc, char** argv) {
   rdm::RemoteSession::Options opts;
   rdm::ClientOptions& c = opts.control;
-  std::string target, user, code, known_hosts_path = rdm::DefaultConfigDir() + "/known_hosts", v;
+  std::string target, user, known_hosts_path = rdm::DefaultConfigDir() + "/known_hosts", v;
   bool accept_new = false;
   int want_frames = 1, seconds = 20;
   int click_x = -1, click_y = -1;
@@ -202,9 +201,7 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
-    else if (Flag(a, "--code", &v)) code = v;
     else if (Flag(a, "--accept-new-host", nullptr)) accept_new = true;
-    else if (Flag(a, "--tcp", nullptr)) c.request.transport = rdm::MediaTransport::kTcp;
     else if (Flag(a, "--view-only", nullptr)) c.request.view_only = true;
     else if (Flag(a, "--text-mode", nullptr)) c.request.text_mode = true;
     else if (Flag(a, "--audio", nullptr)) {
@@ -258,24 +255,19 @@ int main(int argc, char** argv) {
     } else if (a[0] != '-' && target.empty()) target = a;
     else return Usage();
   }
-  if (target.empty() || !SplitHostPort(target, &c.host, &c.port) || (!user.empty() && !code.empty())) return Usage();
+  if (target.empty() || !SplitHostPort(target, &c.host, &c.port)) return Usage();
 
-  if (!code.empty()) {
-    c.auth.method = rdm::AuthMethod::kPairingCode;
-    c.auth.code = code;
+  if (user.empty()) {
+    const char* u = std::getenv("USER");
+    user = u ? u : "";
+  }
+  c.auth.username = user;
+  if (const char* p = std::getenv("RDMACHINE_PASSWORD")) {
+    c.auth.password = p;
   } else {
-    if (user.empty()) {
-      const char* u = std::getenv("USER");
-      user = u ? u : "";
-    }
-    c.auth.username = user;
-    if (const char* p = std::getenv("RDMACHINE_PASSWORD")) {
-      c.auth.password = p;
-    } else {
-      const std::string prompt = "Password for " + user + "@" + c.host + ": ";
-      const char* typed = getpass(prompt.c_str());
-      c.auth.password = typed ? typed : "";
-    }
+    const std::string prompt = "Password for " + user + "@" + c.host + ": ";
+    const char* typed = getpass(prompt.c_str());
+    c.auth.password = typed ? typed : "";
   }
 
   char hostname[256] = {};
@@ -342,8 +334,8 @@ int main(int argc, char** argv) {
       std::fflush(stdout);
     }).detach();
   }
-  std::printf("connected to %s (%s), media over %s port %u\n", result.server.server_name.c_str(), host.c_str(),
-              session->session().transport == rdm::MediaTransport::kTcp ? "tcp" : "udp", session->session().port);
+  std::printf("connected to %s (%s), media over udp port %u\n", result.server.server_name.c_str(), host.c_str(),
+              session->session().port);
   const rdm::SessionReady ready = session->session();
   for (const auto& d : ready.displays)
     std::printf("  display %d: %s %dx%d\n", d.index, d.name.c_str(), d.width, d.height);

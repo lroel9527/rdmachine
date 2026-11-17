@@ -1,6 +1,6 @@
-// The whole session over loopback: ControlServer + MediaHost capturing a real
-// X display, RemoteSession receiving pictures. On Linux it needs an X server
-// (run it under xvfb-run); skipped without DISPLAY.
+// The whole session over loopback: ControlServer + MediaHost capturing the
+// real screen, RemoteSession receiving pictures. Skipped without
+// RDM_TEST_CAPTURE=1 (it needs the Screen Recording permission).
 #include <gtest/gtest.h>
 #include <unistd.h>
 
@@ -31,11 +31,7 @@ using namespace std::chrono_literals;
 namespace {
 
 bool HaveDisplay() {
-#if defined(__APPLE__)
   return std::getenv("RDM_TEST_CAPTURE") != nullptr;  // needs Screen Recording permission
-#else
-  return std::getenv("DISPLAY") != nullptr;
-#endif
 }
 
 struct Frames {
@@ -92,7 +88,6 @@ class MediaE2E : public ::testing::Test {
     MediaHostOptions mo;
     mo.server_name = "xvfb";
     mo.udp_port = media_port_;
-    mo.tcp_port = static_cast<uint16_t>(media_port_ + 1);
     mo.inject_input = false;
     mo.fps = 15;
     mo.check_password = [](const std::string& u, const std::string& p, std::string* error) {
@@ -312,7 +307,6 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   ConnectResult r;
   auto s = RemoteSession::Start(Options(&frames), &r);
   ASSERT_TRUE(s) << r.error << ": " << r.detail;
-  EXPECT_EQ(s->session().transport, MediaTransport::kUdp);
   EXPECT_EQ(s->session().port, media_port_);
   ASSERT_FALSE(s->session().displays.empty());
   EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
@@ -325,7 +319,6 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   EXPECT_TRUE(st.media_connected);
   EXPECT_EQ(st.origin.username, "alice");
   EXPECT_EQ(st.origin.peer_ip, "127.0.0.1");
-  EXPECT_EQ(st.transport, MediaTransport::kUdp);
   EXPECT_TRUE(st.view_only);  // inject_input = false
   EXPECT_FALSE(st.input_unavailable);  // view only by choice, not for want of permission
   EXPECT_EQ(st.width, s->session().displays[0].width);
@@ -371,17 +364,6 @@ TEST_F(MediaE2E, TextModeIsAskedForAtTheStartAndChangedWhileRunning) {
   s->Close();
   EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
   EXPECT_FALSE(media_->Status().text_mode);
-}
-
-TEST_F(MediaE2E, PictureArrivesOverTcp) {
-  Frames frames;
-  auto o = Options(&frames);
-  o.control.request.transport = MediaTransport::kTcp;
-  ConnectResult r;
-  auto s = RemoteSession::Start(std::move(o), &r);
-  ASSERT_TRUE(s) << r.error << ": " << r.detail;
-  EXPECT_EQ(s->session().transport, MediaTransport::kTcp);
-  EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
 }
 
 TEST_F(MediaE2E, ViewerWithoutTheTokenIsRefused) {
@@ -450,8 +432,7 @@ TEST_F(MediaE2E, ServerStopEndsClientSession) {
 
 namespace {
 
-// Sessions that may control the server (so the clipboard goes both ways);
-// XTest on the Xvfb screen.
+// Sessions that may control the server (so the clipboard goes both ways).
 class ClipboardE2E : public MediaE2E {
  protected:
   void Configure(MediaHostOptions& mo) override { mo.inject_input = true; }
@@ -807,28 +788,4 @@ TEST_F(MediaE2EAudio, AMutedOutputHereSendsNothing) {
   EXPECT_EQ(media_->Status().audio_status.state, RDA_AUDIO_STATE_PAUSED);
   s->SetAudioPaused(false);
   EXPECT_TRUE(WaitFor([&] { return media_->Status().audio_status.state != RDA_AUDIO_STATE_PAUSED; }, 5s));
-}
-
-TEST_F(MediaE2EAudio, NoSoundOverTcp) {
-  // The picture over TCP carries no sound: the session says so, rdaccel's
-  // sound is not started, and the client does not wait for it.
-  Frames frames;
-  auto o = Options(&frames);
-  o.audio = true;
-  o.audio_null_device = true;
-  o.control.request.transport = MediaTransport::kTcp;
-  ConnectResult r;
-  auto s = RemoteSession::Start(std::move(o), &r);
-  ASSERT_TRUE(s) << r.error << ": " << r.detail;
-  EXPECT_EQ(s->session().transport, MediaTransport::kTcp);
-  EXPECT_FALSE(s->session().audio);
-  EXPECT_EQ(s->session().audio_reason, "tcp");
-  EXPECT_FALSE(s->audio_playing());
-  EXPECT_TRUE(WaitFor([&] { return frames.stats_reports > 0; }));
-  const MediaHostStatus st = media_->Status();
-  EXPECT_FALSE(st.audio);
-  EXPECT_EQ(st.audio_reason, "tcp");
-  EXPECT_EQ(st.audio_status.state, RDA_AUDIO_STATE_OFF);
-  EXPECT_EQ(StatsAudio(frames), "off");
-  EXPECT_EQ(s->revision(), kProtocolRevision);
 }

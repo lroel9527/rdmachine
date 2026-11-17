@@ -1,6 +1,6 @@
 #pragma once
 // Client side of a whole session: control connection (with the known-hosts
-// check), the rdaccel viewer, UDP to TCP fallback, and keeping the control
+// check), the rdaccel viewer, and keeping the control
 // connection alive until either side ends the session.
 #include <atomic>
 #include <functional>
@@ -30,7 +30,7 @@ std::function<bool(const std::string&)> TrustWithKnownHosts(
 class RemoteSession {
  public:
   struct Options {
-    ClientOptions control;    // request.transport is where it starts (UDP)
+    ClientOptions control;
     rda_viewer_config viewer;  // the application's callbacks (rda_viewer_config_default first)
     // Clipboard shared with the server (docs/protocol.md, "剪贴板"); null =
     // not shared. Only copies made after connecting are offered, and only
@@ -59,7 +59,6 @@ class RemoteSession {
     // player's own read-only check (rda_audio_player_output_muted). Tests
     // set it.
     std::function<int()> output_muted;
-    int udp_wait_ms = 4000;    // then fall back to TCP; 0 = no fallback
     // The session ended from the other side or the network: "server_closed",
     // "connection_lost", "media_lost", or the server's bye reason. Runs on
     // the session's own thread: do not destroy the session from it.
@@ -158,7 +157,7 @@ class RemoteSession {
   // say it even if not (a new picture connection after a move).
   void UpdateAudioPaused(bool again);
   void CheckOutputMuted();
-  int udp_wait_ms_ = 0;  // options_.udp_wait_ms, longer on a far link (Start)
+  int media_wait_ms_ = 0;  // how long a picture connection gets; longer on a far link (Start)
   int revision_ = 0;     // negotiated at the hello
   std::unique_ptr<ClipboardSync> clipboard_;  // outlives viewer_
   std::atomic<bool> stop_{false};

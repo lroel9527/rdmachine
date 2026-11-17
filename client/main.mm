@@ -1,13 +1,13 @@
 // rdmachine-client: the Mac client. A connect window (server, account and
-// password or pairing code), then the remote screen in a window that sends
+// password), then the remote screen in a window that sends
 // this Mac's mouse, scroll wheel and keyboard back.
 //
 // Connecting goes through rdm::RemoteSession (session/), the same code the
-// command-line rdmachine-connect and the Linux tests use: TLS 1.3 control
+// command-line rdmachine-connect and the tests use: TLS 1.3 control
 // connection, the server's fingerprint checked against ~/Library/Application
 // Support/rdmachine/known_hosts (a first-time fingerprint is shown for
 // confirmation; a changed one is refused), login, then the rdaccel picture
-// over UDP, falling back to TCP.
+// over UDP.
 //
 // The picture and input handling come from rdaccel's examples/remote_mac:
 // pictures go into two IOSurfaces that Core Animation shows directly, each
@@ -203,7 +203,7 @@ struct StatsField {
   bool on_by_default;
 };
 const StatsField kStatsFields[] = {
-    {@"time", @"连接时长", true},  {@"transport", @"传输（UDP/TCP）", true},
+    {@"time", @"连接时长", true},
     {@"fps", @"帧率", true},        {@"latency", @"延迟", true},
     {@"loss", @"丢包", true},      {@"bitrate", @"码率", false},
     {@"bandwidth", @"带宽", false},  {@"resolution", @"分辨率", false},
@@ -292,16 +292,14 @@ NSString* DescribeError(const rdm::ConnectResult& r) {
   const std::string& e = r.error;
   NSString* text;
   if (e == "connect_failed") text = @"连不上那台电脑：它可能没开机、不在网络上，或者服务没在运行。";
-  else if (e == "bad_credentials") text = @"账号、密码或配对码不对。";
+  else if (e == "bad_credentials") text = @"账号或密码不对。";
   else if (e == "not_console_user")
     text = @"那台 Mac 上现在是别人登录着，只能用那个账号连接（停在登录窗口时任何账号都可以）。";
   else if (e == "unavailable")
     text = @"那台 Mac 的服务还没准备好（它随登录窗口或用户会话启动），稍等一下再连。";
-  else if (e == "code_expired") text = @"配对码已过期或已经用过，请在那台 Mac 的菜单栏里生成新的。";
   else if (e == "rate_limited")
     text = [NSString stringWithFormat:@"失败次数太多，请 %lld 秒后再试。",
                                       static_cast<long long>((r.retry_after_ms.value_or(60000) + 999) / 1000)];
-  else if (e == "method_unsupported") text = @"那台电脑不接受这种登录方式。";
   else if (e == "busy") text = @"已经有人连着那台 Mac。";
   else if (e == "capture_denied")
     text = @"那台 Mac 不允许录制屏幕：请在它的“系统设置 → 隐私与安全性 → 屏幕录制”里打开 RDMachine Server。";
@@ -426,9 +424,6 @@ void RememberMachine(NSString* target, NSString* user, NSString* name) {
   // What the user gave it (alias, group) stays across connections.
   NSDictionary* before = same.count ? list[same.firstIndex] : nil;
   [list removeObjectsAtIndexes:same];
-  // Connected with a pairing code this once: the account of the saved
-  // password stays with the computer.
-  if (user.length == 0 && [before[@"user"] length] && HasSavedLogin(target)) user = before[@"user"];
   NSMutableDictionary* m = [@{@"target" : target, @"user" : user ?: @"", @"name" : name.length ? name : target,
                               @"last" : NSDate.date} mutableCopy];
   if ([before[@"alias"] length]) m[@"alias"] = before[@"alias"];
@@ -965,7 +960,6 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   const auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _connectedAt).count();
   NSMutableArray* parts = [NSMutableArray arrayWithObject:[@"已连接 " stringByAppendingString:DurationText(secs)]];
   if (_stats) {
-    if (!_stats->transport.empty()) [parts addObject:NS(_stats->transport).uppercaseString];
     if (_stats->rtt_ms > 0) [parts addObject:[NSString stringWithFormat:@"%.0f ms", _stats->rtt_ms]];
     if (_stats->width > 0 && _stats->height > 0) {
       [parts addObject:[NSString stringWithFormat:@"%d×%d", _stats->width, _stats->height]];
@@ -1461,7 +1455,6 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   const long long secs =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _connectedAt).count();
   add(@"time", [NSString stringWithFormat:@"%02lld:%02lld:%02lld", secs / 3600, secs / 60 % 60, secs % 60]);
-  add(@"transport", r.transport == "tcp" ? @"TCP（UDP 不通）" : @"UDP");
   add(@"fps", [NSString stringWithFormat:@"%.0f fps", r.encoded_fps]);
   add(@"latency", r.rtt_ms <= 0   ? @"RTT –"
                   : r.rtt_ms < 10 ? [NSString stringWithFormat:@"RTT %.1f ms", r.rtt_ms]
@@ -1963,10 +1956,6 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   NSTextField* _host;
   NSTextField* _user;
   NSSecureTextField* _password;
-  NSSegmentedControl* _authMode;  // 0 password, 1 pairing code
-  NSTextField* _userLabel;
-  NSTextField* _secretLabel;
-  NSTextField* _code;
   NSButton* _connectButton;
   NSProgressIndicator* _spinner;
   // One window per connected computer (several at once are fine), and the
@@ -2066,7 +2055,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _knownHosts = std::make_unique<rdm::KnownHosts>(rdm::DefaultConfigDir() + "/known_hosts");
   [self buildMenu];
   [self buildStatusItem];
-  _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 280)
+  _connectWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 440, 244)
                                                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                  backing:NSBackingStoreBuffered
                                                    defer:NO];
@@ -2080,40 +2069,24 @@ static NSTextField* Label(NSString* text, NSRect frame) {
 
   NSTextField* heading = [NSTextField labelWithString:@"连接到一台 Mac"];
   heading.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
-  heading.frame = NSMakeRect(24, 232, 392, 24);
+  heading.frame = NSMakeRect(24, 196, 392, 24);
   [v addSubview:heading];
 
-  [v addSubview:Label(@"电脑", NSMakeRect(20, 192, 90, 20))];
+  [v addSubview:Label(@"电脑", NSMakeRect(20, 156, 90, 20))];
   _host = [NSTextField textFieldWithString:[defaults stringForKey:@"lastHost"] ?: @""];
-  _host.frame = NSMakeRect(120, 189, 296, 24);
+  _host.frame = NSMakeRect(120, 153, 296, 24);
   _host.placeholderString = @"mac.local 或 192.168.1.20";
   [v addSubview:_host];
 
-  [v addSubview:Label(@"登录方式", NSMakeRect(20, 156, 90, 20))];
-  _authMode = [NSSegmentedControl segmentedControlWithLabels:@[ @"密码", @"配对码" ]
-                                                trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                      target:self
-                                                      action:@selector(pairingToggled:)];
-  _authMode.frame = NSMakeRect(120, 152, 160, 26);
-  _authMode.selectedSegment = 0;
-  [v addSubview:_authMode];
-
-  _userLabel = Label(@"账号", NSMakeRect(20, 120, 90, 20));
-  [v addSubview:_userLabel];
+  [v addSubview:Label(@"账号", NSMakeRect(20, 120, 90, 20))];
   _user = [NSTextField textFieldWithString:[defaults stringForKey:@"lastUser"] ?: NSUserName()];
   _user.frame = NSMakeRect(120, 117, 296, 24);
   [v addSubview:_user];
 
-  _secretLabel = Label(@"密码", NSMakeRect(20, 84, 90, 20));
-  [v addSubview:_secretLabel];
+  [v addSubview:Label(@"密码", NSMakeRect(20, 84, 90, 20))];
   _password = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(120, 81, 296, 24)];
   _password.placeholderString = @"那台 Mac 上这个账号的登录密码";
   [v addSubview:_password];
-  _code = [NSTextField textFieldWithString:@""];
-  _code.frame = NSMakeRect(120, 81, 296, 24);
-  _code.placeholderString = @"那台 Mac 菜单栏里显示的 8 位数字";
-  _code.hidden = YES;
-  [v addSubview:_code];
 
   NSTextField* hint = [NSTextField labelWithString:@"连上后会记住，下次在列表里双击就能连。"];
   hint.font = [NSFont systemFontOfSize:12];
@@ -2147,17 +2120,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   }
   [NSApp activateIgnoringOtherApps:YES];
 
-  // rdmachine-client HOST[:PORT] [--code=PAIRING_CODE]: the address filled
-  // in, and with a pairing code, connected right away (scripts, shortcuts).
-  // A password is never taken from the command line.
+  // rdmachine-client HOST[:PORT]: the address filled in. A password is
+  // never taken from the command line.
   NSString* host = nil;
-  NSString* code = nil;
   NSArray<NSString*>* args = NSProcessInfo.processInfo.arguments;
   for (NSUInteger i = 1; i < args.count; ++i) {
     NSString* a = args[i];
-    if ([a hasPrefix:@"--code="]) {
-      code = [a substringFromIndex:7];
-    } else if ([a hasPrefix:@"-"]) {
+    if ([a hasPrefix:@"-"]) {
       // "-Key value" pairs are NSUserDefaults' (the argument domain).
       if (![a hasPrefix:@"--"]) ++i;
     } else if (!host) {
@@ -2167,12 +2136,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   BOOL started = NO;
   if (host) {
     _host.stringValue = host;
-    if (code.length > 0) {
-      [self setUsingPairing:YES];
-      _code.stringValue = code;
-      [self connect:nil];
-      started = YES;
-    }
   } else if (!(NSEvent.modifierFlags & NSEventModifierFlagOption) && ![self anotherCopyRunning]) {
     // Straight back to the last computer with its remembered login; hold
     // Option while opening the app to get the list instead.
@@ -2219,7 +2182,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _host.stringValue = @"";
   _user.stringValue = NSUserName();
   _password.stringValue = @"";
-  [self setUsingPairing:NO];
   [self showConnectWindow];
   [_connectWindow makeFirstResponder:_host];
 }
@@ -2468,7 +2430,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   }
   if (![self connectWithSavedLoginTo:target remote:nil]) {
     _host.stringValue = target;
-    [self setUsingPairing:NO];
     [self showConnectWindow];
   }
 }
@@ -2592,7 +2553,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   cell.name.stringValue = MachineTitle(m);
   // An alias hides the server's own name: keep that one at hand.
   cell.name.toolTip = [m[@"alias"] length] && [m[@"name"] length] ? [@"服务端名称：" stringByAppendingString:m[@"name"]] : nil;
-  NSString* user = [m[@"user"] length] ? m[@"user"] : @"配对码";
+  NSString* user = [m[@"user"] length] ? m[@"user"] : @"–";
   RemoteWindowController* open = [self windowForTarget:target];
   if (open && open.isLive) {
     [cell setStatus:@"已连接" tint:NSColor.systemGreenColor];
@@ -2659,7 +2620,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   _host.stringValue = m[@"target"];
   _user.stringValue = [m[@"user"] length] ? m[@"user"] : NSUserName();
   _password.stringValue = @"";
-  [self setUsingPairing:NO];
   [self showConnectWindow];
   [_connectWindow makeFirstResponder:_password];
 }
@@ -3114,25 +3074,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   NSApp.mainMenu = bar;
 }
 
-- (BOOL)usingPairing {
-  return _authMode.selectedSegment == 1;
-}
-
-- (void)setUsingPairing:(BOOL)pairing {
-  _authMode.selectedSegment = pairing ? 1 : 0;
-  [self pairingToggled:nil];
-}
-
-- (void)pairingToggled:(id)sender {
-  const BOOL pairing = [self usingPairing];
-  _code.hidden = !pairing;
-  _password.hidden = pairing;
-  _user.hidden = pairing;
-  _userLabel.hidden = pairing;
-  _secretLabel.stringValue = pairing ? @"配对码" : @"密码";
-  [_connectWindow makeFirstResponder:pairing ? _code : _password];
-}
-
 - (void)setBusy:(BOOL)busy {
   _connectButton.enabled = !busy;
   _host.enabled = !busy;
@@ -3203,23 +3144,17 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   return yes;
 }
 
-// The form's Connect button (and the command line's pairing code).
+// The form's Connect button.
 - (void)connect:(id)sender {
   NSString* target = [_host.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
   rdm::Auth auth;
-  if ([self usingPairing]) {
-    auth.method = rdm::AuthMethod::kPairingCode;
-    auth.code = _code.stringValue.UTF8String;
-  } else {
-    auth.username = _user.stringValue.UTF8String;
-    auth.password = _password.stringValue.UTF8String;
-  }
+  auth.username = _user.stringValue.UTF8String;
+  auth.password = _password.stringValue.UTF8String;
   if (![self startConnectTo:target auth:auth remote:nil automatic:NO]) return;
   NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
   [defaults setObject:target forKey:@"lastHost"];
   [defaults setObject:_user.stringValue forKey:@"lastUser"];
   _password.stringValue = @"";
-  _code.stringValue = @"";
   std::fill(auth.password.begin(), auth.password.end(), '\0');
 }
 
@@ -3251,8 +3186,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   ConnectAttempt* attempt = [[ConnectAttempt alloc] init];
   attempt->key = rdm::KnownHosts::Key(host, port);
   attempt->user = auth.username;
-  // Remembered once it works (connectFinished); nothing for pairing codes.
-  attempt->password = auth.method == rdm::AuthMethod::kPassword ? auth.password : std::string();
+  // Remembered once it works (connectFinished).
+  attempt->password = auth.password;
   attempt.target = target;
   attempt.reused = reuse != nil;
   attempt.automatic = automatic;
@@ -3412,7 +3347,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
       _host.stringValue = attempt.target ?: @"";
       _user.stringValue = NS(attempt->user);
       _password.stringValue = @"";
-      [self setUsingPairing:NO];
       [self showConnectWindow];
       [_connectWindow makeFirstResponder:_password];
       [self alert:@"保存的密码不能用了"

@@ -26,7 +26,7 @@
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>@MIN_MACOS@</string>
-	<!-- A menu bar app: an icon in the menu bar (status, pairing codes,
+	<!-- A menu bar app: an icon in the menu bar (status,
 	     settings, the statistics panel), no Dock icon or main menu. It is an
 	     app bundle so that macOS records the Screen Recording and
 	     Accessibility permissions against this bundle and its signature

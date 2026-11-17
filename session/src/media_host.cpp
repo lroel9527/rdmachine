@@ -45,16 +45,6 @@ namespace {
 // captured again.
 constexpr const char* kClientBundleId = "org.rdmachine.client";
 
-// The server's video codec setting in rdaccel's terms (rdaccel 1.11).
-int32_t RdaVideoCodec(VideoCodecChoice c) {
-  switch (c) {
-    case VideoCodecChoice::kHevc: return RDA_VIDEO_CODEC_HEVC;
-    case VideoCodecChoice::kH264: return RDA_VIDEO_CODEC_H264;
-    case VideoCodecChoice::kAuto: break;
-  }
-  return RDA_VIDEO_CODEC_AUTO;
-}
-
 // Overwrites a secret before it is freed (a plain fill may be optimized away).
 void Wipe(std::string& s) {
   volatile char* p = s.data();
@@ -383,7 +373,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   PendingLogin login;
   {
     std::lock_guard l(login_mu_);
-    if (origin.method == AuthMethod::kPassword && !pending_login_.password.empty() &&
+    if (!pending_login_.password.empty() &&
         pending_login_.username == origin.username && Clock::now() - pending_login_.at < kPendingLoginLifetime) {
       login = pending_login_;
     }
@@ -522,12 +512,9 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
 
   // Transport.
   rda_transport* transport = nullptr;
-  grant.transport = request.transport;
-  grant.port = request.transport == MediaTransport::kTcp ? options_.tcp_port : options_.udp_port;
+  grant.port = options_.udp_port;
   std::string media_where = "every address";
-  const rda_status ts = request.transport == MediaTransport::kTcp
-                            ? rda_tcp_bind(grant.port, &transport)
-                            : BindMediaUdp(origin.local_ip, grant.port, &transport, &media_where);
+  const rda_status ts = BindMediaUdp(origin.local_ip, grant.port, &transport, &media_where);
   if (ts != RDA_OK) {
     Log(std::string("cannot listen for media on port ") + std::to_string(grant.port) + ": " + rda_last_error());
     if (injector) rda_injector_destroy(injector);
@@ -542,7 +529,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   rda_host_config_default(&cfg);
   if (options_.fps > 0) cfg.fps = options_.fps;
   if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
-  cfg.video_codec = RdaVideoCodec(options_.video_codec);
+  cfg.video_codec = RDA_VIDEO_CODEC_HEVC;  // every Mac macOS 14 runs on encodes it in hardware
   cfg.display_index = display_index;
   cfg.encryption_key = secrets.key.data();  // copied by rdaccel
   cfg.keep_serving = 0;                      // one viewer per session
@@ -598,10 +585,6 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       grant.audio_reason = "disabled";
     } else if (options_.login_window) {
       grant.audio_reason = "login_window";
-    } else if (grant.transport == MediaTransport::kTcp) {
-      // rdaccel carries sound in datagrams, which TCP has not (D9): the
-      // client must not wait for sound that cannot come.
-      grant.audio_reason = "tcp";
     } else {
       rda_audio_config ac;
       rda_audio_config_default(&ac);
@@ -624,7 +607,6 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   status_ = MediaHostStatus{};
   status_.running = true;
   status_.origin = origin;
-  status_.transport = grant.transport;
   status_.view_only = injector == nullptr;
   status_.input_unavailable = !view_only && injector == nullptr;
   status_.started = std::chrono::steady_clock::now();
@@ -671,7 +653,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       (audio_ ? std::string(", sound") + (options_.mute_local_audio ? " (this Mac silent)" : "")
               : request.audio ? ", no sound (" + grant.audio_reason + ")" : "") +
       ", media " +
-      (grant.transport == MediaTransport::kTcp ? "tcp" : "udp on " + media_where) + " port " + std::to_string(grant.port) +
+      "udp on " + media_where + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
   StartExtraHosts(request, secrets, origin, injector != nullptr, &grant);
   if (!login.password.empty()) {
@@ -735,7 +717,6 @@ void MediaHost::StatsLoop() {
         const LiveStats ls = sampler.Update(hs, LiveStatsSampler::Clock::now());
         if (ls.valid && media_connected_) {
           SessionStatsReport r;
-          r.transport = status_.transport == MediaTransport::kTcp ? "tcp" : "udp";
           r.width = status_.width;
           r.height = status_.height;
           r.encoded_fps = ls.encoded_fps;
@@ -1007,8 +988,7 @@ void MediaHost::StartExtraHosts(const SessionRequest& request, const SessionSecr
     const uint16_t port = static_cast<uint16_t>(options_.udp_port + 2 + x->index);
     rda_transport* transport = nullptr;
     std::string where = "every address";
-    const rda_status ts = request.transport == MediaTransport::kTcp ? rda_tcp_bind(port, &transport)
-                                                                     : BindMediaUdp(origin.local_ip, port, &transport, &where);
+    const rda_status ts = BindMediaUdp(origin.local_ip, port, &transport, &where);
     if (ts != RDA_OK) {
       Log(name + ": cannot listen on port " + std::to_string(port) + ": " + rda_last_error());
       if (x->injector) rda_injector_destroy(x->injector);
@@ -1020,7 +1000,7 @@ void MediaHost::StartExtraHosts(const SessionRequest& request, const SessionSecr
     rda_host_config_default(&cfg);
     if (options_.fps > 0) cfg.fps = options_.fps;
     if (options_.bitrate_bps > 0) cfg.bitrate_bps = options_.bitrate_bps;
-    cfg.video_codec = RdaVideoCodec(options_.video_codec);
+    cfg.video_codec = RDA_VIDEO_CODEC_HEVC;  // every Mac macOS 14 runs on encodes it in hardware
     cfg.display_index = x->display_index;
     cfg.encryption_key = own.key.data();  // copied by rdaccel
     cfg.keep_serving = 0;
@@ -1048,7 +1028,7 @@ void MediaHost::StartExtraHosts(const SessionRequest& request, const SessionSecr
     x->info.port = port;
     grant->extra_displays.push_back(x->info);
     Log(name + ": serving rdaccel display " + std::to_string(x->display_index) + " on " +
-        (request.transport == MediaTransport::kTcp ? "tcp" : "udp " + where) + " port " + std::to_string(port) +
+ "udp " + where + " port " + std::to_string(port) +
         (x->injector ? "" : " (view only)"));
     started.push_back(std::move(x));
   }

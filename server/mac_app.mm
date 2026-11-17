@@ -25,9 +25,6 @@ NSString* HMS(std::chrono::seconds s) {
 }
 
 NSString* PeerText(const rdm::MediaHostStatus& st) {
-  if (st.origin.method == rdm::AuthMethod::kPairingCode) {
-    return [NSString stringWithFormat:@"%@（配对码）", NS(st.origin.peer_ip)];
-  }
   return [NSString stringWithFormat:@"%@@%@", NS(st.origin.username), NS(st.origin.peer_ip)];
 }
 
@@ -37,11 +34,6 @@ NSString* InputSourceText(const rdm::MediaHostStatus& st) {
   if (st.input_source.empty()) return [NSString stringWithFormat:@"本机没有对应「%@」的输入法", NS(st.client_input_source)];
   if (st.input_source == st.client_input_source) return NS(st.input_source);
   return [NSString stringWithFormat:@"%@（客户端：%@）", NS(st.input_source), NS(st.client_input_source)];
-}
-
-NSString* GroupedCode(const std::string& code) {
-  if (code.size() != 8) return NS(code);
-  return [NSString stringWithFormat:@"%@ %@", NS(code.substr(0, 4)), NS(code.substr(4))];
 }
 
 // The System Audio Recording permission (TCC kTCCServiceAudioCapture): no
@@ -75,7 +67,6 @@ NSString* AudioText(const rdm::MediaHostStatus& st) {
     if (st.audio_reason == "disabled") return @"声音：未传（设置里关了）";
     if (st.audio_reason == "login_window") return @"声音：未传（登录窗口）";
     if (st.audio_reason == "unsupported") return @"声音：未传（这台 Mac 采集不了）";
-    if (st.audio_reason == "tcp") return @"声音：未传（画面走 TCP，TCP 上没有声音）";
     return @"声音：未传（客户端没要）";
   }
   const rda_audio_status& a = st.audio_status;
@@ -130,21 +121,14 @@ void StopApp() {
 @implementation RDMSettingsWindow {
   NSWindow* _window;
   NSTextField* _port;
-  NSButton* _pairing;
   NSButton* _viewOnly;
   NSPopUpButton* _clipboard;
   NSTextField* _fps;
   NSTextField* _bitrate;
-  NSPopUpButton* _codec;
   NSButton* _sendAudio;
   NSButton* _muteLocal;
   NSTextField* _note;
 }
-
-// The video codec popup's items, in order.
-static const rdm::VideoCodecChoice kCodecChoices[] = {rdm::VideoCodecChoice::kAuto, rdm::VideoCodecChoice::kHevc,
-                                                       rdm::VideoCodecChoice::kH264};
-static NSString* const kCodecTitles[] = {@"自动（推荐）", @"HEVC", @"H.264"};
 
 static NSTextField* NumberField(int lo, int hi) {
   NSTextField* f = [NSTextField textFieldWithString:@""];
@@ -177,14 +161,11 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _window.delegate = self;
 
   _port = NumberField(1, 65534);
-  _pairing = [NSButton checkboxWithTitle:@"允许用配对码登录" target:nil action:nil];
   _viewOnly = [NSButton checkboxWithTitle:@"只看不控（不接受对方的键盘和鼠标）" target:nil action:nil];
   _clipboard = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   for (NSString* t : kClipboardTitles) [_clipboard addItemWithTitle:t];
   _fps = NumberField(0, 240);
   _bitrate = NumberField(0, 1000000);
-  _codec = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-  for (NSString* t : kCodecTitles) [_codec addItemWithTitle:t];
   _sendAudio = [NSButton checkboxWithTitle:@"把这台 Mac 的声音传给客户端" target:self action:@selector(audioChanged:)];
   _muteLocal = [NSButton checkboxWithTitle:@"传声音时这台 Mac 自己不出声" target:nil action:nil];
   NSStackView* audio = [NSStackView stackViewWithViews:@[ _sendAudio, _muteLocal ]];
@@ -196,13 +177,11 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   _note.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
 
   NSGridView* grid = [NSGridView gridViewWithViews:@[
-    @[ [NSTextField labelWithString:@"端口："], WithHint(_port, @"TCP 控制 + UDP 画面，备用 TCP 用下一个端口") ],
-    @[ [NSTextField labelWithString:@"登录："], _pairing ],
+    @[ [NSTextField labelWithString:@"端口："], WithHint(_port, @"TCP 控制 + UDP 画面") ],
     @[ [NSTextField labelWithString:@"控制："], _viewOnly ],
     @[ [NSTextField labelWithString:@"剪贴板："], _clipboard ],
     @[ [NSTextField labelWithString:@"帧率上限："], WithHint(_fps, @"fps，0 = 默认（60）") ],
     @[ [NSTextField labelWithString:@"码率上限："], WithHint(_bitrate, @"kbps，0 = 默认（8000）") ],
-    @[ [NSTextField labelWithString:@"视频编码："], WithHint(_codec, @"自动：HEVC，这台 Mac 编不快时用 H.264") ],
     @[ [NSTextField labelWithString:@"声音："], audio ],
   ]];
   grid.rowSpacing = 10;
@@ -227,16 +206,12 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 - (void)showWithSettings:(const rdm::ServerSettings&)s overrides:(NSString*)overrides {
   if (!_window) [self build];
   _port.integerValue = s.port;
-  _pairing.state = s.offer_pairing_codes ? NSControlStateValueOn : NSControlStateValueOff;
   _viewOnly.state = s.view_only ? NSControlStateValueOn : NSControlStateValueOff;
   for (size_t i = 0; i < 4; ++i) {
     if (kClipboardModes[i] == s.clipboard_mode) [_clipboard selectItemAtIndex:static_cast<NSInteger>(i)];
   }
   _fps.integerValue = s.fps;
   _bitrate.integerValue = s.bitrate_kbps;
-  for (size_t i = 0; i < 3; ++i) {
-    if (kCodecChoices[i] == s.video_codec) [_codec selectItemAtIndex:static_cast<NSInteger>(i)];
-  }
   _sendAudio.state = s.send_audio ? NSControlStateValueOn : NSControlStateValueOff;
   _muteLocal.state = s.mute_local_audio ? NSControlStateValueOn : NSControlStateValueOff;
   _muteLocal.enabled = s.send_audio;
@@ -260,12 +235,10 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   [_window makeFirstResponder:nil];  // commit the field being edited
   rdm::ServerSettings s;
   s.port = static_cast<uint16_t>(std::clamp<NSInteger>(_port.integerValue, 1, 65534));
-  s.offer_pairing_codes = _pairing.state == NSControlStateValueOn;
   s.view_only = _viewOnly.state == NSControlStateValueOn;
   s.clipboard_mode = kClipboardModes[std::clamp<NSInteger>(_clipboard.indexOfSelectedItem, 0, 3)];
   s.fps = static_cast<int32_t>(std::clamp<NSInteger>(_fps.integerValue, 0, 240));
   s.bitrate_kbps = static_cast<int32_t>(std::clamp<NSInteger>(_bitrate.integerValue, 0, 1000000));
-  s.video_codec = kCodecChoices[std::clamp<NSInteger>(_codec.indexOfSelectedItem, 0, 2)];
   s.send_audio = _sendAudio.state == NSControlStateValueOn;
   s.mute_local_audio = _muteLocal.state == NSControlStateValueOn;
   if (self.onSave) self.onSave(s);
@@ -407,8 +380,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   }
   if (st.running) {
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - st.started);
-    [self add:[NSString stringWithFormat:@"已连接：%@ · %@ · %@", PeerText(st),
-                                         st.transport == rdm::MediaTransport::kUdp ? @"UDP" : @"TCP", HMS(secs)]
+    [self add:[NSString stringWithFormat:@"已连接：%@ · %@", PeerText(st), HMS(secs)]
         action:nullptr];
     [self add:[NSString stringWithFormat:@"键盘语言：%@", InputSourceText(st)] action:nullptr];
     [self add:AudioText(st) action:nullptr];
@@ -421,19 +393,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   }
 
   [menu addItem:NSMenuItem.separatorItem];
-  if (_runtime->effective_settings().offer_pairing_codes) {
-    const auto code = _runtime->CurrentPairingCode();
-    if (!code.code.empty()) {
-      [self add:[NSString stringWithFormat:@"配对码：%@（还剩 %lld:%02lld，用一次失效）", GroupedCode(code.code),
-                                           static_cast<long long>(code.remaining.count() / 60),
-                                           static_cast<long long>(code.remaining.count() % 60)]
-          action:nullptr];
-      [self add:@"复制配对码" action:@selector(copyCode:)];
-    }
-    [self add:(code.code.empty() ? @"生成配对码" : @"换一个配对码") action:@selector(newCode:)];
-  } else {
-    [self add:@"配对码登录已关闭" action:nullptr];
-  }
   NSMenuItem* fp = [self add:@"复制本机指纹" action:@selector(copyFingerprint:)];
   fp.toolTip = [self fingerprint];
 
@@ -468,16 +427,6 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 
 - (void)disconnect:(id)sender {
   _runtime->Disconnect();
-}
-
-- (void)newCode:(id)sender {
-  const std::string code = _runtime->IssuePairingCode();
-  if (!code.empty()) Copy(NS(code));
-}
-
-- (void)copyCode:(id)sender {
-  const auto code = _runtime->CurrentPairingCode();
-  if (!code.code.empty()) Copy(NS(code.code));
 }
 
 // As an agent the fingerprint is the daemon's, known once the link to it is

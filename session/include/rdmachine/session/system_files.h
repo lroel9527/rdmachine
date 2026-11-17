@@ -16,7 +16,7 @@ namespace rdm {
 // fetch cut short by a dropped connection goes on in the next session with
 // the same `peer` (the client: the server's address; the server: "", any
 // client). Null when this process has no extension (a command-line tool,
-// the login window, Linux).
+// the login window).
 std::shared_ptr<FileTarget> SystemFileTarget(const std::string& peer = "");
 
 // Adds this app's File Provider domain and waits for the answer: the

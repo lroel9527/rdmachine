@@ -422,19 +422,11 @@ bool XattrWorthCopying(const std::string& name) {
 }
 
 ssize_t ListXattrs(const std::string& path, char* buf, size_t size) {
-#ifdef __APPLE__
   return listxattr(path.c_str(), buf, size, XATTR_NOFOLLOW);
-#else
-  return llistxattr(path.c_str(), buf, size);
-#endif
 }
 
 ssize_t GetXattr(const std::string& path, const std::string& name, void* buf, size_t size) {
-#ifdef __APPLE__
   return getxattr(path.c_str(), name.c_str(), buf, size, 0, XATTR_NOFOLLOW);
-#else
-  return lgetxattr(path.c_str(), name.c_str(), buf, size);
-#endif
 }
 
 }  // namespace
@@ -468,11 +460,7 @@ std::map<std::string, std::string> ReadXattrs(const std::string& path) {
 void WriteXattrs(const std::string& path, const std::map<std::string, std::string>& xattrs) {
   for (const auto& [name, value] : xattrs) {
     if (!XattrWorthCopying(name)) continue;
-#ifdef __APPLE__
     setxattr(path.c_str(), name.c_str(), value.data(), value.size(), 0, XATTR_NOFOLLOW);
-#else
-    lsetxattr(path.c_str(), name.c_str(), value.data(), value.size(), 0);
-#endif
   }
 }
 

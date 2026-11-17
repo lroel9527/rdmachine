@@ -123,12 +123,10 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   EXPECT_TRUE(s.mute_local_audio);  // and this computer silent while it is sent
 
   s.port = 4200;
-  s.offer_pairing_codes = false;
   s.view_only = true;
   s.clipboard_mode = ClipboardMode::kSend;
   s.fps = 30;
   s.bitrate_kbps = 6000;
-  s.video_codec = VideoCodecChoice::kH264;
   s.send_audio = false;
   s.mute_local_audio = false;
   ASSERT_TRUE(SaveServerSettings(t.path() + "/new", s, &error)) << error;
@@ -137,16 +135,16 @@ TEST(ServerSettings, DefaultsRoundTripAndBadValues) {
   ASSERT_TRUE(LoadServerSettings(t.path() + "/new", &back, &error)) << error;
   EXPECT_EQ(back, s);
 
-  // Out of range or wrong type: that key keeps its default; unknown keys are ignored.
+  // Out of range or wrong type: that key keeps its default; unknown keys
+  // (and those of settings that are gone: pairing codes, the video codec) are ignored.
   ASSERT_TRUE(WritePrivateFile(ServerSettingsPath(t.path()),
-                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "video_codec": "vp8", "send_audio": 0, "mute_local_audio": false, "x": 1})",
+                               R"({"port": 65535, "fps": "fast", "clipboard": "sideways", "view_only": true, "offer_pairing_codes": false, "video_codec": "h264", "send_audio": 0, "mute_local_audio": false, "x": 1})",
                                &error));
   ASSERT_TRUE(LoadServerSettings(t.path(), &back, &error)) << error;
   EXPECT_EQ(back.port, kDefaultPort);
   EXPECT_EQ(back.fps, 0);
   EXPECT_EQ(back.clipboard_mode, ClipboardMode::kBoth);
   EXPECT_TRUE(back.view_only);
-  EXPECT_EQ(back.video_codec, VideoCodecChoice::kAuto);
   EXPECT_TRUE(back.send_audio);  // not a boolean: the default
   EXPECT_FALSE(back.mute_local_audio);
 

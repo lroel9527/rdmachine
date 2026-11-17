@@ -25,7 +25,6 @@ struct ControlServerOptions {
   // seconds; a client that has gone without a word is let go after 15.
   int idle_timeout_ms = 15000;         // no message for this long: close
   int ping_interval_ms = 5000;         // send a ping after this long without traffic
-  bool offer_pairing_codes = true;
 };
 
 class ControlServer {
@@ -36,12 +35,6 @@ class ControlServer {
   bool Start(std::string* error);
   void Stop();
   uint16_t port() const;
-
-  // The code to show on the server's screen; empty if pairing is off.
-  std::string IssuePairingCode();
-  // Time left on the last issued code; zero once it was used, voided or
-  // expired (or pairing is off).
-  Clock::duration PairingCodeRemaining();
 
   // Ends every open control connection, which ends a running session: the
   // client hears bye "server_disconnected" (the user at this computer chose
@@ -60,7 +53,6 @@ class ControlServer {
   const TlsIdentity identity_;
   const ControlServerOptions options_;
   FailureLimiter limiter_;
-  PairingCodes pairing_;
   std::unique_ptr<TlsListener> listener_;
   std::atomic<bool> stop_{false};
   std::atomic<int> active_{0};

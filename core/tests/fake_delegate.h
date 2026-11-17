@@ -44,7 +44,6 @@ class FakeDelegate : public ServerDelegate {
     last_secrets = secrets;
     last_origin = origin;
     SessionGrant g;
-    g.transport = request.transport;
     g.port = 4100;
     g.displays.push_back(DisplayInfo{0, "Built-in", 2880, 1800, 2.0});
     g.audio = request.audio && !no_audio;

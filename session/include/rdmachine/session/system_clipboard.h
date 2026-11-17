@@ -12,8 +12,6 @@ namespace rdm {
 // what they copy). Reads and writes text, RTF, HTML and images (as PNG);
 // files copied in Finder are read as their names only. Skips content that
 // password managers mark org.nspasteboard.ConcealedType or TransientType.
-// Other systems: null for now, so the clipboard is not shared (phase 1 is
-// Mac to Mac; the X11/Wayland clipboard comes with Linux support).
 std::shared_ptr<Clipboard> SystemClipboard(const std::string& pasteboard_name = {});
 
 }  // namespace rdm

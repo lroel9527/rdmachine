@@ -1,7 +1,7 @@
 #pragma once
 // The running server: the media host and control server built from the
-// settings, restarted when they change. Shared by the command line (Linux,
-// --headless) and the macOS menu bar app. Thread-safe.
+// settings, restarted when they change. Shared by the command line
+// (--headless) and the menu bar app. Thread-safe.
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -20,12 +20,10 @@ namespace rdm {
 // Command-line options override the saved settings for one run.
 struct SettingsOverrides {
   std::optional<uint16_t> port;
-  std::optional<bool> offer_pairing_codes;
   std::optional<bool> view_only;
   std::optional<ClipboardMode> clipboard_mode;
   std::optional<int32_t> fps;
   std::optional<int32_t> bitrate_kbps;
-  std::optional<VideoCodecChoice> video_codec;
   std::optional<bool> send_audio;
   std::optional<bool> mute_local_audio;
 
@@ -43,7 +41,7 @@ class ServerRuntime {
     std::string bind_address;  // empty = all interfaces
     std::string pam_service;   // empty = the platform default
     // Runs in the login window session (--login-window): any account may
-    // log in, no pairing codes (no one to show them to).
+    // log in.
     bool login_window = false;
     // Agent mode (docs/decisions.md, "守护进程和 agent"): the rdmachine
     // daemon owns the port and the logins; this process only runs the
@@ -55,6 +53,10 @@ class ServerRuntime {
     // The sound's source (hidden --audio-source=test, for the automatic
     // tests: a computed signal, no device).
     int32_t audio_source = RDA_AUDIO_SOURCE_SYSTEM;
+    // Hidden --test-password, standalone only, for tools/smoke_test.sh: the
+    // account this server runs as logs in with it instead of its real
+    // password (which no test should know). Empty: the system's check.
+    std::string test_password;
     std::function<void(const std::string&)> log;
   };
 
@@ -80,14 +82,6 @@ class ServerRuntime {
   bool daemon_connected() const;
   std::string daemon_fingerprint() const;
 
-  // A new pairing code (empty if pairing is off or the server is stopped).
-  std::string IssuePairingCode();
-  struct PairingCode {
-    std::string code;  // empty: none issued, or used, voided or expired
-    std::chrono::seconds remaining{0};
-  };
-  PairingCode CurrentPairingCode() const;
-
   // Ends the running session (the client's connection drops).
   void Disconnect();
   MediaHostStatus Status() const;
@@ -104,8 +98,6 @@ class ServerRuntime {
   std::unique_ptr<MediaHost> media_;
   std::unique_ptr<ControlServer> server_;  // standalone
   std::unique_ptr<AgentHost> agent_;       // agent mode
-  std::string code_;  // last issued; valid while the server says time remains
-  Clock::time_point code_expires_{};  // agent mode: when the daemon said it lapses
 };
 
 }  // namespace rdm

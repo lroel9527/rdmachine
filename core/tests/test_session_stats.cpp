@@ -6,7 +6,6 @@ using namespace rdm;
 
 TEST(SessionStats, RoundTrip) {
   SessionStatsReport r;
-  r.transport = "udp";
   r.width = 2880;
   r.height = 1800;
   r.encoded_fps = 57.5;
@@ -30,9 +29,8 @@ TEST(SessionStats, RoundTrip) {
 }
 
 TEST(SessionStats, MissingFieldsKeepDefaultsAndBadInputFails) {
-  auto r = DecodeSessionStats(R"({"transport":"tcp","rtt_ms":"fast"})");
+  auto r = DecodeSessionStats(R"({"transport":"udp","rtt_ms":"fast"})");
   ASSERT_TRUE(r);
-  EXPECT_EQ(r->transport, "tcp");
   EXPECT_EQ(r->rtt_ms, 0);
   EXPECT_LT(r->recent_loss_pct, 0);  // not measured
   // An older server's report has no sound fields.

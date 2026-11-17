@@ -130,20 +130,6 @@ TEST_F(ControlTest, RateLimitedAcrossConnections) {
   EXPECT_GT(*r.retry_after_ms, 0);
 }
 
-TEST_F(ControlTest, PairingCode) {
-  std::string code = server_->IssuePairingCode();
-  ASSERT_EQ(code.size(), 8u);
-  auto o = Options();
-  o.auth = Auth{};
-  o.auth.method = AuthMethod::kPairingCode;
-  o.auth.code = code;
-  auto r = ConnectAndStartSession(o);
-  ASSERT_EQ(r.error, "") << r.detail;
-  r.connection.reset();
-  // Used once.
-  EXPECT_EQ(ConnectAndStartSession(o).error, "code_expired");
-}
-
 TEST_F(ControlTest, ASecondClientTakesTheSessionOver) {
   auto first = ConnectAndStartSession(Options());
   ASSERT_EQ(first.error, "") << first.detail;

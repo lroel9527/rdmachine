@@ -115,7 +115,7 @@ void AgentHost::Handle(AgentChannel& channel, const json& m) {
     connected_ = true;
     Log("connected to the rdmachine daemon as the " + options_.kind + " agent");
     if (options_.send_settings && options_.port > 0) {
-      channel.Send({{"type", "settings"}, {"port", options_.port}, {"offer_pairing_codes", options_.offer_pairing_codes}});
+      channel.Send({{"type", "settings"}, {"port", options_.port}});
     }
     return;
   }
@@ -177,48 +177,6 @@ void AgentHost::Handle(AgentChannel& channel, const json& m) {
     channel.Send({{"type", "session_ended"}, {"reply_to", id}});
     return;
   }
-  // Answers to Ask().
-  std::lock_guard lock(mu_);
-  if (!reply_type_.empty() && type == reply_type_ && id == reply_id_) {
-    reply_ = m;
-    cv_.notify_all();
-  }
-}
-
-std::optional<json> AgentHost::Ask(json m, const std::string& reply_type, int timeout_ms) {
-  std::unique_lock lock(mu_);
-  if (!channel_ || !connected_) return std::nullopt;
-  const int64_t id = next_id_++;
-  m["id"] = id;
-  reply_.reset();
-  reply_type_ = reply_type;
-  reply_id_ = id;
-  // Sent under the lock: Run() takes it before the channel goes away.
-  if (!channel_->Send(m)) {
-    reply_type_.clear();
-    return std::nullopt;
-  }
-  cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return reply_.has_value() || stop_ || !channel_; });
-  reply_type_.clear();
-  auto out = std::move(reply_);
-  reply_.reset();
-  return out;
-}
-
-AgentHost::PairingCode AgentHost::IssuePairingCode() {
-  PairingCode out;
-  if (auto r = Ask({{"type", "issue_pairing_code"}}, "pairing_code", 3000)) {
-    out.code = r->value("code", "");
-    out.remaining = std::chrono::milliseconds(r->value("remaining_ms", static_cast<int64_t>(0)));
-  }
-  return out;
-}
-
-std::chrono::milliseconds AgentHost::PairingCodeRemaining() {
-  if (auto r = Ask({{"type", "pairing_code_status"}}, "pairing_code", 1000)) {
-    return std::chrono::milliseconds(r->value("remaining_ms", static_cast<int64_t>(0)));
-  }
-  return std::chrono::milliseconds(0);
 }
 
 void AgentHost::Disconnect() {
@@ -226,9 +184,9 @@ void AgentHost::Disconnect() {
   if (channel_) channel_->Send({{"type", "disconnect"}});
 }
 
-void AgentHost::SendSettings(uint16_t port, bool offer_pairing_codes) {
+void AgentHost::SendSettings(uint16_t port) {
   std::lock_guard lock(mu_);
-  if (channel_) channel_->Send({{"type", "settings"}, {"port", port}, {"offer_pairing_codes", offer_pairing_codes}});
+  if (channel_) channel_->Send({{"type", "settings"}, {"port", port}});
 }
 
 }  // namespace rdm

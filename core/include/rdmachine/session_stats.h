@@ -12,13 +12,12 @@ namespace rdm {
 constexpr uint32_t kSessionStatsMessageType = 0x10002;
 
 struct SessionStatsReport {
-  std::string transport;  // "udp" or "tcp"
   int32_t width = 0, height = 0;
   double encoded_fps = 0, captured_fps = 0;
   double bitrate_kbps = 0, target_kbps = 0;  // target 0 = fixed bitrate
-  double bandwidth_kbps = 0;                 // 0 = not measured (TCP)
-  double rtt_ms = 0;                         // 0 = not measured (TCP)
-  double recent_loss_pct = -1, total_loss_pct = -1;  // negative = not measured (TCP)
+  double bandwidth_kbps = 0;                 // 0 = not measured yet
+  double rtt_ms = 0;                         // 0 = not measured yet
+  double recent_loss_pct = -1, total_loss_pct = -1;  // negative = not measured yet
   uint64_t frames_dropped_congestion = 0;
   std::string encoder;
   std::string input_source;  // what the server selected for the client's; may be empty

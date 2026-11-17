@@ -1,6 +1,6 @@
 #pragma once
 // Server-side guards around login (docs/protocol.md, "auth"): failure rate
-// limiting per source address, the pairing code shown on the server, and the
+// limiting per source address and the
 // one-time tokens that admit a viewer to an rdaccel session. All thread-safe;
 // time is passed in so tests can control it.
 #include <array>
@@ -42,31 +42,6 @@ class FailureLimiter {
   const Clock::duration window_, block_;
   std::mutex mu_;
   std::map<std::string, Entry> entries_;
-};
-
-// One pairing code at a time: 8 digits, valid for `lifetime`, used once,
-// void after `max_wrong` wrong attempts.
-class PairingCodes {
- public:
-  enum class Result { kOk, kWrong, kExpired, kNone };
-
-  explicit PairingCodes(Clock::duration lifetime = std::chrono::minutes(5), int max_wrong = 3);
-
-  // Issues a new code (replacing any previous one); empty on RNG failure.
-  std::string Issue(Clock::time_point now);
-  void Revoke();
-  Result Check(const std::string& code, Clock::time_point now);
-  bool active(Clock::time_point now);
-  // Time left on the current code; zero once used, voided or expired.
-  Clock::duration remaining(Clock::time_point now);
-
- private:
-  const Clock::duration lifetime_;
-  const int max_wrong_;
-  std::mutex mu_;
-  std::string code_;
-  Clock::time_point expires_{};
-  int wrong_ = 0;
 };
 
 // Tokens handed to a client in session_ready and checked by the rdaccel host's

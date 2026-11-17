@@ -8,18 +8,15 @@
 
 #include "rdmachine/clipboard_sync.h"
 #include "rdmachine/protocol.h"
-#include "rdmachine/session/video_codec.h"
 
 namespace rdm {
 
 struct ServerSettings {
-  uint16_t port = kDefaultPort;  // control TCP and media UDP; TCP fallback on port + 1
-  bool offer_pairing_codes = true;
+  uint16_t port = kDefaultPort;  // control TCP and media UDP
   bool view_only = false;
   ClipboardMode clipboard_mode = ClipboardMode::kBoth;
   int32_t fps = 0;           // 0 = rdaccel's default
   int32_t bitrate_kbps = 0;  // 0 = rdaccel's default
-  VideoCodecChoice video_codec = VideoCodecChoice::kAuto;
   // Sound (docs/audio.md): send this computer's sound to a client that asks
   // for it, and keep this computer silent meanwhile (only while the sound
   // really goes to a client).

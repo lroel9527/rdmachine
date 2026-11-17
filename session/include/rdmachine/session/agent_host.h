@@ -26,7 +26,6 @@ struct AgentHostOptions {
   // daemon takes them from the console user's agent only).
   bool send_settings = false;
   uint16_t port = 0;
-  bool offer_pairing_codes = true;
 };
 
 class AgentHost {
@@ -45,22 +44,14 @@ class AgentHost {
   std::string server_name() const;
 
   // The menu bar of the console user's session (the daemon ignores these from
-  // any other agent). A new pairing code (empty if refused or not connected)
-  // and how long it stays valid.
-  struct PairingCode {
-    std::string code;
-    std::chrono::milliseconds remaining{0};
-  };
-  PairingCode IssuePairingCode();
-  std::chrono::milliseconds PairingCodeRemaining();
+  // any other agent).
   void Disconnect();
-  void SendSettings(uint16_t port, bool offer_pairing_codes);
+  void SendSettings(uint16_t port);
 
  private:
   void Run();
   void Serve(AgentChannel& channel);
   void Handle(AgentChannel& channel, const nlohmann::json& m);
-  std::optional<nlohmann::json> Ask(nlohmann::json m, const std::string& reply_type, int timeout_ms);
   void Log(const std::string& line);
 
   MediaHost& media_;
@@ -74,10 +65,6 @@ class AgentHost {
   AgentChannel* channel_ = nullptr;  // while connected
   std::string fingerprint_, server_name_;
   uint16_t port_ = 0;
-  int64_t next_id_ = 1;
-  std::optional<nlohmann::json> reply_;  // the answer Ask() waits for
-  std::string reply_type_;
-  int64_t reply_id_ = 0;
   bool in_session_ = false;
 };
 

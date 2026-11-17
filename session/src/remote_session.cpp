@@ -50,34 +50,6 @@ rda_state WaitConnected(rda_viewer* v, int timeout_ms) {
   }
 }
 
-// After session_request on an established connection: the next session_ready.
-bool AwaitReady(MessageChannel& ch, int timeout_ms, ConnectResult* result) {
-  for (;;) {
-    auto r = ch.Receive(timeout_ms);
-    if (r.status != MessageChannel::Received::kMessage) {
-      result->error = r.status == MessageChannel::Received::kTimeout ? "timeout" : "connection_closed";
-      return false;
-    }
-    if (auto* ping = std::get_if<Ping>(&*r.message)) {
-      ch.Send(Pong{ping->id});
-      continue;
-    }
-    if (std::holds_alternative<Pong>(*r.message)) continue;
-    if (auto* ready = std::get_if<SessionReady>(&*r.message)) {
-      result->session = *ready;
-      return true;
-    }
-    if (auto* err = std::get_if<Error>(&*r.message)) {
-      result->error = err->code;
-      result->detail = err->message;
-    } else {
-      result->error = "bad_message";
-      result->detail = std::string("unexpected ") + MessageType(*r.message);
-    }
-    return false;
-  }
-}
-
 }  // namespace
 
 // The picture goes to the address the control connection reached, not to a
@@ -143,17 +115,13 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
 
   std::unique_ptr<RemoteSession> s(new RemoteSession());
   s->options_ = std::move(options);
-  // How long UDP gets before the picture falls back to TCP: on a far link
-  // (a 500 ms round trip) its handshake alone takes about as long as the
-  // default, so it grows with what logging in took (a few round trips),
-  // up to 15 s.
-  if (s->options_.udp_wait_ms > 0) {
-    s->udp_wait_ms_ = static_cast<int>(
-        std::clamp<long long>(2 * connect_took, s->options_.udp_wait_ms, std::max(s->options_.udp_wait_ms, 15000)));
-  }
+  // How long the picture's connection gets: on a far link (a 500 ms round
+  // trip) its handshake alone takes seconds, so it grows with what logging
+  // in took (a few round trips), up to 15 s.
+  s->media_wait_ms_ = static_cast<int>(std::clamp<long long>(
+      2 * connect_took, s->options_.control.timeout_ms, std::max(s->options_.control.timeout_ms, 15000)));
   s->control_ = std::move(result->connection);
   s->revision_ = result->revision;
-  const int connect_ms = s->options_.control.timeout_ms;
   if (s->options_.clipboard && s->options_.clipboard_mode != ClipboardMode::kOff) {
     ClipboardSync::Options so;
     so.mode = s->options_.clipboard_mode;
@@ -174,7 +142,7 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
         so);
   }
 
-  for (int attempt = 0;; ++attempt) {
+  {
     s->session_ = result->session;
     std::string error;
     rda_viewer_config vc = s->ViewerConfig();
@@ -184,26 +152,15 @@ std::unique_ptr<RemoteSession> RemoteSession::Start(Options options, ConnectResu
       result->detail = error;
       return nullptr;
     }
-    const bool can_fall_back = attempt == 0 && s->session_.transport == MediaTransport::kUdp && s->udp_wait_ms_ > 0;
-    const rda_state st = WaitConnected(s->viewer_, can_fall_back ? s->udp_wait_ms_ : connect_ms);
-    if (st == RDA_STATE_CONNECTED) break;
-    rda_viewer_destroy(s->viewer_);
-    s->viewer_ = nullptr;
-    if (!can_fall_back) {
+    const rda_state st = WaitConnected(s->viewer_, s->media_wait_ms_);
+    if (st != RDA_STATE_CONNECTED) {
+      rda_viewer_destroy(s->viewer_);
+      s->viewer_ = nullptr;
       result->error = "media_failed";
       result->detail = st == RDA_STATE_DISCONNECTED ? "the picture connection was refused"
-                                                    : "the picture connection timed out";
+                                                    : "the picture connection timed out (UDP blocked?)";
       return nullptr;
     }
-    // UDP did not get through: ask for TCP on the same control connection.
-    SessionRequest tcp = s->options_.control.request;
-    tcp.transport = MediaTransport::kTcp;
-    if (!s->control_->channel().Send(tcp)) {
-      result->error = "connection_closed";
-      return nullptr;
-    }
-    if (!AwaitReady(s->control_->channel(), std::max(connect_ms, s->options_.control.session_timeout_ms), result))
-      return nullptr;
   }
   result->session = s->session_;
   {
@@ -309,8 +266,7 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
     if (options_.log) options_.log("moved session: " + error);
     return false;
   }
-  const int wait_ms = ready.transport == MediaTransport::kUdp && udp_wait_ms_ > 0 ? udp_wait_ms_
-                                                                                 : options_.control.timeout_ms;
+  const int wait_ms = media_wait_ms_;
   rda_state st = RDA_STATE_CONNECTING;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
   while (!stop_ && (st = rda_viewer_get_state(fresh)) == RDA_STATE_CONNECTING &&
@@ -360,7 +316,6 @@ void RemoteSession::KeepAlive() {
   auto last_sent = Clock::now(), last_heard = Clock::now();
   int64_t next_ping = 1;
   bool moving = false;
-  bool tcp_asked = false;
   Clock::time_point moving_since{};
   // The picture can drop a moment before the reason arrives on the control
   // connection (bye, session_moving): wait a little before calling it lost.
@@ -394,7 +349,6 @@ void RemoteSession::KeepAlive() {
           if (options_.log) options_.log("session moving: " + mv->reason);
           if (options_.on_moving) options_.on_moving(mv->reason);
           moving = true;
-          tcp_asked = false;
           moving_since = now;
         } else if (auto* ready = std::get_if<SessionReady>(&*r.message)) {
           const bool followed = FollowMove(*ready);
@@ -404,13 +358,6 @@ void RemoteSession::KeepAlive() {
           if (followed) {
             moving = false;
             media_down_since.reset();
-          } else if (ready->transport == MediaTransport::kUdp && !tcp_asked) {
-            // UDP did not get through to the new place: ask for TCP there.
-            SessionRequest tcp = options_.control.request;
-            tcp.transport = MediaTransport::kTcp;
-            tcp_asked = ch.Send(tcp);
-            moving = true;
-            if (!tcp_asked) ended = "connection_lost";
           } else {
             ended = "media_lost";
           }
@@ -465,8 +412,7 @@ bool RemoteSession::ConnectExtra(size_t i, rda_viewer_config config, std::string
   ready.desktop = x.desktop;
   rda_viewer* v = nullptr;
   if (CreateSessionViewer(MediaHostAddress(), ready, config, &v, error) != RDA_OK) return false;
-  const int wait_ms = ready.transport == MediaTransport::kUdp && udp_wait_ms_ > 0 ? udp_wait_ms_
-                                                                                 : options_.control.timeout_ms;
+  const int wait_ms = media_wait_ms_;
   rda_state st = RDA_STATE_CONNECTING;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
   while (!stop_ && (st = rda_viewer_get_state(v)) == RDA_STATE_CONNECTING &&

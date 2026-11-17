@@ -1,12 +1,10 @@
 #pragma once
-// Checking a local account's password with the system (PAM on macOS and
-// Linux), and the M0 rule that only the logged-in user may connect.
+// Checking a local account's password with the system (PAM), and the rule that only the logged-in user may connect.
 #include <string>
 
 namespace rdm {
 
-// The PAM service used when none is configured: "login" on Linux, and
-// "chkpasswd" on macOS (Open Directory; the "authorization" and "checkpw"
+// The PAM service used when none is configured: "chkpasswd" (Open Directory; the "authorization" and "checkpw"
 // stacks there use use_first_pass and reject every password).
 const char* DefaultPamService();
 

@@ -1,6 +1,5 @@
-# Platform-independent product core: control protocol, TLS, auth and session
-# logic. No rdaccel or OS framework dependency, so Linux can reuse it and it
-# builds and tests on Linux too.
+# Product core: control protocol, TLS, auth and session logic. No rdaccel or
+# OS framework dependency, so it is tested without a screen.
 add_library(rdm_core STATIC
   src/base64.cpp
   src/frame.cpp

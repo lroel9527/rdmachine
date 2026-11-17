@@ -45,21 +45,12 @@ void ControlServer::Stop() {
   listener_.reset();
 }
 
-Clock::duration ControlServer::PairingCodeRemaining() {
-  return options_.offer_pairing_codes ? pairing_.remaining(Clock::now()) : Clock::duration::zero();
-}
-
 void ControlServer::CloseConnections() {
   std::lock_guard lock(conns_mu_);
   for (const Open& o : conns_) o.disconnected->store(true);  // each loop says bye and closes
 }
 
 uint16_t ControlServer::port() const { return listener_ ? listener_->port() : 0; }
-
-std::string ControlServer::IssuePairingCode() {
-  if (!options_.offer_pairing_codes) return {};
-  return pairing_.Issue(Clock::now());
-}
 
 void ControlServer::ReapWorkers(bool all) {
   std::list<Worker> finished;
@@ -134,7 +125,6 @@ void ControlServer::Serve(std::unique_ptr<TlsConnection> conn) {
       MessageChannel channel(*conn);
       ServerGuards guards;
       guards.limiter = &limiter_;
-      guards.pairing = options_.offer_pairing_codes ? &pairing_ : nullptr;
       TlsConnection* self = conn.get();
       guards.take_over = [this, self] { return TakeOver(self); };
       ServerSession session(delegate_, guards, conn->peer_ip());

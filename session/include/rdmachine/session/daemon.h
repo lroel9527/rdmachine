@@ -50,11 +50,9 @@ struct DaemonOptions {
   // Tests run every agent as themselves.
   bool check_agent_uid = true;
   // What agents may ask of the control server (set by whoever runs it):
-  std::function<std::string()> issue_pairing_code;          // empty if pairing is off
-  std::function<int64_t()> pairing_code_remaining_ms;
   std::function<void()> close_connections;                  // the menu's Disconnect
-  // The console user's agent sent its settings (port, pairing codes).
-  std::function<void(uint16_t port, bool offer_pairing_codes)> settings_changed;
+  // The console user's agent sent its settings (the port).
+  std::function<void(uint16_t port)> settings_changed;
   std::function<std::string()> fingerprint;                 // for the agents' menus
   std::function<uint16_t()> port;
   // An agent starting a session takes a while: building a desktop, and when
@@ -79,7 +77,6 @@ class Daemon : public ServerDelegate {
                                            const SessionOrigin& origin, std::string* error) override;
   void EndSession() override;
   SessionCheck CheckSession(const SessionOrigin& origin) override;
-  std::string PairingAccount() override;
 
   // For status and tests.
   int agent_count();

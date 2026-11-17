@@ -38,52 +38,6 @@ TEST(FailureLimiter, SuccessClears) {
   EXPECT_FALSE(l.RetryAfter("a", T0));
 }
 
-TEST(PairingCodes, IssuesEightDigits) {
-  PairingCodes p;
-  std::string code = p.Issue(T0);
-  ASSERT_EQ(code.size(), 8u);
-  for (char c : code) EXPECT_TRUE(c >= '0' && c <= '9');
-  EXPECT_TRUE(p.active(T0));
-}
-
-TEST(PairingCodes, SingleUseAndTolerantOfGrouping) {
-  PairingCodes p;
-  std::string code = p.Issue(T0);
-  EXPECT_EQ(p.remaining(T0 + 1min), 4min);
-  std::string grouped = code.substr(0, 4) + " - " + code.substr(4);
-  EXPECT_EQ(p.Check(grouped, T0 + 1s), PairingCodes::Result::kOk);
-  EXPECT_EQ(p.remaining(T0 + 2s), Clock::duration::zero());  // used
-  EXPECT_EQ(p.Check(code, T0 + 2s), PairingCodes::Result::kNone);
-}
-
-TEST(PairingCodes, Expires) {
-  PairingCodes p;
-  std::string code = p.Issue(T0);
-  EXPECT_EQ(p.Check(code, T0 + 5min), PairingCodes::Result::kExpired);
-  EXPECT_FALSE(p.active(T0 + 5min));
-  EXPECT_EQ(p.remaining(T0 + 5min), Clock::duration::zero());
-}
-
-TEST(PairingCodes, VoidAfterThreeWrongAttempts) {
-  PairingCodes p;
-  std::string code = p.Issue(T0);
-  std::string wrong = code;
-  wrong[0] = wrong[0] == '9' ? '0' : wrong[0] + 1;
-  EXPECT_EQ(p.Check(wrong, T0), PairingCodes::Result::kWrong);
-  EXPECT_EQ(p.Check("123", T0), PairingCodes::Result::kWrong);
-  EXPECT_EQ(p.Check(wrong, T0), PairingCodes::Result::kWrong);
-  EXPECT_EQ(p.Check(code, T0), PairingCodes::Result::kNone);
-}
-
-TEST(PairingCodes, NewCodeReplacesOld) {
-  PairingCodes p;
-  std::string a = p.Issue(T0);
-  std::string b;
-  do b = p.Issue(T0); while (b == a);
-  EXPECT_EQ(p.Check(a, T0), PairingCodes::Result::kWrong);
-  EXPECT_EQ(p.Check(b, T0), PairingCodes::Result::kOk);
-}
-
 TEST(OneTimeTokens, ConsumedOnce) {
   OneTimeTokens t;
   OneTimeTokens::Token a{}, b{};
