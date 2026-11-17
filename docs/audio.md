@@ -495,7 +495,7 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 | `session/…/live_stats.{h,cpp}` | `audio_kbps` |
 | `session/…/remote_session.{h,cpp}` | `Options::audio`、`audio_null_device`；viewer 的 `audio`；播放器随 viewer 建和拆（`FollowMove` 里也是）；`SetAudioPaused` |
 | `server/main.cpp`、`server_runtime.*`、`mac_app.mm` | 命令行、设置窗口、权限申请和菜单 |
-| `client/main.mm`、`connect_main.cpp` | 菜单、浮窗、输出静音的监听、`--audio` |
+| `client/app_delegate.mm`、`client/remote_window.mm`、`connect_main.cpp` | 菜单、浮窗、输出静音的监听、`--audio` |
 | `packaging/macos/server-Info.plist.in` | `NSAudioCaptureUsageDescription` |
 | `packaging/macos/pkg/…` | 安装检查脚本和 `welcome.html` 里的 14 → 14.2 |
 

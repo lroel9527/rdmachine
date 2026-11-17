@@ -179,7 +179,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 注意：进程只有通过 AppKit 的事件循环才能得知新显示器的模式，所以 macOS 上服务端的主线程总是跑 `NSApplication`（`--headless` 也是，只是不显示任何界面）。
 
-实现：`core/include/rdmachine/desktop.h`（规格、取整、消息）；`session/include/rdmachine/session/virtual_desktop.h`（`VirtualDesktop`，macOS 实现在 `session/src/virtual_desktop_mac.mm`）；服务端在 `MediaHost`（`StartSession` 里建，`DesktopLoop` 处理中途的请求）；Mac 客户端在 `client/main.mm`（`initialDesktop`、`requestDesktop`）；命令行客户端 `rdmachine-connect --desktop=2880x1800@2 --resize-desktop=2048x1536@2`。测试：`core/tests/test_desktop.cpp`、`session/tests/test_media_e2e.cpp`（用记录调用的假桌面）、`session/tests/test_virtual_desktop_mac.mm` 和 `tools/smoke_test.sh`（真的虚拟屏，会让本机屏幕重排几秒，要 `RDM_TEST_VIRTUAL_DESKTOP=1`）。
+实现：`core/include/rdmachine/desktop.h`（规格、取整、消息）；`session/include/rdmachine/session/virtual_desktop.h`（`VirtualDesktop`，macOS 实现在 `session/src/virtual_desktop_mac.mm`）；服务端在 `MediaHost`（`StartSession` 里建，`DesktopLoop` 处理中途的请求）；Mac 客户端在 `client/app_delegate.mm`（`initialDesktop`）和 `client/remote_window.mm`（`requestDesktop`）；命令行客户端 `rdmachine-connect --desktop=2880x1800@2 --resize-desktop=2048x1536@2`。测试：`core/tests/test_desktop.cpp`、`session/tests/test_media_e2e.cpp`（用记录调用的假桌面）、`session/tests/test_virtual_desktop_mac.mm` 和 `tools/smoke_test.sh`（真的虚拟屏，会让本机屏幕重排几秒，要 `RDM_TEST_VIRTUAL_DESKTOP=1`）。
 
 ## 扩展桌面
 
@@ -203,7 +203,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 - Mac 客户端：菜单 View → Data Saver (Sharp Text)，选择会记住，下次连接直接用。命令行客户端：`rdmachine-connect --text-mode`（开始时），`--set-text-mode=on|off`（收到画面后切换）。
 - 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `text_mode` 和这条消息（画面照常，只是不省），旧客户端不发。
 
-实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/main.mm`（`toggleTextMode:`、`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。
+实现：`core/include/rdmachine/picture_mode.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`）；Mac 客户端在 `client/app_delegate.mm`（`toggleTextMode:`）和 `client/remote_window.mm`（`sendPictureMode`）。测试：`core/tests/test_picture_mode.cpp`、`test_messages.cpp`、`session/tests/test_media_e2e.cpp`（`TextModeIsAskedForAtTheStartAndChangedWhileRunning`）。
 
 ## 声音
 
@@ -216,7 +216,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 - **本机静音**：服务端设置“传声音时这台 Mac 自己不出声”（默认开），只在声音真的在往客户端传的会话里，且确认有“系统声音录制”权限之后；客户端暂停期间照旧静音。
 - **守护进程**：`start_session.request` 原样带着 `audio`，`grant` 带回 `audio` / `audio_reason`；守护进程和 agent 之间没有新消息。
 
-实现：`core/include/rdmachine/audio_control.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`、`StatsLoop`、`EndSession`）；客户端在 `RemoteSession`（`Options::audio`、`SetAudioPaused`，播放器跟着 viewer 建和拆）和 `client/main.mm`（`togglePlaySound:`、浮窗的“声音”一项）。测试：`core/tests/test_audio_control.cpp`、`test_messages.cpp`、`test_server_session.cpp`（`SoundOnlyFromRevision3`）、`session/tests/test_media_e2e.cpp`（`MediaE2EAudio.*`）、`test_daemon_e2e.cpp`（`SoundGoesThroughTheDaemonAndFollowsTheMove`）、`tools/smoke_test.sh`。
+实现：`core/include/rdmachine/audio_control.h`（消息）；服务端在 `MediaHost`（`StartSession`、`OnMessage`、`StatsLoop`、`EndSession`）；客户端在 `RemoteSession`（`Options::audio`、`SetAudioPaused`，播放器跟着 viewer 建和拆）和 `client/app_delegate.mm`（`togglePlaySound:`）和 `client/remote_window.mm`（浮窗的“声音”一项）。测试：`core/tests/test_audio_control.cpp`、`test_messages.cpp`、`test_server_session.cpp`（`SoundOnlyFromRevision3`）、`session/tests/test_media_e2e.cpp`（`MediaE2EAudio.*`）、`test_daemon_e2e.cpp`（`SoundGoesThroughTheDaemonAndFollowsTheMove`）、`tools/smoke_test.sh`。
 
 ## 守护进程和 agent
 
