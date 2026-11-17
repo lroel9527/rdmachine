@@ -137,8 +137,28 @@ start_daemon() {
   if daemon_loaded; then
     launchctl kickstart "system/$DAEMON_LABEL" 2>/dev/null || true
   else
-    launchctl bootstrap system "$DAEMON_PLIST"
+    # As for the session's agent below: launchd may still be unloading it.
+    i=0
+    until launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null; do
+      i=$((i + 1))
+      if [ "$i" -ge 20 ]; then
+        launchctl bootstrap system "$DAEMON_PLIST"  # once more, with its error shown
+        break
+      fi
+      sleep 1
+    done
   fi
+}
+
+# Waits (up to $2 seconds, default 15) until user $1 runs no server from the
+# app any more. A server that ends a session removes its desktop first,
+# which takes seconds.
+wait_session_server_gone() {
+  n=$(( ${2:-15} * 5 ))
+  while [ "$n" -gt 0 ] && pgrep -u "$1" -f "$APP/Contents/MacOS/rdmachine-server" >/dev/null 2>&1; do
+    sleep 0.2
+    n=$((n - 1))
+  done
 }
 
 # The current session's server becomes the daemon's agent: a copy started by
@@ -150,8 +170,26 @@ start_session_agent() {
     launchctl kickstart -k "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
   else
     pkill -TERM -u "$uid" -f "$APP/Contents/MacOS/rdmachine-server" 2>/dev/null || true
-    sleep 1
-    launchctl bootstrap "gui/$uid" "$SESSION_PLIST" 2>/dev/null || launchctl kickstart "gui/$uid/$SESSION_LABEL" 2>/dev/null || true
+    wait_session_server_gone "$uid"
+    # launchd refuses to load a service it is still unloading (right after
+    # the installer's bootout): try for a while, and say so if it never
+    # takes (6.0.2 and earlier gave up silently after one try, which left
+    # the session without its server until the next login).
+    # (A service being unloaded still answers "launchctl print", so only a
+    # bootstrap that succeeds counts.)
+    i=0
+    while ! launchctl bootstrap "gui/$uid" "$SESSION_PLIST" 2>/dev/null; do
+      i=$((i + 1))
+      if [ "$i" -ge 20 ]; then
+        # Loaded all along (bootstrap refuses that too): start it. Else say so.
+        if ! launchctl kickstart "gui/$uid/$SESSION_LABEL" 2>/dev/null; then
+          echo "rdmachine-service: the session's server did not start (launchctl bootstrap gui/$uid failed);" \
+               "open RDMachine Server from Applications, or log out and in" >&2
+        fi
+        break
+      fi
+      sleep 1
+    done
   fi
 }
 

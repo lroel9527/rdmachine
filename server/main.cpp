@@ -366,8 +366,20 @@ int main(int argc, char** argv) {
   }
 
   if (!headless && rdm::AnotherInstanceRunning()) {
-    Log("rdmachine-server already runs in this session; leaving it to that one");
-    return 0;  // a clean exit: a LaunchAgent with KeepAlive SuccessfulExit=false does not restart it
+    // Started by launchd while the copy it replaces is still shutting down
+    // (an upgrade: ending a session and removing its desktop takes seconds):
+    // wait for that one to go instead of leaving this session without a
+    // server.
+    const char* svc = std::getenv("XPC_SERVICE_NAME");
+    const bool launched = svc && std::strncmp(svc, "org.rdmachine.", 14) == 0;
+    for (int i = 0; launched && i < 150 && rdm::AnotherInstanceRunning(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (rdm::AnotherInstanceRunning()) {
+      Log("rdmachine-server already runs in this session; leaving it to that one");
+      return 0;  // a clean exit: a LaunchAgent with KeepAlive SuccessfulExit=false does not restart it
+    }
+    Log("the rdmachine-server that ran here before has gone; starting");
   }
   std::string error;
   std::optional<rdm::TlsIdentity> identity;

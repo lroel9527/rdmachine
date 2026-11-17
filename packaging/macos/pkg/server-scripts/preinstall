@@ -20,5 +20,21 @@ pgrep -f 'Contents/MacOS/rdmachine-server' 2>/dev/null | while read -r pid; do
     *) kill -TERM "$pid" 2>/dev/null && echo "$LOG_PREFIX stopped a running server (pid $pid)" ;;
   esac
 done
-sleep 1
+# Wait until they have really gone (up to 20 seconds): a server that was
+# serving a session removes its desktop first, which takes seconds, and the
+# new server must not start next to the old one.
+n=100
+while [ "$n" -gt 0 ]; do
+  left=0
+  for pid in $(pgrep -f 'Contents/MacOS/rdmachine-server' 2>/dev/null); do
+    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+      *--login-window*|"") ;;
+      *) left=1 ;;
+    esac
+  done
+  [ "$left" = 0 ] && break
+  sleep 0.2
+  n=$((n - 1))
+done
+[ "$left" = 0 ] || echo "$LOG_PREFIX a server is still running after 20 seconds"
 exit 0
