@@ -39,3 +39,12 @@ TEST(SessionStats, MissingFieldsKeepDefaultsAndBadInputFails) {
   EXPECT_FALSE(DecodeSessionStats("not json"));
   EXPECT_FALSE(DecodeSessionStats("[]"));
 }
+
+TEST(SessionStats, TrafficTotalReadsInDecimalUnits) {
+  using rdm::FormatTraffic;
+  EXPECT_EQ(FormatTraffic(0), "0 KB");
+  EXPECT_EQ(FormatTraffic(812'400), "812 KB");
+  EXPECT_EQ(FormatTraffic(45'340'000), "45.3 MB");
+  EXPECT_EQ(FormatTraffic(345'600'000), "346 MB");
+  EXPECT_EQ(FormatTraffic(1'274'000'000), "1.27 GB");
+}

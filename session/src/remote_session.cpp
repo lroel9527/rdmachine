@@ -196,6 +196,23 @@ int64_t RemoteSession::BulkQueuedBytes() const {
   return viewer_ ? rda_viewer_bulk_queued_bytes(viewer_) : -1;
 }
 
+namespace {
+uint64_t ReceivedBy(rda_viewer* v) {
+  rda_viewer_stats st{};
+  st.struct_size = sizeof(st);
+  return v && rda_viewer_get_stats(v, &st) == RDA_OK ? st.bytes_received : 0;
+}
+}  // namespace
+
+void RemoteSession::Retire(rda_viewer* v) { retired_bytes_ += ReceivedBy(v); }
+
+uint64_t RemoteSession::BytesReceived() const {
+  std::lock_guard lock(mu_);
+  uint64_t n = retired_bytes_ + ReceivedBy(viewer_);
+  for (rda_viewer* v : extras_) n += ReceivedBy(v);
+  return n;
+}
+
 rda_viewer* RemoteSession::viewer() const {
   std::lock_guard lock(mu_);
   return viewer_;
@@ -289,6 +306,7 @@ bool RemoteSession::FollowMove(const SessionReady& ready) {
     session_ = ready;
   }
   if (old_player) rda_audio_player_destroy(old_player);
+  Retire(old);
   if (old) rda_viewer_destroy(old);  // no callback of it runs after this
   {
     std::lock_guard lock(mu_);
@@ -431,6 +449,7 @@ bool RemoteSession::ConnectExtra(size_t i, rda_viewer_config config, std::string
     old = extras_[i];
     extras_[i] = v;
   }
+  Retire(old);
   if (old) rda_viewer_destroy(old);
   if (options_.log) options_.log("extra display " + std::to_string(i + 2) + " connected");
   return true;
@@ -448,6 +467,7 @@ void RemoteSession::CloseExtras() {
     extras.swap(extras_);
   }
   for (rda_viewer* v : extras) {
+    Retire(v);
     if (v) rda_viewer_destroy(v);  // no callback of it runs after this
   }
 }
@@ -467,6 +487,7 @@ void RemoteSession::Close() {
     player_ = nullptr;
   }
   if (p) rda_audio_player_destroy(p);  // before its viewer
+  Retire(v);
   if (v) rda_viewer_destroy(v);
   if (control_) {
     control_->Close("user_closed");

@@ -301,7 +301,7 @@ nonce：第 0 字节 0xFE（通道号用 0–7，不会撞），第 16–23 字�
 
 ### 6.4 TCP 退回时
 
-第 6 阶段，**不做**（D9，lroel 定：先是“等真的在 TCP 上用到再说”；2026-11-17 定为不做：只在 Tailscale 里用，画面一直走 UDP，见[决定](decisions.md)的“范围收口”。TCP 上没有声音，状态是 `waiting_peer`）。当时设想的做法，留作记录：新的可靠通道 `Channel::kAudio = 7`（`kChannelCount` 变 8；`SecureTransport` 的各个数组跟着变），内容是 `[长度 u16][5.1 的包]` 连着放；`TcpTransport`、`LocalPipe` 报 `CarriesAudioChannel()`，这时也声明 `kCapAudio`。TCP 丢包时会一顿一顿地到，接收端超出上限的旧声音直接跳过（7.2）。旧的 TCP 对端遇到不认识的通道号会断开，所以同样只在协商后才用。
+第 6 阶段，**不做**（D9，lroel 定：先是“等真的在 TCP 上用到再说”；2026-11-17 定为不做：只在 Tailscale 里用，画面一直走 UDP，见[决定](decisions.md)的“范围收口”。rdmachine 6.0.0 起画面的 TCP 备用通道也删掉了，`audio_reason` 不再有 `tcp`；rdaccel 的 `TcpTransport` 仍然不带声音）。当时设想的做法，留作记录：新的可靠通道 `Channel::kAudio = 7`（`kChannelCount` 变 8；`SecureTransport` 的各个数组跟着变），内容是 `[长度 u16][5.1 的包]` 连着放；`TcpTransport`、`LocalPipe` 报 `CarriesAudioChannel()`，这时也声明 `kCapAudio`。TCP 丢包时会一顿一顿地到，接收端超出上限的旧声音直接跳过（7.2）。旧的 TCP 对端遇到不认识的通道号会断开，所以同样只在协商后才用。
 
 ## 7. 接收端（rdaccel，`core/audio/`）
 
@@ -706,7 +706,7 @@ RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 | 慢链路的降码率会卡在 32 kbps：只有声音在走时，带宽估计量到的就是声音自己（线上约 200 kbps），预算是负的，而且永远升不回去 | 只在路径确实满了（瓶颈有排队、或丢包 ≥ 1%）时降；不满就每 5 秒升一档，不管估计 | `AudioGate.TheSoundAloneDoesNotKeepItselfDown` |
 | 声音段中间暂停时没有 END：接收端补 5 帧、记一次欠载，目标上限放宽到 200 ms 30 秒 | 暂停时这一帧作为 END 发出 | `AudioJitter.APauseInTheMiddleOfASoundEndsItCleanly` |
 | 菜单里后来打开“播放远程电脑的声音”后浮窗说 `Audio: off (older server)` | 浮窗的原因由 `AudioOffLine()`（`audio_control.h`）给出：只有修订低于 3 才是 older server；这次没要过声音的是 `reconnect to hear sound` | `AudioControl.TheOverlaySaysWhyThereIsNoSound` |
-| 画面走 TCP 时会话仍然说有声音，浮窗一直 `Audio: starting` | `session_ready.audio = false`，`audio_reason = "tcp"`，rdaccel 的声音不开 | `MediaE2EAudio.NoSoundOverTcp` |
+| （只到 5.0.0；6.0.0 起画面不走 TCP）画面走 TCP 时会话仍然说有声音，浮窗一直 `Audio: starting` | `session_ready.audio = false`，`audio_reason = "tcp"`，rdaccel 的声音不开 | `MediaE2EAudio.NoSoundOverTcp` |
 | 加密层收 1100 字节的数据报，封好 1124，下层拒收 | 加密层最多 1076（`Transport::MaxDatagram()`）；声音包上限改成 1076（实际最多 1019） | `SecureTransport.DatagramsRoundTrip` |
 | 同一条连接上停了再开声音时 `audio_dropped_stale` 重复计数 | 开始时记下传输当时的计数，只算之后的 | — （同一连接上停开再计数的情况没有单独的测试） |
 | `Read` 一次要 1 万帧以上时超出重采样器的缓冲，多出的被跳过 | 分成 2048 帧一块 | `AudioJitter.ALargeReadIsWhole` |

@@ -312,6 +312,9 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   EXPECT_TRUE(WaitFor([&] { return frames.count > 0; }));
   EXPECT_EQ(frames.width, s->session().displays[0].width);
   EXPECT_TRUE(media_->session_running());
+  // The overlay's traffic total: what arrived, still known after Close().
+  const uint64_t received = s->BytesReceived();
+  EXPECT_GT(received, 0u);
 
   // What the menu bar app shows.
   MediaHostStatus st = media_->Status();
@@ -331,6 +334,7 @@ TEST_F(MediaE2E, PictureArrivesOverUdp) {
   EXPECT_EQ(frames.stats_width, s->session().displays[0].width);
 
   s->Close();
+  EXPECT_GE(s->BytesReceived(), received);
   EXPECT_TRUE(WaitFor([&] { return !media_->session_running(); }));
   EXPECT_FALSE(media_->Status().running);
 }

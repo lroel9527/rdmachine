@@ -2,7 +2,7 @@
 
 开源的远程桌面应用，体验对标 NoMachine。画面采集、编码和弱网传输由 [rdaccel](https://github.com/lroel9527/rdaccel) 提供，rdmachine 负责其上的产品层：服务端、登录认证、会话管理和客户端。
 
-第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 14.2+；12、13 和 14.2 以前的 14 不支持，pkg 会拒绝安装），当前版本 5.0.0。rdmachine 按自用设计：登录过就可信，尽量少打扰。
+第一阶段只支持 **Mac ↔ Mac**（Intel 和 Apple Silicon，macOS 14.2+；12、13 和 14.2 以前的 14 不支持，pkg 会拒绝安装），当前版本 6.0.0。rdmachine 按自用设计：登录过就可信，尽量少打扰。
 
 ## 功能
 
@@ -15,9 +15,10 @@
 - **声音**：被控 Mac 放的声音在客户端播放，被控 Mac 自己默认不出声（只在声音真的在传的时候）；安静时一个包都不发，客户端静音时也不发（显示 → 播放远程电脑的声音；服务端设置里可以关，[设计](docs/audio.md)）。第一次用时被控 Mac 要允许“系统声音录制”。
 - **中文输入**：客户端切换输入法，服务端跟着切换。
 - **省流量**：文字画面的流量降到平时的 1/3 到 1/7，体验不变。
-- **弱网**：UDP 传画面，不通时自动改走 TCP；心跳 2 秒，服务端没了 12 秒内就知道。
+- **弱网**：画面走 UDP，丢包不卡键鼠和声音，码率跟着网络调整；心跳 2 秒，服务端没了 12 秒内就知道。
+- **只观看**：显示 → 只观看（不控制），或按 ⌃⌥⌘O：只看画面，键盘鼠标不发过去。
 
-定位是“功能和 macOS 屏幕共享一致，但省流量”，只在 Tailscale 组好的局域网里用；决定不做的（HDR 等高画质、隐私屏、拖放文件、TCP 上的声音等）见[决定](docs/decisions.md)的“范围收口”。新旧版本可以互连（控制协议的修订按两边较低的用，见[协议](docs/protocol.md)），新功能要两边都升级才有。
+定位是“功能和 macOS 屏幕共享一致，但省流量”，只在 Tailscale 组好的局域网里用；决定不做的（HDR 等高画质、隐私屏、拖放文件等）和 6.0.0 删掉的（画面的 TCP 备用通道、配对码、H.264、Linux 支持）见[决定](docs/decisions.md)的“范围收口”。新旧版本可以互连（控制协议的修订按两边较低的用，见[协议](docs/protocol.md)），新功能要两边都升级才有。
 
 ## 安装
 
@@ -42,16 +43,16 @@ sudo installer -pkg RDMachine-版本号.pkg -target /
 
 菜单栏里的显示器图标（没有 Dock 图标），点开可以：
 
-- 看状态：监听的端口、谁从哪个地址连着、走 UDP 还是 TCP、连了多久，以及“断开当前连接”；
-- 生成配对码（自动复制，5 分钟内有效，用一次就失效）、复制本机指纹；
+- 看状态：监听的端口、谁从哪个地址连着、连了多久，以及“断开当前连接”；
+- 复制本机指纹；
 - 看屏幕录制和辅助功能权限，没允许的话点一下打开对应的系统设置；
-- “设置…”：端口、是否允许配对码、只看不控、剪贴板方向、帧率和码率上限、视频编码（自动 / HEVC / H.264：自动时用 HEVC，这台 Mac 的硬件 HEVC 编不快时才用 H.264；H.264 要两边都是 4.2.0 或更新）。保存在 `~/Library/Application Support/rdmachine/server-settings.json`；改了端口等设置后服务重新监听，正在进行的连接会断开。
+- “设置…”：端口、只看不控、剪贴板方向、帧率和码率上限、声音。保存在 `~/Library/Application Support/rdmachine/server-settings.json`；改了端口等设置后服务重新监听，正在进行的连接会断开。
 
 ### 客户端
 
-客户端界面是中文。主窗口是连过的电脑列表（最近的在上面），每台显示状态：已连接（时长、UDP/TCP、延迟、分辨率）、正在重连、在线或离线（每 15 秒试一下那台电脑的控制端口）、是否已保存密码。
+客户端界面是中文。主窗口是连过的电脑列表（最近的在上面），每台显示状态：已连接（时长、延迟、分辨率）、正在重连、在线或离线（每 15 秒试一下那台电脑的控制端口）、是否已保存密码。
 
-- **连接**：“新建连接…”填地址，用被控 Mac 上账号的密码或配对码登录。第一次连接会显示服务端指纹，和服务端菜单里的核对一致后再信任；服务端重装、指纹变了时会再问一次。
+- **连接**：“新建连接…”填地址，用被控 Mac 上账号的密码登录。第一次连接会显示服务端指纹，和服务端菜单里的核对一致后再信任；服务端重装、指纹变了时会再问一次。
 - **之后**：双击列表里的电脑就用保存的密码直接连；打开客户端会自动连上次那台。右键可以编辑地址或账号、忘记密码、从列表删除。被控 Mac 改了密码时，客户端会请你输一次新的。
 - **别名和分组**：右键“编辑…”可以给电脑起别名（列表里显示别名，鼠标停在名字上能看到服务端自己的名字）、放进分组。列表默认不分组；勾选底部的“按分组显示”（或菜单“显示 → 按分组显示电脑”）才按分组排列，分组按名字排，“未分组”在最后。
 - **多台**：已经连着时再点程序坞图标（或再打开一次客户端）会显示列表，选另一台开一个新窗口，选已连着的那台把它的窗口调到前面。关掉远程窗口、按住 ⌥ 打开客户端、或者菜单里选“连接到其他电脑…”都回到列表。
@@ -78,7 +79,7 @@ View → Data Saver (Sharp Text)。静止的和正在打字的文字用更紧凑
 
 ### 统计浮窗
 
-远程窗口右上角的半透明小浮窗（View → Statistics）显示连接时长、UDP/TCP、帧率、延迟（RTT）、丢包，以及“操作到画面”的延迟（画面静止时按键、点击或滚动，到下一帧到达的时间，最接近手感）；还可以勾选码率、带宽、分辨率、编码器、输入法，背景透明度可选。鼠标点击会穿过它，落到远程画面上。
+远程窗口右上角的半透明小浮窗（View → Statistics）显示连接时长、帧率、延迟（RTT）、丢包、流量累计（这个窗口打开以来收到的画面和声音，重连也算；不含包头和重传，实际流量略多），以及“操作到画面”的延迟（画面静止时按键、点击或滚动，到下一帧到达的时间，最接近手感）；还可以勾选码率、带宽、分辨率、编码器、输入法，背景透明度可选。鼠标点击会穿过它，落到远程画面上。
 
 ## 服务、登录窗口和锁屏
 
@@ -90,7 +91,7 @@ View → Data Saver (Sharp Text)。静止的和正在打字的文字用更紧凑
 
 行为：
 
-- **锁屏**：用账号密码连接时，服务端在画面连上后替你把密码填进锁屏；用配对码连接时在远程画面里自己输。
+- **锁屏**：服务端在画面连上后替你把密码填进锁屏。
 - **登录窗口**：用这台 Mac 上任一账号的密码连接，服务端替你填进登录窗口并登录，画面随后换成登录后的桌面（同一条连接）。在远程退出登录，画面回到登录窗口。登录窗口不提供配对码。
 - 有人登录时只能用那个账号连接；连接期间被控 Mac 上换了另一个人登录，会话结束。
 - 开着 FileVault 时，重启后停在开机解锁界面，这时还连不上。
@@ -100,7 +101,7 @@ View → Data Saver (Sharp Text)。静止的和正在打字的文字用更紧凑
 | 命令 | 作用 |
 | --- | --- |
 | `rdmachine-service status` | 装了没有、谁在运行、监听什么端口 |
-| `sudo rdmachine-service install` | 装成服务（手动打开或从 dmg 装的服务端） |
+| `sudo rdmachine-service install` | 装成服务（不是用 pkg 装的服务端） |
 | `sudo rdmachine-service start` / `stop` / `restart` | 启动、停止、重启 |
 | `sudo rdmachine-service startmode manual` / `automatic` | 不自动启动 / 自动启动 |
 | `sudo rdmachine-service uninstall` | 卸载（之后菜单栏应用照旧独立运行） |
@@ -113,15 +114,14 @@ View → Data Saver (Sharp Text)。静止的和正在打字的文字用更紧凑
 | --- | --- |
 | TCP 4100 | 控制连接 |
 | UDP 4100 | 画面 |
-| TCP 4101 | UDP 不通时的画面 |
 
 被控 Mac 有多个出口（Wi-Fi 和网线、VPN、Tailscale 等）时，画面从客户端连上的那个地址发出，客户端也只往控制连接连到的那个地址发（3.2.1 起）。
 
 ## 命令行
 
-- 在终端里跑服务端、看日志（菜单栏图标照样有）：`./dist/rdmachine-server.sh --pairing-code`，打印本机指纹和一个 8 位配对码，按回车换新的，Ctrl-C 停止。`--port`、`--view-only`、`--fps` 等参数只对这一次运行生效，优先于保存的设置；`--headless` 不显示菜单栏图标。脚本通过 `open` 启动应用，权限记在 RDMachine Server 名下；直接跑 `./build/bin/rdmachine-server` 时权限要授给“终端”。
-- 带地址启动客户端：`RDMachine.app/Contents/MacOS/rdmachine-client 服务端地址[:端口]` 只填好地址，加 `--code=配对码` 直接连接（密码不从命令行传）。
-- 不开窗口测试连接：`./dist/rdmachine-connect 服务端地址 --code=配对码`（或 `--user=账号`，密码从终端输入）。
+- 在终端里跑服务端、看日志（菜单栏图标照样有）：`./dist/rdmachine-server.sh`，打印本机指纹，Ctrl-C 停止。`--port`、`--view-only`、`--fps` 等参数只对这一次运行生效，优先于保存的设置；`--headless` 不显示菜单栏图标。脚本通过 `open` 启动应用，权限记在 RDMachine Server 名下；直接跑 `./build/bin/rdmachine-server` 时权限要授给“终端”。
+- 带地址启动客户端：`RDMachine.app/Contents/MacOS/rdmachine-client 服务端地址[:端口]` 只填好地址（密码不从命令行传）。
+- 不开窗口测试连接：`./dist/rdmachine-connect 服务端地址 --user=账号`，密码从终端输入。
 
 ## 从源码构建
 
@@ -133,15 +133,7 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-除了 Mac 客户端窗口，其余部分也能在 Linux 上构建和测试。需要 FFmpeg、X11 和 PAM 的开发包：
-
-```bash
-sudo apt-get install ninja-build pkg-config xvfb libavcodec-dev libavutil-dev libswscale-dev libx265-dev \
-  libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev libpam0g-dev
-cmake -S . -B build -G Ninja && cmake --build build
-xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏幕
-# 只构建协议核心：加 -DRDM_WITH_RDACCEL=OFF
-```
+只能在 macOS 上构建。
 
 ## 打包和签名（macOS）
 
@@ -159,7 +151,7 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
 2. **编译并打包**（通用二进制）：
 
    ```bash
-   packaging/macos/package.sh --build --pkg --zip --dmg
+   packaging/macos/package.sh --build --pkg
    ```
 
    已经编译过的话去掉 `--build`，默认从 `build/bin` 取二进制（`--build-dir` 可改）。`--identity -` 是临时签名，只适合一次性试试。产物在 `dist/`：
@@ -167,14 +159,10 @@ xvfb-run -a ctest --test-dir build      # 端到端测试会采集 Xvfb 的屏�
    | 文件 | 用途 |
    | --- | --- |
    | `RDMachine-版本号.pkg` | **安装程序**（推荐，发布只附这个）：可选服务端、客户端；服务端装完就作为服务运行 |
-   | `RDMachine-版本号.dmg` | 安装盘：把应用拖进“应用程序”；服务端这样装只能独立运行，要装成服务再跑 `rdmachine-service install` |
-   | `rdmachine-版本号-macos.zip` | 下面这些文件的压缩包 |
    | `RDMachine.app` | 客户端 |
    | `RDMachine Server.app` | 服务端 |
    | `rdmachine-server.sh` | 在终端里启动服务端 |
    | `rdmachine-connect` | 命令行测试客户端 |
-
-   用 dmg 或 zip 装时，自签应用第一次打开同样会被拦下，处理方法和 pkg 相同，或者 `xattr -dr com.apple.quarantine RDMachine*.app` 去掉下载标记。
 
 ## 文档
 

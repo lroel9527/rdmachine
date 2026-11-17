@@ -1,8 +1,25 @@
 #include "rdmachine/session_stats.h"
 
+#include <cstdio>
+
 #include <nlohmann/json.hpp>
 
 namespace rdm {
+
+std::string FormatTraffic(uint64_t bytes) {
+  char buf[32];
+  const double b = static_cast<double>(bytes);
+  if (bytes < 1'000'000) {
+    std::snprintf(buf, sizeof buf, "%.0f KB", b / 1e3);
+  } else if (bytes < 100'000'000) {
+    std::snprintf(buf, sizeof buf, "%.1f MB", b / 1e6);
+  } else if (bytes < 1'000'000'000) {
+    std::snprintf(buf, sizeof buf, "%.0f MB", b / 1e6);
+  } else {
+    std::snprintf(buf, sizeof buf, "%.2f GB", b / 1e9);
+  }
+  return buf;
+}
 
 std::string EncodeSessionStats(const SessionStatsReport& r) {
   return nlohmann::json{{"transport", "udp"},  // read by clients before 6.0

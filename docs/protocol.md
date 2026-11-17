@@ -3,7 +3,7 @@
 rdmachine 的客户端和服务端之间有两条连接：
 
 - **控制连接**：TCP + TLS 1.3，默认端口 4100。登录、选择显示器、下发会话密钥、会话控制都走这里，本文描述的就是它。
-- **画面连接**：rdaccel 自己的 UDP 传输（默认同为 4100 端口），画面、光标、键鼠和剪贴板走这里。UDP 不通时退回 rdaccel 的 TCP 传输，端口是控制端口加 1（默认 4101），因为 TCP 4100 已被控制连接占用。
+- **画面连接**：rdaccel 自己的 UDP 传输（默认同为 4100 端口），画面、光标、键鼠、声音和剪贴板走这里。6.0.0 起只有 UDP：画面的 TCP 备用通道（控制端口加 1）删掉了，只在 Tailscale 里用时 UDP 总是通的（见[决定](decisions.md)的“范围收口”）。
 
 控制连接先完成登录，再为这次会话生成一把新的 32 字节密钥和一个一次性令牌，经 TLS 交给客户端，客户端拿它们去建 rdaccel 连接。这样 rdaccel 每次都拿到新密钥，密码不会出现在 UDP 上，也不需要改 rdaccel（rdaccel 本身只有预共享密钥，没有前向保密和服务器身份，见 [rdaccel 能力评估](research/rdaccel-assessment.md)）。
 
@@ -19,7 +19,7 @@ rdmachine 的客户端和服务端之间有两条连接：
   │ ◀── server_hello {protocol, server_name, auth_methods} ─ │
   │ ── auth {method:"password", username, password} ──────▶ │  服务端用系统账号校验（PAM）
   │ ◀── auth_result {ok:true} ───────────────────────────── │
-  │ ── session_request {desktop, transport} ──────────────▶ │  服务端按 desktop 建虚拟显示器，生成 key + auth_token，
+  │ ── session_request {desktop} ─────────────────────────▶ │  服务端按 desktop 建虚拟显示器，生成 key + auth_token，
   │ ◀── session_ready {port, key, auth_token, desktop} ──── │  用 key 开 rdaccel Host 等待连接
   │                                                          │
   │ ══ rdaccel UDP：rda_udp_connect(host, port)，key 加密，auth_token 进 on_auth ══▶ │
@@ -87,19 +87,17 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `revision` | 整数，可选 | 服务端的修订；两边按较小的那个用 |
 | `server_name` | 字符串 | 服务端机器名 |
 | `server_version` | 字符串 | rdmachine 版本 |
-| `auth_methods` | 字符串数组 | 服务端接受的登录方式，按推荐顺序：`password`、`pairing_code`。客户端忽略不认识的方式 |
+| `auth_methods` | 字符串数组 | 固定是 `["password"]`。6.0.0 起只有密码一种登录方式（配对码删掉了）；这一项留着是因为 6.0 以前的客户端要读它，新客户端不读 |
 
 ### auth（客户端 → 服务端）
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `method` | 字符串 | `password` 或 `pairing_code` |
-| `username` / `password` | 字符串 | `password` 方式：被控 Mac 上的账号和密码 |
-| `code` | 字符串 | `pairing_code` 方式：被控端屏幕上显示的配对码 |
+| `method` | 字符串 | 固定是 `password`；别的值（6.0 以前的客户端可能发 `pairing_code`）服务端回 `bad_message` |
+| `username` / `password` | 字符串 | 被控 Mac 上的账号和密码 |
 
-- **账号密码**：服务端用系统认证（macOS 上走 PAM），M0 只允许登录当前已登录图形会话的那个用户（D5：M0 只控制已登录用户的物理桌面）。
-- **配对码**：服务端按需生成，在被控 Mac 上显示；8 位数字，5 分钟过期，用一次就作废，输错 3 次作废。只在 TLS 指纹已确认的连接上使用。配对码目前没有用 PAKE，首次连接时如果用户不核对指纹，存在被中间人转发的可能；以后换成 SPAKE2 一类的标准方案。
-- 服务端不记录密码和配对码，日志里只写方式、用户名和结果。
+- **账号密码**：服务端用系统认证（PAM）。有人登录时只接受那个用户的密码，在登录窗口时接受这台 Mac 上任何账号的密码（见下文“登录规则”）。
+- 服务端不记录密码，日志里只写用户名和结果。
 
 ### auth_result（服务端 → 客户端）
 
@@ -118,7 +116,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `display_index` | 整数 ≥ 0 | 0 | 采集哪块显示器，0 是主显示器（同 rdaccel 的 `display_index`） |
-| `transport` | 字符串 | `udp` | `udp` 或 `tcp`。客户端 UDP 建连超时后，可以在同一条控制连接上用 `tcp` 再请求一次：服务端先结束正在进行的会话，再按新请求开始（新的密钥和令牌） |
+| `transport` | 字符串 | `udp` | 6.0.0 起客户端不发；发了也只接受 `udp`（6.0 以前的客户端在 UDP 建连超时后会用 `tcp` 再请求一次，服务端回 `bad_message`） |
 | `view_only` | 布尔 | false | 只看不控：服务端丢弃这个会话的键鼠事件 |
 | `text_mode` | 布尔 | false | 以文字模式开始会话，见下文“文字模式” |
 | `desktop` | 对象 | 无 | 客户端要的桌面：`width`、`height`（像素，≥ 1）、`scale`（每点像素数，可省略，默认 1）。服务端按它建虚拟显示器并共享那块屏，这时 `display_index` 不起作用。见下文“请求桌面” |
@@ -129,7 +127,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `transport` | 字符串 | 实际使用的 rdaccel 传输：`udp` 或 `tcp` |
+| `transport` | 字符串 | 固定是 `udp`；留着是因为 6.0 以前的客户端要读它，新客户端不读 |
 | `port` | 整数 1–65535 | rdaccel 监听的端口 |
 | `key` | base64，32 字节 | 本次会话的 rdaccel 密钥，每次会话重新随机生成 |
 | `auth_token` | base64，32 字节 | 一次性令牌，客户端放进 rdaccel viewer 的 `auth_token`；服务端在 `on_auth` 里用常数时间比较核对，用一次就作废，30 秒内没用也作废 |
@@ -138,9 +136,9 @@ rdmachine 的客户端和服务端之间有两条连接：
 | `login_window` | 布尔，可选 | `true`：画面是被控 Mac 的登录窗口（还没有人登录）。用户在那里登录后会话迁移到他的桌面，见下文“会话迁移”。没有这个字段等于 `false` |
 | `extra_displays` | 数组，可选 | 为 `extra_desktops` 建好的显示器：`port`、`desktop`、`x`、`y`（修订 2）。密钥和令牌由会话的派生，见“扩展桌面” |
 | `audio` | 布尔，可选 | `true`：这次会话有声音（修订 3），客户端给主画面的 viewer 打开声音。没有这个字段等于 `false` |
-| `audio_reason` | 字符串，可选 | `audio` 不为 `true` 而客户端要了声音时说明原因：`disabled`（服务端设置关了）、`login_window`（登录窗口没有声音）、`tcp`（画面走 TCP，TCP 上没有声音）、`unsupported`（系统或构建不支持）。没有权限不在这里说（会话中途可能授权），在会话统计里 |
+| `audio_reason` | 字符串，可选 | `audio` 不为 `true` 而客户端要了声音时说明原因：`disabled`（服务端设置关了）、`login_window`（登录窗口没有声音）、`unsupported`（系统或构建不支持）。没有权限不在这里说（会话中途可能授权），在会话统计里 |
 
-客户端收到后立刻用 `rda_udp_connect(host, port)`（或 `rda_tcp_connect`）加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
+客户端收到后立刻用 `rda_udp_connect(host, port)`加上 `key`、`auth_token` 创建 rdaccel viewer。`key` 和 `auth_token` 只在内存里保存，用完清零。
 
 ### ping / pong（双向）
 
@@ -174,7 +172,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 - **会话开始时**：`session_request.desktop`。建好后 `session_ready.desktop` 回实际规格，画面流的尺寸就是它的像素数。
 - **窗口变化时**：客户端发 rdaccel 应用消息，类型 `0x10003`（`RDA_MSG_USER_FIRST + 3`，`kDesktopRequestMessageType`），客户端到服务端，内容是 JSON `{"width":2048,"height":1536,"scale":2}`。服务端停采集、原地改虚拟屏的模式（显示器不变）、重新开始采集，客户端收到新尺寸的画面流（rdaccel 的 `on_stream_info`）；没有单独的应答。连续几条只处理最新的一条；取整后和现在一样的不处理；会话开始时没建桌面的，这条消息忽略。Mac 客户端在拖动结束、进出全屏、窗口换到缩放不同的屏幕之后 0.25 秒发送，拖动过程中不发。
 - **结束时**：会话结束（包括服务端进程退出或崩溃：虚拟屏随进程消失）后，真实显示器取消镜像，回到原来的位置和分辨率。
-- **建不了时**：系统没有 `CGVirtualDisplay`、创建失败、Linux 服务端（暂时没有实现）：服务端照常开始会话，共享 `display_index` 指的那块真实显示器，`session_ready` 里没有 `desktop`，客户端按比例缩放显示（窗口保持服务端屏幕的宽高比）。不回错误。
+- **建不了时**：系统没有 `CGVirtualDisplay`、创建失败：服务端照常开始会话，共享 `display_index` 指的那块真实显示器，`session_ready` 里没有 `desktop`，客户端按比例缩放显示（窗口保持服务端屏幕的宽高比）。不回错误。
 - **键鼠**：坐标仍然是画面流里的像素。rdaccel 的注入器每次换算时读显示器当前的模式，桌面改过大小之后不用重建。
 - **缩放模式的客户端屏幕**（MacBook Air 等默认“看起来像 1470 × 956”、面板却不是它的 2 倍）：客户端按窗口的后备像素（点数 × 2）请求，画面和窗口的后备存储一个像素对一个像素，再由 macOS 把整屏缩到面板上，和本机任何窗口的显示方式一样。按面板的物理像素请求反而更糊：画面要先放大到后备存储、再被系统缩小，经过两次重采样。窗口模式下应用绕不开系统的这次缩放。
 - 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `desktop`，旧客户端不发。
@@ -228,7 +226,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 - **登录窗口 agent**（`--login-window`，登录窗口会话里的 LaunchAgent，root）：没人登录时的画面。
 - **用户 agent**（菜单栏应用，用户会话里的 LaunchAgent）：那个用户的桌面；守护进程的套接字存在时自动成为 agent，否则像 3.0 之前那样自己监听（独立模式）。
 
-agent 负责画面：rdaccel 的采集、编码、注入和虚拟屏，画面的 UDP 4100 / TCP 4101 由正在服务的那个 agent 自己监听（同一时刻只有一个）。守护进程和 agent 之间是本机的 Unix 套接字 `/var/run/rdmachine/agent.sock`，帧格式同控制协议（4 字节长度 + JSON），不加密；守护进程只接受代码签名和自己相同的程序（macOS 上用对方的 audit token 核对指定要求），登录窗口 agent 必须是 root，用户 agent 是那个用户。消息（`core/include/rdmachine/agent_link.h`）：
+agent 负责画面：rdaccel 的采集、编码、注入和虚拟屏，画面的 UDP 4100 由正在服务的那个 agent 自己监听（同一时刻只有一个）。守护进程和 agent 之间是本机的 Unix 套接字 `/var/run/rdmachine/agent.sock`，帧格式同控制协议（4 字节长度 + JSON），不加密；守护进程只接受代码签名和自己相同的程序（用对方的 audit token 核对指定要求），登录窗口 agent 必须是 root，用户 agent 是那个用户。消息（`core/include/rdmachine/agent_link.h`）：
 
 | 方向 | 消息 | 内容 |
 | --- | --- | --- |
@@ -237,10 +235,9 @@ agent 负责画面：rdaccel 的采集、编码、注入和虚拟屏，画面的
 | 守护进程 → agent | `start_session` | `id`、`request`（同 `session_request`）、`secrets`（密钥和令牌）、`origin`、可选 `login`（账号密码，见下文） |
 | agent → 守护进程 | `session_started` / `session_failed` | `reply_to`；`grant`（同 `session_ready`，不含密钥）或 `error` |
 | 守护进程 → agent | `end_session` | `id`；agent 停掉画面、放开端口后回 `session_ended` |
-| agent → 守护进程 | `issue_pairing_code` / `pairing_code_status` | 菜单栏要配对码；守护进程回 `pairing_code`（`code`、`remaining_ms`）。只接受当前控制台用户的 agent |
-| agent → 守护进程 | `disconnect` / `settings` | 菜单里的“断开当前连接”；端口和是否允许配对码改了（守护进程换端口重新监听）。同上，只接受控制台用户的 agent |
+| agent → 守护进程 | `disconnect` / `settings` | 菜单里的“断开当前连接”；端口改了（守护进程换端口重新监听）。只接受当前控制台用户的 agent |
 
-**登录规则**：有人登录时只接受那个用户的密码（`not_console_user`）；在登录窗口时接受这台 Mac 上任何账号的密码。配对码只由当前控制台用户的菜单栏发出，登录窗口没有。守护进程找不到该接手的 agent 时（登录窗口或用户会话的 agent 还没起来）`session_request` 回 `error`（`unavailable`）。
+**登录规则**：有人登录时只接受那个用户的密码（`not_console_user`）；在登录窗口时接受这台 Mac 上任何账号的密码。守护进程找不到该接手的 agent 时（登录窗口或用户会话的 agent 还没起来）`session_request` 回 `error`（`unavailable`）。
 
 **替用户填写密码**：用账号密码登录后的第一个会话，如果在登录窗口或者用户会话正锁着屏，agent 等画面连上后轻按 Shift 唤醒显示器，1.5 秒后把密码填进去并回车（登录窗口设成“姓名和密码”时先填账号和 Tab）。ASCII 按美式键盘的物理键发，其他字符按字符发。密码只在守护进程和 agent 的内存里留到这次会话开始，填完清零，不写盘、不进日志；配对码登录不填。会话迁移到登录窗口（用户退出登录）时不填，免得刚退出又被登录回去。
 
@@ -249,7 +246,7 @@ agent 负责画面：rdaccel 的采集、编码、注入和虚拟屏，画面的
 控制台换了主人时，守护进程在控制连接上把会话搬过去，客户端不用重新登录：
 
 1. 守护进程每 250 毫秒看一次控制台（`/dev/console` 的主人）和正在服务的 agent。主人变了，或者那个 agent 没了（崩溃后 launchd 重启它）：
-   - 新主人是登录窗口，或者就是这次登录的账号（密码登录是用户名；配对码登录是用码时的控制台用户）：发 `session_moving`，下一轮结束旧 agent 的画面（等它放开端口），然后每秒尝试在新 agent 上开始，最多 60 秒；成功就发新的 `session_ready`，失败发 `error`。
+   - 新主人是登录窗口，或者就是这次登录的账号：发 `session_moving`，下一轮结束旧 agent 的画面（等它放开端口），然后每秒尝试在新 agent 上开始，最多 60 秒；成功就发新的 `session_ready`，失败发 `error`。
    - 新主人是别人：发 `bye`（`console_changed`），结束会话。
 2. 客户端收到 `session_moving` 后不把画面断开当成失败，等新的 `session_ready`（最多 75 秒），建新的 viewer 换上，再把窗口大小（请求桌面）、键盘语言、文字模式重新告诉服务端。新的 UDP 不通时在同一条连接上改要 TCP。
 3. 画面断开和原因（`bye`、`session_moving`）可能前后脚到：客户端在画面断开后等 1.5 秒，没有收到原因才算 `media_lost`。
@@ -299,7 +296,7 @@ rdaccel 发送时应用消息排在画面前面：一张大图一次全塞给它
 
 另外，没有 ack 的数据不超过“当前速度 × (最短 ack 时间 + 200 毫秒)”，至少 256 KiB。局域网上几秒内能到几百 Mbps；慢的链路上停在链路速度附近，画面优先。
 
-实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、宣布、承诺、按请求发送和接收，平台无关，Linux 上用内存剪贴板测试；`ClipboardPromise` 是放在剪贴板上的承诺）、`clipboard_wire.h`（消息）、`transfer_pacer.h`（节奏）；macOS 剪贴板（包括延迟提供数据的 `RDMPromiseProvider`）在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板；`MacPromiseTest` 用 AppKit 读承诺，和别的应用一样），`session/tests/test_media_e2e.cpp`（两端真实连接）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
+实现：`core/include/rdmachine/clipboard_sync.h`（`ClipboardSync`：轮询、宣布、承诺、按请求发送和接收，不依赖系统，用内存剪贴板测试；`ClipboardPromise` 是放在剪贴板上的承诺）、`clipboard_wire.h`（消息）、`transfer_pacer.h`（节奏）；macOS 剪贴板（包括延迟提供数据的 `RDMPromiseProvider`）在 `session/src/system_clipboard_mac.mm`；服务端由 `MediaHost`、客户端由 `RemoteSession` 接上 rdaccel。测试：`core/tests/test_clipboard_*.cpp`、`test_transfer_pacer.cpp`，`session/tests/test_system_clipboard_mac.mm`（用私有的 pasteboard，不碰通用剪贴板；`MacPromiseTest` 用 AppKit 读承诺，和别的应用一样），`session/tests/test_media_e2e.cpp`（两端真实连接）。Linux 暂时没有剪贴板后端（第一阶段只做 Mac）。
 
 ### 文件（剪贴板版本 4、5）
 
@@ -349,32 +346,30 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
  "audio":"on","audio_kbps":162.5}
 ```
 
-速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示没有测量（TCP）。丢包是真正丢失的包：rdaccel 判定丢失并重传、之后又没有收到原包确认的（`packets_lost - packets_spurious`，rdaccel 1.3），只是晚到的不算。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。
+速率由 `LiveStatsSampler` 从 rdaccel 的累计计数算出；`rtt_ms`、`bandwidth_kbps` 为 0、丢包为负数表示还没有测量。丢包是真正丢失的包：rdaccel 判定丢失并重传、之后又没有收到原包确认的（`packets_lost - packets_spurious`，rdaccel 1.3），只是晚到的不算。浮窗显示哪些项、背景透明度由客户端菜单 View → Statistics 决定，服务端总是发全部字段。`transport` 固定是 `udp`（6.0 以前的客户端要显示它）。浮窗的“流量累计”不在报告里：客户端自己数收到的字节（`RemoteSession::BytesReceived`，rdaccel 的载荷，不含包头和重传）。
 
 修订 3 加了声音的两项（旧客户端忽略）：`audio` 是声音的状态：`off`（这次会话没有声音）、`starting`、`on`（正在传）、`silent`（在传，但被控 Mac 现在没声音，一个包都不发）、`paused`（客户端暂停了）、`no_permission`（服务端没有“系统声音录制”权限）、`failed`（采集失败，rdaccel 每 2 秒再试）；`audio_kbps` 是最近一秒声音的码率，和 `bitrate_kbps` 同一个口径（也算在 `bitrate_kbps` 里）。Mac 客户端浮窗的“声音”一项（默认不显示）：`Audio: 96 kbps · buffer 32 ms · lost 0.1%`、`Audio: silent`、`Audio: paused`、`Audio: off (server setting)`、`Audio: off (server needs the System Audio Recording permission)`、`Audio: off (login window)`、`Audio: off (over TCP there is no sound)`、`Audio: off (reconnect to hear sound)`（这次连接开始时菜单里关着声音，后来打开了）、`Audio: off (older server)`（只在协商出的修订低于 3 时）；码率来自服务端，缓冲和丢失来自本机的 `rda_viewer_stats`。
 
 ## 实现
 
 - 服务端：`ServerSession`（`core/include/rdmachine/server_session.h`）是不做 I/O 的状态机，按上面的规则处理每条消息；平台相关的部分（PAM 校验密码、启动 rdaccel Host）由 `ServerDelegate` 提供。`ControlServer` 在 TLS 上为每个连接开一个线程驱动它，负责 15 秒无流量发 `ping`、45 秒收不到消息发 `bye`（`idle_timeout`）后关闭。
-- 限流、配对码、一次性令牌：`core/include/rdmachine/auth_guards.h`。账号密码和配对码的失败都计入同一个按 IP 的限流。
+- 限流、一次性令牌：`core/include/rdmachine/auth_guards.h`。
 - 客户端：`ConnectAndStartSession`（`core/include/rdmachine/control_client.h`）走完 TLS、指纹确认、`hello`、`auth`、`session_request`，成功后把控制连接留给调用方在会话期间使用。除了上表的错误码，客户端还会报 `connect_failed`、`untrusted_server`、`timeout`、`connection_closed`、`bad_message`。
-- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、配对码、忙、坏帧、空闲超时）；剪贴板见上面的“剪贴板”一节。
+- 测试：`core/tests/test_server_session.cpp`（状态机）和 `core/tests/test_control.cpp`（本机回环端到端，包括指纹拒绝、限流、忙、坏帧、空闲超时）；剪贴板见上面的“剪贴板”一节。
 
 ## 错误码
 
 | 错误码 | 出现在 | 含义 |
 | --- | --- | --- |
-| `bad_credentials` | `auth_result` | 账号密码或配对码不对 |
+| `bad_credentials` | `auth_result` | 账号或密码不对 |
 | `not_console_user` | `auth_result` | 账号不是当前已登录图形会话的用户（在登录窗口时任何账号都可以） |
-| `code_expired` | `auth_result` | 配对码过期或已作废 |
 | `rate_limited` | `auth_result` | 失败太多，看 `retry_after_ms` |
-| `method_unsupported` | `auth_result` | 服务端没开这种登录方式 |
 | `bad_message` | `error` | 消息格式不对 |
 | `unexpected` | `error` | 消息不符合当前状态 |
 | `incompatible` | `error` | 协议版本不一致 |
 | `no_display` | `error` | 请求的显示器不存在 |
 | `capture_denied` | `error` | 服务端没有“屏幕录制”权限，无法开始会话 |
-| `busy` | `error` | 已有会话在进行（M0 一次只服务一个客户端） |
+| `busy` | `error` | 已有会话在进行（一次只服务一个客户端） |
 | `unavailable` | `error` | 装成服务时：该接手的 agent（登录窗口或用户会话的）还没起来，过一会儿再连 |
 | `internal` | `error` | 服务端内部错误，详情看服务端日志 |
 
@@ -384,4 +379,4 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
 
 - 已经做了：登录窗口和锁屏时的连接、会话迁移（3.0）；断线后自动重连（3.1）；多块屏的桌面（4.0，“扩展桌面”）。
 - 不做：公钥登录（`enroll_key`、`auth` 的 `key` 方式，改成了记住密码）；被控端审批弹窗、双因素认证；在服务端几块真实显示器之间切换（选了扩展桌面）；隐私屏；TCP 上的声音；客户端麦克风传到被控端；换网络不断线的连接 ID（Tailscale 的地址不随网络变）。
-- 不在当前范围：Linux 服务端的虚拟屏。
+- 6.0.0 删掉的：画面的 TCP 备用通道、配对码登录、视频编码设置（H.264）、Linux 支持、dmg 和 zip 打包。

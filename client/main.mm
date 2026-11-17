@@ -94,6 +94,12 @@ bool PlaySound() {
   return [d objectForKey:kPlaySoundKey] ? [d boolForKey:kPlaySoundKey] : true;
 }
 
+// View > Observe Only (as Screen Sharing's observe mode): watch, send no
+// keys, clicks or scrolling. Not remembered: every launch starts in control.
+// ⌃⌥⌘O switches it, also in full screen where the menu bar is hidden.
+NSString* const kObserveChanged = @"RDMObserveChanged";
+bool gObserveOnly = false;  // main thread
+
 // View > Text Mode at Standard Resolution: in text mode, ask for a desktop
 // of one pixel per point even on a Retina screen. A 2x desktop has four
 // times the pixels to send; at 1x the text is the server's own 1x rendering
@@ -194,6 +200,7 @@ bool SyncKeyboardLanguage() {
 // (figures from the server, docs/protocol.md "会话统计"). Clicks go through it.
 NSString* const kStatsShownKey = @"StatsOverlay";
 NSString* const kStatsFieldsKey = @"StatsFields";
+NSString* const kStatsFieldsKnownKey = @"StatsFieldsKnown";
 NSString* const kStatsOpacityKey = @"StatsOpacity";
 NSString* const kStatsChanged = @"RDMStatsChanged";
 
@@ -209,6 +216,7 @@ const StatsField kStatsFields[] = {
     {@"bandwidth", @"带宽", false},  {@"resolution", @"分辨率", false},
     {@"encoder", @"编码器", false},      {@"input", @"输入法", false},
     {@"response", @"操作到画面", true},  {@"audio", @"声音", false},
+    {@"traffic", @"流量累计", true},
 };
 const int kStatsOpacities[] = {15, 35, 60};  // background, percent
 
@@ -218,11 +226,23 @@ bool StatsShown() {
 }
 
 NSSet<NSString*>* StatsFieldsOn() {
-  NSArray* saved = [NSUserDefaults.standardUserDefaults arrayForKey:kStatsFieldsKey];
-  if (saved) return [NSSet setWithArray:saved];
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  NSArray* saved = [d arrayForKey:kStatsFieldsKey];
   NSMutableSet* on = [NSMutableSet set];
-  for (const auto& f : kStatsFields) {
-    if (f.on_by_default) [on addObject:f.key];
+  if (!saved) {
+    for (const auto& f : kStatsFields) {
+      if (f.on_by_default) [on addObject:f.key];
+    }
+    return on;
+  }
+  [on addObjectsFromArray:saved];
+  // A field added after the user made their pick (6.0: the traffic total)
+  // comes on once if it is on by default; turning it off sticks.
+  NSArray* known = [d arrayForKey:kStatsFieldsKnownKey];
+  if (!known || ![known containsObject:@"traffic"]) {
+    [on addObject:@"traffic"];
+    [d setObject:on.allObjects forKey:kStatsFieldsKey];
+    [d setObject:@[ @"traffic" ] forKey:kStatsFieldsKnownKey];
   }
   return on;
 }
@@ -735,6 +755,8 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   std::unique_ptr<rdm::RemoteSession> _session;  // main thread
   rda_viewer* _viewer;                           // _session's, while attached
   std::set<uint32_t> _heldKeys, _heldButtons;    // main thread
+  BOOL _releasing;       // releaseHeld is sending: goes out even in observe mode
+  uint64_t _trafficBase;  // received by this window's earlier sessions (it reconnects in place)
   int32_t _lastX, _lastY;
 
   // Two surfaces: the decode thread fills the one not on screen with what
@@ -841,8 +863,14 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                                       handler:^NSEvent*(NSEvent* e) {
                                                         RemoteWindowController* me = weakSelf;
                                                         if (!me || e.window != me.window) return e;
-                                                        if (![me localShortcut:e]) [me key:e];
-                                                        return nil;
+                                                        if ([me localShortcut:e]) return nil;
+                                                        if (!gObserveOnly) {
+                                                          [me key:e];
+                                                          return nil;
+                                                        }
+                                                        // Observing: nothing goes to the server; ⌘ shortcuts
+                                                        // work in this app's own menus instead.
+                                                        return (e.modifierFlags & NSEventModifierFlagCommand) ? e : nil;
                                                       }];
   return self;
 }
@@ -1162,6 +1190,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                              name:kPlaySoundChanged
                                            object:nil];
   if (!PlaySound()) _session->SetAudioPaused(true);  // turned off while connecting
+  [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(observeChanged) name:kObserveChanged object:nil];
   [self sendInputSource:YES];
   [NSNotificationCenter.defaultCenter addObserver:self
                                          selector:@selector(checkDisplays)
@@ -1178,8 +1207,14 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                                       handler:^NSEvent*(NSEvent* e) {
                                                         RemoteWindowController* me = weakSelf;
                                                         if (!me || e.window != me.window) return e;
-                                                        if (![me localShortcut:e]) [me key:e];
-                                                        return nil;
+                                                        if ([me localShortcut:e]) return nil;
+                                                        if (!gObserveOnly) {
+                                                          [me key:e];
+                                                          return nil;
+                                                        }
+                                                        // Observing: nothing goes to the server; ⌘ shortcuts
+                                                        // work in this app's own menus instead.
+                                                        return (e.modifierFlags & NSEventModifierFlagCommand) ? e : nil;
                                                       }];
 }
 
@@ -1212,6 +1247,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   [NSNotificationCenter.defaultCenter removeObserver:self name:kSyncKeyboardLanguageChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kTextModeChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kPlaySoundChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kObserveChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kUseAllDisplaysChanged object:nil];
   if (_keyMonitor) {
@@ -1223,6 +1259,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   _extraLive = NO;
   if (_session) {
     _session->Close();  // closes the extra displays' pictures too
+    _trafficBase += _session->BytesReceived();
     // Connects of extra displays still under way end at once (Close stops
     // them); wait for them before the session goes.
     dispatch_group_wait(_extraConnects, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
@@ -1251,15 +1288,20 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
   if (self.onClose) self.onClose();
 }
 
-// ⌃⌥⌘F stays on this Mac and toggles full screen; every other key goes to
-// the server. Full screen hides this Mac's menu bar and Dock completely, so
+// ⌃⌥⌘F stays on this Mac and toggles full screen, ⌃⌥⌘O switches between
+// observing and controlling; every other key goes to the server. Full screen hides this Mac's menu bar and Dock completely, so
 // this is the way out.
 - (BOOL)localShortcut:(NSEvent*)e {
   if (e.type != NSEventTypeKeyDown && e.type != NSEventTypeKeyUp) return NO;
   const NSEventModifierFlags want = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
   const NSEventModifierFlags mods =
       e.modifierFlags & (want | NSEventModifierFlagShift);
-  if (mods != want || e.keyCode != 3 /* kVK_ANSI_F */) return NO;
+  if (mods != want || (e.keyCode != 3 /* kVK_ANSI_F */ && e.keyCode != 31 /* kVK_ANSI_O */)) return NO;
+  if (e.keyCode == 31) {
+    // ⌃⌥⌘O: observe only, or control again (the app delegate's menu item).
+    if (e.type == NSEventTypeKeyDown && !e.isARepeat) [NSApp sendAction:@selector(toggleObserveOnly:) to:nil from:nil];
+    return YES;
+  }
   if (e.type == NSEventTypeKeyDown && !e.isARepeat) {
     [self releaseHeld];  // the server saw ⌃⌥⌘ go down; let them go there
     if (_extraIndex >= 0) {
@@ -1343,7 +1385,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // Main thread. Tells the server which input source this Mac uses, unless it
 // already knows (`force`: say it anyway, e.g. when the session starts).
 - (void)sendInputSource:(BOOL)force {
-  if (!_viewer || !SyncKeyboardLanguage()) return;
+  if (!_viewer || !SyncKeyboardLanguage() || gObserveOnly) return;
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
   if (rda_current_input_source(&cur) != RDA_OK) return;
@@ -1375,6 +1417,18 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 // paused or resumed (a session that starts later asks for it or not).
 - (void)playSoundChanged {
   if (_session) _session->SetAudioPaused(!PlaySound());
+}
+
+// Main thread. View > Observe Only changed. Starting to observe: let go of
+// what is held (the server would keep it down). Controlling again: the
+// server hears this Mac's input source again.
+- (void)observeChanged {
+  if (gObserveOnly) {
+    [self releaseHeld];
+  } else {
+    [self sendInputSource:YES];
+  }
+  [self renderStats];
 }
 
 // The overlay's sound line (docs/audio.md, 10): the server's report, what
@@ -1442,13 +1496,17 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 // Main thread.
 - (void)renderStats {
-  if (!StatsShown() || !_stats || !_viewer) {
+  if (!_viewer || (!gObserveOnly && (!StatsShown() || !_stats))) {
     _statsLayer.hidden = YES;
     return;
   }
-  const rdm::SessionStatsReport& r = *_stats;
-  NSSet<NSString*>* on = StatsFieldsOn();
+  // Observing: its line shows even with the statistics off, or nothing
+  // would say why the keyboard and mouse do nothing.
+  const bool shown = StatsShown() && _stats;
+  const rdm::SessionStatsReport r = _stats ? *_stats : rdm::SessionStatsReport{};
+  NSSet<NSString*>* on = shown ? StatsFieldsOn() : [NSSet set];
   NSMutableArray<NSString*>* lines = [NSMutableArray array];
+  if (gObserveOnly) [lines addObject:@"只观看（⌃⌥⌘O 恢复控制）"];
   auto add = [&](NSString* key, NSString* text) {
     if ([on containsObject:key]) [lines addObject:text];
   };
@@ -1461,14 +1519,18 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
                                   : [NSString stringWithFormat:@"RTT %.0f ms", r.rtt_ms]);
   add(@"loss", r.recent_loss_pct >= 0 ? [NSString stringWithFormat:@"Loss %.1f%%", r.recent_loss_pct] : @"Loss –");
   add(@"bitrate", StatsKbps(r.bitrate_kbps));
+  // Since this window opened, reconnections included; rdaccel's payload
+  // (the picture and the sound), without packet headers and resends.
+  add(@"traffic", [@"流量 " stringByAppendingString:NS(rdm::FormatTraffic(_trafficBase +
+                                                                          (_session ? _session->BytesReceived() : 0)))]);
   add(@"bandwidth", r.bandwidth_kbps > 0 ? [@"BW " stringByAppendingString:StatsKbps(r.bandwidth_kbps)] : @"BW –");
   add(@"resolution", [NSString stringWithFormat:@"%d×%d", r.width, r.height]);
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   // Not a field to pick: whoever sees soft photos should see why.
-  if (r.text_mode) [lines addObject:@"省流量"];
+  if (shown && r.text_mode) [lines addObject:@"省流量"];
   // Nor this: the input menu is greyed out and nothing here says why.
   _secureInputHolder = SecureInputHolder() == getpid() ? ReleaseSecureInput() : SecureInputHolder();
-  if (_secureInputHolder != 0) {
+  if (shown && _secureInputHolder != 0) {
     [lines addObject:[NSString stringWithFormat:@"输入法被 %@ 拦住", DescribeProcess(_secureInputHolder)]];
   }
   add(@"input", r.input_source.empty() ? @"输入法 –" : NS(r.input_source));
@@ -1568,6 +1630,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 }
 
 - (void)send:(const rda_input_event&)ev {
+  if (gObserveOnly && !_releasing) return;  // observing: the server gets no input
   if (ev.kind == RDA_INPUT_KEY_DOWN || ev.kind == RDA_INPUT_MOUSE_DOWN || ev.kind == RDA_INPUT_SCROLL) {
     // Only on a still screen (no picture for 150 ms): otherwise the next
     // picture may be one that was on its way anyway.
@@ -1621,6 +1684,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
 
 - (void)releaseHeld {
   const std::set<uint32_t> keys = _heldKeys, buttons = _heldButtons;
+  _releasing = YES;
   for (uint32_t k : keys) {
     rda_input_event ev = Event(RDA_INPUT_KEY_UP);
     ev.code = k;
@@ -1633,6 +1697,7 @@ static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t 
     ev.y = _lastY;
     [self send:ev];
   }
+  _releasing = NO;
 }
 
 // Decode thread. Copies what changed into the surface that is not on screen
@@ -2841,6 +2906,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     item.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(togglePlaySound:)) {
     item.state = PlaySound() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleObserveOnly:)) {
+    item.state = gObserveOnly ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextMode:)) {
     item.state = TextMode() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleTextModeStandardResolution:)) {
@@ -2855,6 +2922,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
+}
+
+- (void)toggleObserveOnly:(id)sender {
+  gObserveOnly = !gObserveOnly;
+  [NSNotificationCenter.defaultCenter postNotificationName:kObserveChanged object:nil];
 }
 
 - (void)togglePlaySound:(NSMenuItem*)item {
@@ -3022,6 +3094,10 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   all.target = self;
   all.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
   all.toolTip = @"全屏时，这台 Mac 的每块屏幕都对应那台 Mac 上的一块显示器（扩展桌面），按这里屏幕的排列放好。";
+  NSMenuItem* observe = [view addItemWithTitle:@"只观看（不控制）" action:@selector(toggleObserveOnly:) keyEquivalent:@"o"];
+  observe.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+  observe.target = self;
+  observe.toolTip = @"只看那台 Mac 的画面：这里的键盘、鼠标和滚动都不发过去。再选一次（或按 ⌃⌥⌘O）恢复控制。每次打开客户端都从控制开始。";
   [view addItem:NSMenuItem.separatorItem];
   NSMenuItem* sync = [view addItemWithTitle:@"同步键盘语言"
                                      action:@selector(toggleSyncKeyboardLanguage:)

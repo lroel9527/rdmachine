@@ -33,6 +33,10 @@ struct SessionStatsReport {
   bool operator==(const SessionStatsReport&) const = default;
 };
 
+// The overlay's traffic total: "812 KB", "45.3 MB", "1.27 GB" (1 MB =
+// 1,000,000 bytes, as carriers count).
+std::string FormatTraffic(uint64_t bytes);
+
 std::string EncodeSessionStats(const SessionStatsReport& r);
 // nullopt for anything that is not a JSON object; missing fields keep defaults.
 std::optional<SessionStatsReport> DecodeSessionStats(const std::string& payload);

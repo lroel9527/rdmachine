@@ -105,6 +105,11 @@ class RemoteSession {
   // revision both sides speak (protocol.h; sound needs 3).
   bool audio_requested() const { return options_.audio; }
   int revision() const { return revision_; }
+  // What this session received so far, over all its picture connections
+  // (the main one, extra displays, those a move replaced), sound included:
+  // rdaccel's payload bytes, without packet headers and resends. Still
+  // valid after Close(). Thread-safe.
+  uint64_t BytesReceived() const;
   // The current viewer, for statistics and tests; may change on a move.
   rda_viewer* viewer() const;
   SessionReady session() const;
@@ -147,6 +152,8 @@ class RemoteSession {
   mutable std::mutex mu_;  // guards viewer_ and session_ once the session runs
   SessionReady session_;
   rda_viewer* viewer_ = nullptr;
+  void Retire(rda_viewer* v);  // before it is destroyed: keeps its count
+  std::atomic<uint64_t> retired_bytes_{0};
   std::vector<rda_viewer*> extras_;  // by extra display; null: not connected (guarded by mu_)
   rda_audio_player* player_ = nullptr;  // plays viewer_'s sound; destroyed before it (guarded by mu_)
   std::atomic<bool> audio_paused_{false};  // what the user asked for (SetAudioPaused)
