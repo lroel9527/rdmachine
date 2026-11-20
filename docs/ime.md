@@ -104,20 +104,22 @@
 
 现在按键走 input 通道，应用消息走 message 通道，两个通道各自有序、彼此不保序（[架构](../third_party/rdaccel/docs/architecture.md)的“传输”）。`RDA_INPUT_TEXT` 虽然在 input 通道上，但只能带一个字符，带不了组字文字和选区。
 
-加（只加不改）：
+已在 rdaccel 3.2.0 实现（只加不改）：
 
 ```c
-/* 3.2: an application message carried on the input channel, so it reaches the
- * host in order with the input events sent before and after it. Same type
- * rules as rda_viewer_send_message(); at most 4 KiB. The host gets it through
- * on_input_message, on the thread that calls on_input, in that order.
- * RDA_ERR_UNSUPPORTED when the host did not offer it in the handshake. */
+/* 3.2: an application message on the input channel, so the host gets it in
+ * order with the input events sent before and after it (an input method's
+ * text, then the keys typed after it). It arrives through the host's
+ * on_message, on the thread that calls on_input. Type rules as
+ * rda_viewer_send_message(); at most 64 KiB (RDA_ERR_INVALID_ARG above).
+ * RDA_ERR_UNSUPPORTED with a host older than 3.2; RDA_ERR_BUSY before the
+ * host accepted the viewer. */
 RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, const uint8_t* payload, size_t n);
-/* in rda_host_callbacks, after the existing members (struct_size grows): */
-void (*on_input_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
 ```
 
-线上：input 通道加一种记录（类型、长度、内容）。能力协商照声音的做法（[声音](audio.md) 6.3）：`core/proto/messages.h` 加一位能力，Host 在 `Welcome` 里带上，表示认识这种记录；对方没有这一位时 viewer 不发，返回 `RDA_ERR_UNSUPPORTED`，rdmachine 退回旧做法（键盘语言同步）。线上协议版本号不变。单元测试：消息和前后的按键交替发，host 收到的顺序完全一致；丢包重传下也一致（模拟网络）。
+- Host 不加新回调：照旧经 `on_message` 收到，但它是在 input 通道的解析循环里交出的，和 `on_input` 同一个线程、同一个顺序。应用靠消息类型区分。
+- 线上：input 通道上允许 `AppMessage`。能力位 `kCapInputMessages`（128，进 `kCapsAll`），Host 在 `Welcome` 里带上；对方没有这一位时 viewer 返回 `RDA_ERR_UNSUPPORTED`，rdmachine 退回旧做法（键盘语言同步）。线上协议版本号不变。
+- 测试（`tests/test_link.cpp`）：消息和按键交替发 300 条，Host 两个回调里看到的顺序和发出的完全一致；3.1 的 Host 不发；64 KiB 上限、只有 viewer 能发；C 接口。每个通道在可靠传输里是独立的有序字节流（丢包重传不打乱同一通道），所以模拟网络下的顺序由传输层保证，没有另写测试。
 
 ## 5. 协议（rdmachine）
 
@@ -125,7 +127,7 @@ void (*on_input_message)(void* user, uint32_t type, const uint8_t* payload, size
 
 | 类型 | 方向 | 通道 | 内容 |
 | --- | --- | --- | --- |
-| `0x10014` ime（`kImeMessageType`） | 客户端 → 服务端 | input（第 4 节） | 见下 |
+| `0x10014` ime（`kImeMessageType`） | 客户端 → 服务端 | input（第 4 节，`rda_viewer_send_input_message`） | 见下 |
 | `0x10015` ime state（`kImeStateMessageType`） | 服务端 → 客户端 | message | 见下 |
 
 **ime（客户端 → 服务端）**，每条带递增的 `seq`：
