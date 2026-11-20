@@ -95,6 +95,7 @@ class ServerRuntime {
   const TlsIdentity identity_;
   mutable std::mutex mu_;
   ServerSettings saved_;
+  std::shared_ptr<ImeBridge> ime_;  // the media host's link to RDMachine Input
   std::unique_ptr<MediaHost> media_;
   std::unique_ptr<ControlServer> server_;  // standalone
   std::unique_ptr<AgentHost> agent_;       // agent mode

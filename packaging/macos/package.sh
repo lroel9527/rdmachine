@@ -72,7 +72,7 @@ if [ "$do_build" = 1 ]; then
   cmake --build "$build_dir" -j "$(sysctl -n hw.ncpu)"
 fi
 bin="$build_dir/bin"
-for b in rdmachine-server rdmachine-client rdmachine-connect rdmachine-files-ext; do
+for b in rdmachine-server rdmachine-client rdmachine-connect rdmachine-files-ext rdmachine-ime; do
   [ -x "$bin/$b" ] || { echo "$bin/$b not found: build first, or pass --build" >&2; exit 1; }
 done
 
@@ -127,6 +127,20 @@ make_app "RDMachine.app" rdmachine-client org.rdmachine.client client-Info.plist
 # rdmachine-service travels inside the server app (the installer runs it, and
 # it is there for status, stop and uninstall).
 make_app "RDMachine Server.app" rdmachine-server org.rdmachine.server server-Info.plist.in "$pkg/rdmachine-service" "$pkg/icons/RDMachineServer.icns"
+# RDMachine Input, the server's input method (docs/ime.md): inside the server
+# app, signed on its own first (the server app's signature then covers it);
+# rdmachine-service install copies it to /Library/Input Methods.
+ime="$out/RDMachine Server.app/Contents/Resources/RDMachine Input.app"
+mkdir -p "$ime/Contents/MacOS"
+ditto "$bin/rdmachine-ime" "$ime/Contents/MacOS/rdmachine-ime"
+strip -x "$ime/Contents/MacOS/rdmachine-ime"
+sed -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build_no/" -e "s/@MIN_MACOS@/$min_macos/" \
+    "$pkg/ime-Info.plist.in" >"$ime/Contents/Info.plist"
+printf 'APPL????' >"$ime/Contents/PkgInfo"
+plutil -lint -s "$ime/Contents/Info.plist"
+codesign "${sign_args[@]}" "$ime"
+codesign "${sign_args[@]}" "$out/RDMachine Server.app"
+codesign --verify --strict --verbose=1 "$out/RDMachine Server.app"
 
 ditto "$bin/rdmachine-connect" "$out/rdmachine-connect"
 strip -x "$out/rdmachine-connect"

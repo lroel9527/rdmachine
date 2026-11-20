@@ -11,16 +11,17 @@ add_library(rdm_session STATIC
   src/viewer.cpp
   src/remote_session.cpp
   src/daemon.cpp
-  src/agent_host.cpp)
+  src/agent_host.cpp
+  src/ime_bridge.cpp)
 target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
-  src/file_target_mac.mm)
+  src/file_target_mac.mm src/ime_bridge_mac.mm)
 set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
-  src/file_target_mac.mm
+  src/file_target_mac.mm src/ime_bridge_mac.mm
   PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 # The XPC protocol shared with the File Provider extension.
 target_include_directories(rdm_session PRIVATE ${PROJECT_SOURCE_DIR}/fileprovider)
 target_link_libraries(rdm_session PUBLIC "-framework AppKit" "-framework CoreGraphics" "-framework Security"
-  "-framework FileProvider" "-framework IOKit")
+  "-framework FileProvider" "-framework IOKit" "-framework Carbon")
 add_library(rdmachine::session ALIAS rdm_session)
 target_include_directories(rdm_session PUBLIC include)
 target_link_libraries(rdm_session PUBLIC rdmachine::core rdaccel::rdaccel PRIVATE pam)

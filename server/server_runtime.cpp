@@ -87,6 +87,11 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   mo.send_audio = s.send_audio;
   mo.mute_local_audio = s.mute_local_audio;
   mo.audio_source = options_.audio_source;
+  // The client's input method (docs/ime.md): one link to RDMachine Input for
+  // the life of this process, kept across settings changes. Not at the login
+  // window, where no third-party input method runs.
+  if (!options_.login_window && !ime_) ime_ = SystemImeBridge(options_.log);
+  mo.ime = options_.login_window ? nullptr : ime_;
   mo.log = options_.log;
   if (!options_.test_password.empty() && !agent_mode()) {
     mo.check_password = [pw = options_.test_password](const std::string& user, const std::string& password,

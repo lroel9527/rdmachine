@@ -86,6 +86,7 @@ add_subdirectory(session)
 add_subdirectory(server)
 add_subdirectory(client)
 add_subdirectory(fileprovider)
+add_subdirectory(ime)
 
 if(RDM_BUILD_TESTS)
   enable_testing()

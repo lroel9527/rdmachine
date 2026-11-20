@@ -334,6 +334,15 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
 - 登录窗口只选键盘布局，不选输入法（3.2.3 起）：登录窗口的用户列表和密码框只接收键盘布局打出的键，选了拼音之类的输入法时打的字全被输入法吞掉。客户端在用输入法时，登录窗口用 ASCII 布局（先 ABC，再 U.S.，再任何 ASCII 布局）；客户端用普通布局时照常匹配。
 - 读取和切换输入源用 rdaccel 1.2 的 `rda_current_input_source`、`rda_list_input_sources`、`rda_injector_select_input_source`（macOS Text Input Sources）。服务端菜单和客户端浮窗（勾选“Input Source”时）显示同步结果。
 
+## 客户端输入法（6.2.0）
+
+用客户端本机的输入法打字，候选窗在客户端，组字和上屏由服务端的输入法 RDMachine Input 放进远程应用。设计和实测见[客户端输入法](ime.md)。
+
+- `0x10014` ime（`kImeMessageType`，`core/include/rdmachine/ime_wire.h`），客户端到服务端，用 `rda_viewer_send_input_message` 发，和按键同序：`{"seq":1,"mark":"ni'hao","sel":[6,0]}`（组字更新）、`{"seq":2,"commit":"你好"}`（上屏）、`{"seq":3,"cancel":true}`、`{"seq":4,"mode":"on"|"off"}`（开始/停止用本机输入法）。
+- `0x10015` ime state（`kImeStateMessageType`），服务端到客户端，画面连接建立时发一次，之后有变化才发：`{"available":true,"client":true,"secure":false,"app":"com.apple.Safari","seq":1,"caret":{"display":0,"x":1312,"y":384,"w":2,"h":48},"marked":[0,6],"sel":[6,0]}`；`ended` 为真表示组字被远程结束了（点了别处、换了应用）。`caret` 是那块显示器画面的像素（0 = 主画面，1.. = 扩展桌面的显示器），左上角为原点。
+- 服务端收到 `mode:"on"` 时记下当前输入源、选中 RDMachine Input（`org.rdmachine.inputmethod.Remote`），`off` 或会话结束时切回；这期间不理会键盘语言同步。上屏时等输入法回执最多 100 ms（这期间后面的按键排队）；没有接受输入法的输入框或没有回执时，按文字注入（`RDA_INPUT_TEXT`）。
+- 服务端的 agent 在 `~/Library/Application Support/RDMachine/ime.sock` 等 RDMachine Input 连进来（只认同一个证书签的程序），帧格式同守护进程和 agent 之间。RDMachine Input 由 `rdmachine-service install` 装到 `/Library/Input Methods`；用户要在系统设置 → 键盘 → 输入法里手动加一次，服务端菜单里有入口。
+
 ## 会话统计
 
 客户端远程窗口右上角的调试浮窗用服务端的数据：服务端会话期间大约每秒发一次 rdaccel 应用消息，类型 `0x10002`（`RDA_MSG_USER_FIRST + 2`，`kSessionStatsMessageType`），服务端到客户端，内容是 JSON（`core/include/rdmachine/session_stats.h`）：

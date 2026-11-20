@@ -42,6 +42,8 @@ DAEMON_PLIST="$DAEMONS/$DAEMON_LABEL.plist"
 SESSION_PLIST="$AGENTS/$SESSION_LABEL.plist"
 LW_PLIST="$AGENTS/$LW_LABEL.plist"
 SYS_DIR="/Library/Application Support/rdmachine"
+# The server's input method for typing with the client's (docs/ime.md).
+IME_APP="/Library/Input Methods/RDMachine Input.app"
 DAEMON_LOG=/Library/Logs/rdmachine-daemon.log
 LW_LOG=/Library/Logs/rdmachine-loginwindow.log
 
@@ -211,6 +213,14 @@ do_install() {
   fi
   # What 2.3.0 and the experiment before it installed.
   rm -f "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
+  # RDMachine Input travels inside the app; input methods have to live in an
+  # Input Methods folder. The running copy quits so the new one is used
+  # (macOS starts it again when it is next needed).
+  if [ -d "$APP/Contents/Resources/RDMachine Input.app" ]; then
+    rm -rf "$IME_APP"
+    ditto "$APP/Contents/Resources/RDMachine Input.app" "$IME_APP"
+    pkill -x rdmachine-ime 2>/dev/null || true
+  fi
 
   user="${SUDO_USER:-}"
   if [ -z "$user" ] || [ "$user" = root ]; then user=$(console_user); fi
@@ -263,6 +273,8 @@ do_uninstall() {
   pkill -TERM -f 'rdmachine-server --login-window' 2>/dev/null || true
   rm -f "$DAEMON_PLIST" "$SESSION_PLIST" "$LW_PLIST" "$AGENTS/org.rdmachine.loginwindow-experiment.plist"
   rm -rf "$SYS_DIR"
+  pkill -x rdmachine-ime 2>/dev/null || true
+  rm -rf "$IME_APP"
   echo "removed the daemon, the agents and $SYS_DIR (logs kept); start RDMachine Server.app to serve without them"
 }
 

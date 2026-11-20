@@ -23,6 +23,7 @@ add_executable(rdm_core_tests
   test_input_source_sync.cpp
   test_desktop.cpp
   test_picture_mode.cpp
+  test_ime_wire.cpp
   test_audio_control.cpp
   test_session_stats.cpp
   test_login_keys.cpp)

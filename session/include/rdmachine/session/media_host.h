@@ -16,8 +16,10 @@
 
 #include "rdmachine/auth_guards.h"
 #include "rdmachine/clipboard_sync.h"
+#include "rdmachine/ime_wire.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
+#include "rdmachine/session/ime_bridge.h"
 #include "rdmachine/session/login_screen.h"
 #include "rdmachine/session/virtual_desktop.h"
 
@@ -69,6 +71,9 @@ struct MediaHostOptions {
   bool send_audio = true;
   bool mute_local_audio = true;
   int32_t audio_source = RDA_AUDIO_SOURCE_SYSTEM;
+  // Typing with the client's input method (docs/ime.md): the link to
+  // RDMachine Input. Null: not offered (the login window, tests).
+  std::shared_ptr<ImeBridge> ime;
   std::function<void(const std::string&)> log;  // may be empty
 };
 
@@ -96,6 +101,10 @@ struct MediaHostStatus {
   // Without sound: why ("client": it did not ask; else as
   // session_ready.audio_reason: disabled, login_window, unsupported).
   std::string audio_reason;
+  // The client's input method (docs/ime.md): empty when not offered;
+  // "not enabled" (RDMachine Input is not added in System Settings),
+  // "ready", or "in use" (the client types with it now).
+  std::string ime;
   rda_audio_status audio_status{};
   rda_host_stats stats{};         // cumulative; zero when not running
 };
@@ -156,6 +165,16 @@ class MediaHost : public ServerDelegate {
   static void OnError(void* user, rda_status status, const char* message);
   static void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n);
   void SyncInputSource(const InputSourceState& wanted);
+  // The client's input method (docs/ime.md). OnImeInput runs on the
+  // transport thread, in order with the keys; the bridge's events on its own.
+  void OnImeInput(const ImeInput& in);
+  void OnImeReport(const ImeBridge::Report& r);
+  // Tells the client what changed (all of it when `force`), on the message
+  // channel of the main picture.
+  void SendImeState(bool force);
+  // Leaves the input method mode: the input source from before comes back.
+  void EndImeMode(const char* why);
+  bool ImeSourceEnabled();
   // About once a second while a session runs: a SessionStatsReport to the
   // client for its overlay (docs/protocol.md, "会话统计").
   void StatsLoop();
@@ -202,6 +221,16 @@ class MediaHost : public ServerDelegate {
   // waits for that very thread to finish).
   std::mutex input_source_mu_;
   std::string client_input_source_, input_source_;
+  // The client's input method. Its own lock: the transport thread and the
+  // bridge's thread both use it, and neither may wait for mu_.
+  std::mutex ime_mu_;
+  ImeState ime_state_;           // what is known now
+  ImeState ime_last_sent_;       // what the client was last told
+  bool ime_sent_ = false;        // something went out this session
+  bool ime_available_ = false;   // this session can take the client's input method
+  bool ime_mode_ = false;        // the client types with its input method now
+  std::string ime_prev_source_;  // the input source before ime_mode_
+  std::vector<int32_t> ime_displays_;  // rdaccel's display index of each session display (0 = main)
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_
   std::unique_ptr<DisplayAwake> awake_;      // guarded by mu_; while a session runs

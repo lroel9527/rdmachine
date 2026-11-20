@@ -416,6 +416,14 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   if (!capture || !input || sound != 0) {
     [self add:@"    在系统设置里打开 RDMachine Server 的开关；下次连接还不行就退出重开" action:nullptr];
   }
+  // Typing with the client's input method (docs/ime.md, 7.5): RDMachine
+  // Input has to be added once by hand; macOS does not let a program do it.
+  if (st.ime == "not enabled") {
+    [self add:@"客户端输入法：未启用（点此打开键盘设置）" action:@selector(openKeyboardSettings:)];
+    [self add:@"    输入法 → 编辑… → 左下角「+」→ 英语 → RDMachine Input → 添加" action:nullptr];
+  } else if (!st.ime.empty()) {
+    [self add:(st.ime == "in use" ? @"客户端输入法：正在用" : @"客户端输入法：已启用") action:nullptr];
+  }
 
   [menu addItem:NSMenuItem.separatorItem];
   NSMenuItem* settings = [self add:@"设置…" action:@selector(showSettings:)];
@@ -460,6 +468,10 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   CGRequestPostEventAccess();  // adds the app to the list (asks once)
   [NSWorkspace.sharedWorkspace
       openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
+}
+
+- (void)openKeyboardSettings:(id)sender {
+  [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.Keyboard-Settings.extension"]];
 }
 
 - (void)showSettings:(id)sender {

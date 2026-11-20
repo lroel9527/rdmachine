@@ -93,9 +93,38 @@ InputSourceState FromRda(const rda_input_source_info& i) {
 
 }  // namespace
 
-MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {}
+MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
+  if (options_.ime) {
+    ImeBridge::Events ev;
+    ev.on_connection = [this](bool) { SendImeState(false); };
+    ev.on_client = [this](bool active, const std::string& app) {
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_state_.client = active;
+        ime_state_.app = active ? app : std::string();
+        if (!active) ime_state_.caret.reset();
+      }
+      SendImeState(false);
+    };
+    ev.on_report = [this](const ImeBridge::Report& r) { OnImeReport(r); };
+    ev.on_ended = [this](uint64_t) {
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_state_.ended = true;
+        ime_state_.marked.reset();
+      }
+      SendImeState(false);
+      std::lock_guard lock(ime_mu_);
+      ime_state_.ended = false;
+    };
+    options_.ime->SetEvents(std::move(ev));
+  }
+}
 
-MediaHost::~MediaHost() { EndSession(); }
+MediaHost::~MediaHost() {
+  if (options_.ime) options_.ime->SetEvents({});  // returns once no event runs any more
+  EndSession();
+}
 
 void MediaHost::Log(const std::string& line) {
   if (options_.log) options_.log(line);
@@ -165,6 +194,14 @@ MediaHostStatus MediaHost::Status() {
     s.client_input_source = client_input_source_;
     s.input_source = input_source_;
   }
+  if (options_.ime && !options_.login_window) {
+    bool in_use;
+    {
+      std::lock_guard im(ime_mu_);
+      in_use = host_ && ime_mode_;
+    }
+    s.ime = in_use ? "in use" : ImeSourceEnabled() ? "ready" : "not enabled";
+  }
   std::lock_guard snap(snapshot_mu_);
   snapshot_ = s;
   return s;
@@ -199,6 +236,11 @@ void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, siz
   auto* self = static_cast<MediaHost*>(user);
   if (ClipboardSync::IsClipboardMessage(type)) {
     if (self->clipboard_) self->clipboard_->OnMessage(type, payload, n);
+    return;
+  }
+  if (type == kImeMessageType) {
+    // In order with the keys (rda_viewer_send_input_message).
+    if (auto in = DecodeImeInput(std::string(reinterpret_cast<const char*>(payload), n))) self->OnImeInput(*in);
     return;
   }
   if (type == kInputSourceMessageType) {
@@ -247,6 +289,14 @@ void MediaHost::OnMessage(void* user, uint32_t type, const uint8_t* payload, siz
 // waits for this thread to finish, so waiting for mu_ here would stop both
 // for good (and with them every later session of this server).
 void MediaHost::SyncInputSource(const InputSourceState& wanted) {
+  {
+    std::lock_guard lock(ime_mu_);
+    if (ime_mode_) {
+      // The client types with its own input method: this computer stays on RDMachine Input.
+      Log("input source from the client (" + wanted.id + ") ignored: it types with its own input method");
+      return;
+    }
+  }
   std::string selected;
   if (!injector_) {
     // View only: the keys do not come from the client, nor should the input source.
@@ -289,12 +339,194 @@ void MediaHost::SyncInputSource(const InputSourceState& wanted) {
   input_source_ = selected;
 }
 
+bool MediaHost::ImeSourceEnabled() {
+  size_t count = 0;
+  if (rda_list_input_sources(nullptr, 0, &count) != RDA_OK || count == 0) return false;
+  std::vector<rda_input_source_info> infos(count);
+  infos[0].struct_size = sizeof(rda_input_source_info);
+  if (rda_list_input_sources(infos.data(), infos.size(), &count) != RDA_OK) return false;
+  infos.resize(std::min(count, infos.size()));
+  for (const auto& i : infos) {
+    if (std::string(i.id) == kImeInputSourceId) return true;
+  }
+  return false;
+}
+
+namespace {
+
+// The Unicode scalar values of UTF-8 text (malformed bytes are skipped).
+std::vector<uint32_t> CodePoints(const std::string& s) {
+  std::vector<uint32_t> out;
+  for (size_t i = 0; i < s.size();) {
+    const auto c = static_cast<uint8_t>(s[i]);
+    const int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+    if (n == 0 || i + n > s.size()) {
+      ++i;
+      continue;
+    }
+    uint32_t cp = n == 1 ? c : c & (0x7f >> n);
+    for (int k = 1; k < n; ++k) cp = (cp << 6) | (static_cast<uint8_t>(s[i + k]) & 0x3f);
+    out.push_back(cp);
+    i += n;
+  }
+  return out;
+}
+
+}  // namespace
+
+void MediaHost::OnImeInput(const ImeInput& in) {
+  ImeBridge* bridge = options_.ime.get();
+  if (!bridge) return;
+  switch (in.kind) {
+    case ImeInput::Kind::kMode: {
+      if (!in.mode_on) {
+        EndImeMode("the client stopped typing with its input method");
+        break;
+      }
+      bool available;
+      {
+        std::lock_guard lock(ime_mu_);
+        if (ime_mode_) break;
+        available = ime_available_ = ime_available_ || (injector_ && !options_.login_window && ImeSourceEnabled());
+      }
+      if (!available || !injector_) {
+        SendImeState(false);
+        break;
+      }
+      rda_input_source_info cur{};
+      cur.struct_size = sizeof(cur);
+      const std::string prev = rda_current_input_source(&cur) == RDA_OK ? cur.id : "";
+      if (prev != kImeInputSourceId && rda_injector_select_input_source(injector_, kImeInputSourceId) != RDA_OK) {
+        Log(std::string("the client's input method: RDMachine Input could not be selected: ") + rda_last_error());
+        break;
+      }
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_mode_ = true;
+        if (prev != kImeInputSourceId) ime_prev_source_ = prev;
+        ime_state_.seq = in.seq;
+      }
+      Log("the client types with its own input method (this Mac on RDMachine Input" +
+          (prev.empty() || prev == kImeInputSourceId ? std::string(")") : ", was " + prev + ")"));
+      SendImeState(false);
+      break;
+    }
+    case ImeInput::Kind::kMark:
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_state_.seq = in.seq;
+      }
+      bridge->Mark(in.seq, in.text, in.sel_location, in.sel_length);
+      break;
+    case ImeInput::Kind::kCommit: {
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_state_.seq = in.seq;
+        ime_state_.marked.reset();
+      }
+      // The keys after it wait here (this is the thread that injects them),
+      // so they cannot overtake the text; not longer than 100 ms.
+      if (bridge->Commit(in.seq, in.text, 100)) break;
+      // No text field that takes input methods (or no answer): typed as text.
+      for (uint32_t cp : CodePoints(in.text)) {
+        rda_input_event ev;
+        rda_input_event_default(&ev);
+        ev.kind = RDA_INPUT_TEXT;
+        ev.code = cp;
+        Inject(ev);
+      }
+      break;
+    }
+    case ImeInput::Kind::kCancel:
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_state_.seq = in.seq;
+        ime_state_.marked.reset();
+      }
+      bridge->Cancel(in.seq);
+      break;
+  }
+}
+
+void MediaHost::EndImeMode(const char* why) {
+  std::string prev;
+  {
+    std::lock_guard lock(ime_mu_);
+    if (!ime_mode_) return;
+    ime_mode_ = false;
+    prev = std::move(ime_prev_source_);
+    ime_prev_source_.clear();
+  }
+  rda_input_source_info cur{};
+  cur.struct_size = sizeof(cur);
+  if (injector_ && !prev.empty() && rda_current_input_source(&cur) == RDA_OK && cur.id == std::string(kImeInputSourceId)) {
+    if (rda_injector_select_input_source(injector_, prev.c_str()) != RDA_OK) {
+      Log("input source " + prev + " could not be selected again: " + rda_last_error());
+    }
+  }
+  Log(std::string("the client's input method: off (") + why + ")" + (prev.empty() ? "" : ", back to " + prev));
+}
+
+void MediaHost::OnImeReport(const ImeBridge::Report& r) {
+  std::optional<ImeRect> caret;
+  if (r.rect) {
+    int32_t ox = 0, oy = 0;
+    ImeRect px;
+    if (GlobalRectToDisplayPixels(*r.rect, &ox, &oy, &px)) {
+      size_t count = 0;
+      std::vector<rda_display_info> infos;
+      if (rda_list_displays(nullptr, 0, &count) == RDA_OK && count > 0) {
+        infos.resize(count);
+        infos[0].struct_size = sizeof(rda_display_info);
+        if (rda_list_displays(infos.data(), infos.size(), &count) != RDA_OK) infos.clear();
+        infos.resize(std::min(count, infos.size()));
+      }
+      std::lock_guard lock(ime_mu_);
+      for (const rda_display_info& d : infos) {
+        if (d.x != ox || d.y != oy) continue;
+        for (size_t i = 0; i < ime_displays_.size(); ++i) {
+          if (ime_displays_[i] == d.index) {
+            px.display = static_cast<int32_t>(i);
+            caret = px;
+          }
+        }
+      }
+    }
+  }
+  {
+    std::lock_guard lock(ime_mu_);
+    ime_state_.marked = r.marked;
+    ime_state_.selected = r.selected;
+    if (caret) ime_state_.caret = caret;  // not found: the client keeps the one it has
+  }
+  SendImeState(false);
+}
+
+void MediaHost::SendImeState(bool force) {
+  rda_host* h = mode_host_.load();
+  if (!h || !options_.ime) return;
+  std::string payload;
+  {
+    std::lock_guard lock(ime_mu_);
+    ImeState s = ime_state_;
+    s.available = ime_available_;
+    s.secure = SecureInputActive();
+    s.client = s.client && options_.ime->connected();
+    if (!force && ime_sent_ && s == ime_last_sent_) return;
+    ime_last_sent_ = s;
+    ime_sent_ = true;
+    payload = EncodeImeState(s);
+  }
+  rda_host_send_message(h, kImeStateMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+}
+
 void MediaHost::OnState(void* user, rda_state state, rda_status reason) {
   auto* self = static_cast<MediaHost*>(user);
   switch (state) {
     case RDA_STATE_CONNECTED:
       self->media_connected_ = true;
       self->Log("media connected");
+      self->SendImeState(true);  // also tells a new client that this server takes its input method
       break;
     case RDA_STATE_DISCONNECTED:
       self->media_connected_ = false;
@@ -602,6 +834,20 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       }
     }
   }
+  {
+    std::lock_guard im(ime_mu_);
+    ime_state_ = ImeState{};
+    ime_last_sent_ = ImeState{};
+    ime_sent_ = false;
+    ime_mode_ = false;
+    ime_prev_source_.clear();
+    ime_displays_ = {display_index};
+    // Not at the login window (no third-party input method there), not view only.
+    ime_available_ = options_.ime && injector && !options_.login_window && ImeSourceEnabled();
+    if (options_.ime && injector && !options_.login_window && !ime_available_) {
+      Log("the client's input method: RDMachine Input is not enabled in System Settings");
+    }
+  }
   mode_host_ = host;
   status_ = MediaHostStatus{};
   status_.running = true;
@@ -655,6 +901,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       "udp on " + media_where + " port " + std::to_string(grant.port) +
       ", clipboard " + ClipboardModeName(clip_mode));
   StartExtraHosts(request, secrets, origin, injector != nullptr, &grant);
+  {
+    std::lock_guard im(ime_mu_);
+    for (const auto& x : extras_) ime_displays_.push_back(x->display_index);
+  }
   if (!login.password.empty()) {
     const LoginScreenState ls = options_.login_screen ? options_.login_screen() : QueryLoginScreen();
     if (injector && (options_.login_window || ls.screen_locked)) {
@@ -1040,6 +1290,7 @@ void MediaHost::EndSession() {
   StopStats();
   StopDesktopLoop();
   StopCaptureLoop();
+  EndImeMode("the session ends");  // through injector_, destroyed below
   rda_host* host;
   rda_injector* injector;
   std::unique_ptr<VirtualDesktop> desktop;
