@@ -454,6 +454,11 @@ void MediaHost::OnImeInput(const ImeInput& in) {
         if (prev != kImeInputSourceId) ime_prev_source_ = prev;
         ime_state_.seq = in.seq;
       }
+      // A commit with no text field to take it is typed as text, which would
+      // otherwise put an ASCII layout in place of RDMachine Input (it passes
+      // every key through, so the characters go in as they are) and, with no
+      // key coming in this mode, leave it there.
+      rda_injector_set_text_leaves_input_method(injector_, 0);
       Log("the client types with its own input method (this Mac on RDMachine Input" +
           (prev.empty() || prev == kImeInputSourceId ? std::string(")") : ", was " + prev + ")"));
       SendImeState(false);
@@ -526,6 +531,7 @@ void MediaHost::EndImeMode(const char* why) {
     prev = std::move(ime_prev_source_);
     ime_prev_source_.clear();
   }
+  if (injector_) rda_injector_set_text_leaves_input_method(injector_, 1);
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
   if (injector_ && !prev.empty() && rda_current_input_source(&cur) == RDA_OK && cur.id == std::string(kImeInputSourceId)) {
