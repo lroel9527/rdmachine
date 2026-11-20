@@ -74,6 +74,7 @@ static __weak RemoteController* gCurrent;
   NSUInteger _markedLength;  // UTF-16 length of what we marked, 0 = no composition
   uint64_t _seq;             // the last agent message applied here
   uint64_t _reportGen;       // later reports supersede earlier ones
+  uint64_t _requestGen;      // the same for the agent's report requests
 }
 
 - (void)activateServer:(id)sender {
@@ -86,11 +87,17 @@ static __weak RemoteController* gCurrent;
 
 // A report `ms` from now; a later request replaces one still waiting.
 - (void)reportAfter:(int)ms {
-  const uint64_t gen = ++_reportGen;
+  const uint64_t gen = ++_requestGen;
   __weak RemoteController* weakSelf = self;
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
     RemoteController* me = weakSelf;
-    if (me && me->_reportGen == gen && me->_markedLength == 0) [me reportSoon];
+    if (me && me->_requestGen == gen && me->_markedLength == 0) [me reportSoon];
+  });
+  // Once more a little later: after a click some apps (Chromium) still give
+  // the old place at first. The agent sends the client only what changed.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (ms + 250) * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    RemoteController* me = weakSelf;
+    if (me && me->_requestGen == gen && me->_markedLength == 0) SendToAgent([me report]);
   });
 }
 
@@ -196,11 +203,23 @@ static __weak RemoteController* gCurrent;
       return true;
     };
     bool found = false;
-    if (mk.location != NSNotFound && mk.length > 0) {
-      found = ask(mk.location, false) || ask(mk.location + mk.length - 1, true);
-    }
-    if (!found && sel.location != NSNotFound) {
-      found = (sel.location > 0 && ask(sel.location - 1, true)) || ask(sel.location, false);
+    if (_markedLength > 0) {
+      // Composing: only where the composition starts, the client's candidate
+      // window's anchor. Nothing found: no position, and the client keeps the
+      // one it has. Never the caret's (it moves right with every letter, and
+      // the window would follow it). Chromium's markedRange can be made up
+      // (docs/ime.md, 2): the start is also the caret minus the composition
+      // when the caret is at its end, as it is while typing.
+      if (mk.location != NSNotFound) found = ask(mk.location, false);
+      if (!found && sel.location != NSNotFound && sel.location >= _markedLength) {
+        found = ask(sel.location - _markedLength, false);
+      }
+    } else if (sel.location != NSNotFound) {
+      // The caret itself first: Chromium answers a query that starts at the
+      // caret from its caret cache, anything else from a selection cache that
+      // may still be where the caret was before a click. At the end of the
+      // text (no character there) the right edge of the one before it.
+      found = ask(sel.location, false) || (sel.location > 0 && ask(sel.location - 1, true));
     }
     if (found) {
       // Cocoa's screen coordinates (origin bottom left of the primary
