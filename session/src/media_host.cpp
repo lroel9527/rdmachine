@@ -104,7 +104,10 @@ MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
         std::lock_guard lock(ime_mu_);
         ime_state_.client = active;
         ime_state_.app = active ? app : std::string();
-        if (!active) ime_state_.caret.reset();
+        // Another field (or none): the old place is not where it is. A field
+        // that took the focus reports its own; switching apps, the new one's
+        // activation comes before the old one lets go, so not only on "none".
+        ime_state_.caret.reset();
       }
       SendImeState(false);
     };

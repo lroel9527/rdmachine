@@ -238,6 +238,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   std::set<uint16_t> _imeTaken;  // keys whose key-down the input method took (their key-up goes nowhere)
   __weak RemoteView* _imeView;  // where the input method works now
   NSRect _imeLastCaret;         // screen coordinates; empty = none yet
+  NSPoint _imeLastClick;        // screen point of the last click in the picture; valid if _imeClicked
+  BOOL _imeClicked;
   // Where the caret will be once the text just committed is in, until the
   // server says (a round trip: the next composition starts before that).
   // Stream pixels; the committed text's width is guessed from its width in
@@ -875,6 +877,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeEvent = nil;
   _imeTaken.clear();
   _imeLastCaret = NSZeroRect;
+  _imeClicked = NO;
   _imeAhead.reset();
   _imePixelsPerUnit = 0;
   [self imeShowOverlay];
@@ -1023,6 +1026,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   RemoteWindowController* root = [self imeRoot];
   if (root != self) return [root imeMouseDown];
   _imeAhead.reset();  // the caret goes where the click is
+  _imeLastClick = NSEvent.mouseLocation;
+  _imeClicked = YES;
   if (!_imeMarked) return;
   [_imeView.inputContext discardMarkedText];
   _imeMarked = nil;
@@ -1069,7 +1074,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     }
   }
   if (!NSIsEmptyRect(_imeLastCaret) || _imeLastCaret.size.height > 0) return _imeLastCaret;
-  const NSPoint p = NSEvent.mouseLocation;
+  // A field that has not said where its caret is yet (Chromium, just
+  // focused): it is about where the click that focused it was.
+  const NSPoint p = _imeClicked ? _imeLastClick : NSEvent.mouseLocation;
   return NSMakeRect(p.x, p.y - 20, 1, 20);
 }
 
@@ -1085,6 +1092,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
       return;
     }
     std::optional<rdm::ImeRect> before = me->_imeState ? me->_imeState->caret : std::nullopt;
+    const std::optional<std::string> before_app =
+        me->_imeState ? std::optional<std::string>(me->_imeState->app) : std::nullopt;
     bool answered_ahead = false;
     if (me->_imeAhead) {
       // The server's answer to the commits: after them, or the caret moved
@@ -1105,6 +1114,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
         answered_ahead = answered;
       }
     }
+    // Another app has the field: where the last one's caret was means nothing.
+    if (!before_app || *before_app != copy.app) me->_imeLastCaret = NSZeroRect;
     me->_imeState = copy;
     if (copy.ended && me->_imeMarked) {
       // Ended over there (a click, another app): this Mac's input method lets go too.
