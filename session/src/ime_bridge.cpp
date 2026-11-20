@@ -87,6 +87,11 @@ bool ImeBridge::Commit(uint64_t seq, const std::string& text, int timeout_ms) {
   return acked_seq_ == seq && acked_ok_;
 }
 
+std::string ImeBridge::client_app() const {
+  std::lock_guard lock(mu_);
+  return client_app_;
+}
+
 void ImeBridge::Cancel(uint64_t seq) { Send({{"type", "cancel"}, {"seq", seq}}); }
 
 void ImeBridge::RequestReport(int delay_ms) {
@@ -110,6 +115,10 @@ void ImeBridge::Handle(const nlohmann::json& m) {
     ack_cv_.notify_all();
   } else if (type == "client") {
     client_active_ = m.value("active", false);
+    {
+      std::lock_guard lock(mu_);
+      client_app_ = client_active_ ? m.value("app", "") : "";
+    }
     if (ev.on_client) ev.on_client(client_active_, m.value("app", ""));
   } else if (type == "state") {
     Report r;
@@ -121,6 +130,17 @@ void ImeBridge::Handle(const nlohmann::json& m) {
       for (const auto& v : *it) ok = ok && v.is_number();
       if (ok) r.rect = GlobalRect{(*it)[0].get<double>(), (*it)[1].get<double>(), (*it)[2].get<double>(),
                                   (*it)[3].get<double>()};
+    }
+    if (auto it = m.find("active"); it != m.end() && it->is_boolean()) {
+      r.active = it->get<bool>();
+      r.app = m.value("app", "");
+      // Only the field with the focus says so; an older report of one that
+      // lost it does not take the focus away from the one that has it.
+      if (*r.active) {
+        client_active_ = true;
+        std::lock_guard lock(mu_);
+        client_app_ = r.app;
+      }
     }
     if (ev.on_report) ev.on_report(r);
   } else if (type == "ended") {

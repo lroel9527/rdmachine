@@ -185,3 +185,33 @@ TEST(ImeBridge, AsksForAReportOnlyWhenAFieldHasTheFocus) {
   EXPECT_EQ(m["delay"], 60);
   EXPECT_FALSE(m.contains("seq"));  // it does not stand for a client message
 }
+
+TEST(ImeBridge, AReportOfTheFocusedFieldSaysAFieldHasTheFocus) {
+  // A session that starts after the field got the focus never sees the
+  // "client" message: each report says it again (6.3.6).
+  Fixture f;
+  std::mutex mu;
+  std::vector<ImeBridge::Report> reports;
+  ImeBridge::Events ev;
+  ev.on_report = [&](const ImeBridge::Report& r) {
+    std::lock_guard lock(mu);
+    reports.push_back(r);
+  };
+  f.bridge->SetEvents(ev);
+  f.Connect();
+  EXPECT_FALSE(f.bridge->client_active());
+  f.ime->Send({{"type", "state"}, {"seq", 1}, {"active", false}, {"app", "old"}, {"sel", {0, 0}}});
+  f.ime->Send({{"type", "state"}, {"seq", 2}, {"active", true}, {"app", "com.anthropic.claudefordesktop"}, {"sel", {3, 0}}});
+  ASSERT_TRUE(WaitUntil([&] {
+    std::lock_guard lock(mu);
+    return reports.size() == 2;
+  }));
+  EXPECT_TRUE(f.bridge->client_active());
+  EXPECT_EQ(f.bridge->client_app(), "com.anthropic.claudefordesktop");
+  std::lock_guard lock(mu);
+  ASSERT_TRUE(reports[0].active);
+  EXPECT_FALSE(*reports[0].active);
+  ASSERT_TRUE(reports[1].active);
+  EXPECT_TRUE(*reports[1].active);
+  EXPECT_EQ(reports[1].app, "com.anthropic.claudefordesktop");
+}

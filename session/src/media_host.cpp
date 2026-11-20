@@ -579,6 +579,10 @@ void MediaHost::OnImeReport(const ImeBridge::Report& r) {
   }
   {
     std::lock_guard lock(ime_mu_);
+    if (r.active && *r.active) {
+      ime_state_.client = true;
+      ime_state_.app = r.app;
+    }
     ime_state_.marked = r.marked;
     ime_state_.selected = r.selected;
     if (caret) ime_state_.caret = caret;  // not found: the client keeps the one it has
@@ -937,6 +941,12 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     ime_mode_on_ = false;
     ime_prev_source_.clear();
     ime_displays_ = {display_index};
+    // A text field that got the focus before this session: RDMachine Input
+    // says so only when that changes.
+    if (options_.ime && options_.ime->client_active()) {
+      ime_state_.client = true;
+      ime_state_.app = options_.ime->client_app();
+    }
     ime_debug_ = options_.ime && ImeDebugLogWanted();
     if (ime_debug_) Log("ime debug: on (ImeDebugLog)");
     // Not at the login window (no third-party input method there), not view only.

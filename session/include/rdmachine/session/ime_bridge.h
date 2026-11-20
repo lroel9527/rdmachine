@@ -33,6 +33,8 @@ class ImeBridge {
     uint64_t seq = 0;
     std::optional<ImeRange> marked, selected;
     std::optional<GlobalRect> rect;  // where the composition starts
+    std::optional<bool> active;      // the reporting field has the focus (6.3.6)
+    std::string app;
   };
   // Called on the bridge's thread, one at a time.
   struct Events {
@@ -59,6 +61,8 @@ class ImeBridge {
   // input methods has the focus (as it last said).
   bool connected() const { return connected_.load(); }
   bool client_active() const { return client_active_.load(); }
+  // The app of that text field ("" when none).
+  std::string client_app() const;
 
   void Mark(uint64_t seq, const std::string& text, uint32_t sel_location, uint32_t sel_length);
   // Waits up to timeout_ms for the input method to say it put the text in.
@@ -85,9 +89,10 @@ class ImeBridge {
   std::atomic<bool> connected_{false}, client_active_{false};
 
   std::mutex cb_mu_;  // held while an event runs, so SetEvents can wait for it
-  std::mutex mu_;     // guards the fields below
+  mutable std::mutex mu_;  // guards the fields below
   std::shared_ptr<AgentChannel> channel_;
   Events events_;
+  std::string client_app_;
   uint64_t acked_seq_ = 0;
   bool acked_ok_ = false;
   std::condition_variable ack_cv_;

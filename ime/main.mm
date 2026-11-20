@@ -12,7 +12,7 @@
 //   {"type":"report","delay":60}   -> a state after that many ms (a click or
 //                                     a key may have moved the caret)
 // Ours: {"type":"hello","version":1}, {"type":"client","active":true,"app":"..."},
-//   {"type":"state","seq":1,"marked":[0,6],"sel":[6,0],"rect":[x,y,w,h]} (points,
+//   {"type":"state","seq":1,"active":true,"app":"...","marked":[0,6],"sel":[6,0],"rect":[x,y,w,h]} (points,
 //   top left of the primary display), {"type":"ended","seq":1} (the system
 //   ended the composition: a click elsewhere, another app).
 // Nothing typed is ever logged.
@@ -187,6 +187,10 @@ static __weak RemoteController* gCurrent;
 - (nlohmann::json)report {
   id client = self.client;
   nlohmann::json r{{"type", "state"}, {"seq", _seq}};
+  // Whether this is the field that has the focus, each time: the agent's
+  // sessions come and go, and the "client" message is sent only on a change.
+  r["active"] = gCurrent == self;
+  r["app"] = [[client bundleIdentifier] ?: @"" UTF8String];
   @try {
     const NSRange mk = [client markedRange];
     const NSRange sel = [client selectedRange];
