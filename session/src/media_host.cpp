@@ -225,6 +225,15 @@ void MediaHost::OnInput(void* user, const rda_input_event* ev) {
     ++self->input_failed_;
     self->input_error_ = rda_last_error();
   }
+  self->ImeAfterInput(ev);
+}
+
+// A click or a key may have moved the caret: the client hears where it is
+// before it types the next character (docs/ime.md).
+void MediaHost::ImeAfterInput(const rda_input_event* ev) {
+  if (ev && ime_mode_on_ && options_.ime && (ev->kind == RDA_INPUT_MOUSE_UP || ev->kind == RDA_INPUT_KEY_UP)) {
+    options_.ime->RequestReport(60);
+  }
 }
 
 void MediaHost::Inject(const rda_input_event& ev) {
@@ -403,6 +412,7 @@ void MediaHost::OnImeInput(const ImeInput& in) {
       {
         std::lock_guard lock(ime_mu_);
         ime_mode_ = true;
+        ime_mode_on_ = true;
         if (prev != kImeInputSourceId) ime_prev_source_ = prev;
         ime_state_.seq = in.seq;
       }
@@ -454,6 +464,7 @@ void MediaHost::EndImeMode(const char* why) {
     std::lock_guard lock(ime_mu_);
     if (!ime_mode_) return;
     ime_mode_ = false;
+    ime_mode_on_ = false;
     prev = std::move(ime_prev_source_);
     ime_prev_source_.clear();
   }
@@ -849,6 +860,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     ime_last_sent_ = ImeState{};
     ime_sent_ = false;
     ime_mode_ = false;
+    ime_mode_on_ = false;
     ime_prev_source_.clear();
     ime_displays_ = {display_index};
     // Not at the login window (no third-party input method there), not view only.
@@ -1155,6 +1167,7 @@ void MediaHost::OnExtraInput(void* user, const rda_input_event* ev) {
   auto* x = static_cast<Extra*>(user);
   std::lock_guard lock(x->inject_mu);
   if (x->injector && ev) rda_injector_inject(x->injector, ev);
+  x->self->ImeAfterInput(ev);  // a click on that display may move the caret too
 }
 
 void MediaHost::OnExtraState(void* user, rda_state state, rda_status reason) {

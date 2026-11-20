@@ -143,15 +143,32 @@ NSString* DescribeProcess(pid_t pid) {
                            : pid > 0 ? [NSString stringWithFormat:@"process %d", pid] : @"another process";
 }
 
-bool UseLocalInputMethod() {
+// View > 输入: one setting since 6.3.0. Before, two switches: "Use This
+// Mac's Input Method" (on unless turned off) and "Sync Keyboard Language"
+// (the same); what they said is taken over once.
+NSString* const kInputModeKey = @"InputMode";
+
+InputMode CurrentInputMode() {
   NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-  return [d objectForKey:kUseLocalInputMethodKey] ? [d boolForKey:kUseLocalInputMethodKey] : true;
+  NSString* v = [d stringForKey:kInputModeKey];
+  if ([v isEqualToString:@"local"]) return InputMode::kLocal;
+  if ([v isEqualToString:@"sync"]) return InputMode::kSync;
+  if ([v isEqualToString:@"off"]) return InputMode::kOff;
+  const bool local = [d objectForKey:kUseLocalInputMethodKey] ? [d boolForKey:kUseLocalInputMethodKey] : true;
+  const bool sync = [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
+  return local ? InputMode::kLocal : sync ? InputMode::kSync : InputMode::kOff;
 }
 
-bool SyncKeyboardLanguage() {
-  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-  return [d objectForKey:kSyncKeyboardLanguageKey] ? [d boolForKey:kSyncKeyboardLanguageKey] : true;
+void SetInputMode(InputMode m) {
+  [NSUserDefaults.standardUserDefaults setObject:(m == InputMode::kLocal ? @"local" : m == InputMode::kSync ? @"sync" : @"off")
+                                          forKey:kInputModeKey];
 }
+
+bool UseLocalInputMethod() { return CurrentInputMode() == InputMode::kLocal; }
+
+// Also in the local mode: until the server offers its input method (an older
+// server, RDMachine Input not added there), the server follows as before.
+bool SyncKeyboardLanguage() { return CurrentInputMode() != InputMode::kOff; }
 
 // View > Statistics: the overlay in the remote window's top right corner
 // (figures from the server, docs/protocol.md "会话统计"). Clicks go through it.

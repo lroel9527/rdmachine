@@ -66,6 +66,9 @@ class ImeBridge {
   // time: the caller types the text some other way.
   bool Commit(uint64_t seq, const std::string& text, int timeout_ms);
   void Cancel(uint64_t seq);
+  // Asks for a fresh report delay_ms from now (a click or a key may have
+  // moved the caret); later requests replace one still waiting.
+  void RequestReport(int delay_ms);
 
  private:
   void Loop();

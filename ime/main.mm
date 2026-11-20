@@ -9,6 +9,8 @@
 //   {"type":"mark","seq":1,"text":"ni'hao","sel":[6,0]}
 //   {"type":"commit","seq":2,"text":"你好"}   -> {"type":"ack","seq":2,"ok":true}
 //   {"type":"cancel","seq":3}
+//   {"type":"report","delay":60}   -> a state after that many ms (a click or
+//                                     a key may have moved the caret)
 // Ours: {"type":"hello","version":1}, {"type":"client","active":true,"app":"..."},
 //   {"type":"state","seq":1,"marked":[0,6],"sel":[6,0],"rect":[x,y,w,h]} (points,
 //   top left of the primary display), {"type":"ended","seq":1} (the system
@@ -18,6 +20,7 @@
 #import <InputMethodKit/InputMethodKit.h>
 #include <os/log.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -76,6 +79,19 @@ static __weak RemoteController* gCurrent;
 - (void)activateServer:(id)sender {
   gCurrent = self;
   SendToAgent({{"type", "client"}, {"active", true}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]}});
+  // Where the caret is before anything is typed: the client's candidate
+  // window then starts in the right place on the first character.
+  [self reportAfter:30];
+}
+
+// A report `ms` from now; a later request replaces one still waiting.
+- (void)reportAfter:(int)ms {
+  const uint64_t gen = ++_reportGen;
+  __weak RemoteController* weakSelf = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    RemoteController* me = weakSelf;
+    if (me && me->_reportGen == gen && me->_markedLength == 0) [me reportSoon];
+  });
 }
 
 - (void)deactivateServer:(id)sender {
@@ -111,7 +127,7 @@ static __weak RemoteController* gCurrent;
 - (void)agentMessage:(const nlohmann::json&)m {
   id client = self.client;
   const std::string type = m.value("type", "");
-  _seq = m.value("seq", uint64_t{0});
+  if (m.contains("seq")) _seq = m.value("seq", uint64_t{0});
   const NSRange none = NSMakeRange(NSNotFound, NSNotFound);
   if (type == "mark") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
@@ -129,6 +145,8 @@ static __weak RemoteController* gCurrent;
     _markedLength = 0;
     SendToAgent({{"type", "ack"}, {"seq", _seq}, {"ok", true}});
     [self reportSoon];  // where the next composition will start
+  } else if (type == "report") {
+    [self reportAfter:std::clamp(m.value("delay", 0), 0, 1000)];
   } else if (type == "cancel") {
     [client setMarkedText:@"" selectionRange:NSMakeRange(0, 0) replacementRange:none];
     _markedLength = 0;

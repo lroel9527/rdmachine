@@ -161,9 +161,13 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 
 ### 6.1 什么时候用本机输入法
 
-同时满足才用：服务端支持（第 5 节）、菜单 “View → Use This Mac’s Input Method” 打开（默认打开）、本机当前输入源是输入法（`input_method` 为真）、服务端最近的状态 `available` 且不 `secure`、不是只看模式、不在登录窗口。
+菜单“显示 → 输入”三选一（6.3.0 起；之前是两个会冲突的开关，lroel 2026-11-20 指出）：
 
-否则按现在的方式发原始按键，并照旧同步键盘语言（客户端用普通布局时，服务端选对应的布局，和今天一样）。
+- **用这台 Mac 的输入法**（默认）：服务端支持（第 5 节）、状态 `available` 且不 `secure`、不是只看模式时，客户端发 `mode:"on"`，服务端**一直**停在 RDMachine Input，不管客户端当前是拼音还是 ABC（lroel 要求：选了哪种方式，服务端就自动选对应的输入法）。客户端是输入法（`input_method` 为真）时按键先交给本机输入法；是普通布局（ABC）时按键原样发，经 RDMachine Input 放过，在服务端按 ABC 解释。条件不满足时（老服务端、没加 RDMachine Input、密码框）退回同步键盘语言。
+- **同步键盘语言**：发 `mode:"off"`，服务端切回原来的输入源，之后跟着客户端的输入源切（和 6.1 一样）。
+- **按键原样发**：两样都不做。
+
+已知的限制：用法语之类非 ASCII 布局又选了第一项时，切到 ABC 布局打的键在服务端按 ABC 解释。
 
 ### 6.2 按键怎么走
 
@@ -183,7 +187,8 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 
 `firstRectForCharacterRange:actualRange:` 用服务端最近的 `caret` 回答（换算成屏幕坐标，矩形底边就是候选窗的顶边）。
 
-- 一段组字刚开始（第一个字母）时还没有远程位置，先用上一次的 `caret`；也没有的话用鼠标所在的位置。
+- 光标位置要在打第一个字母**之前**就有（6.3.0；lroel 发现空输入框打第一个字时候选窗位置不对：系统拼音只在下一个按键时才重新问位置，`invalidateCharacterCoordinates` 不会立刻挪动第一个字的候选窗）。所以服务端不等组字就报：输入框获得焦点时（RDMachine Input 的 `activateServer:`，30 ms 后）、每次鼠标抬起和按键抬起后（agent 让它 60 ms 后报，后来的请求取代还在等的）。空输入框问字符 0 也有位置（探测第一版：Safari、Claude 都有）。
+- 还是没有远程位置时，先用上一次的 `caret`；也没有的话用鼠标所在的位置。
 - 收到对应当前 `seq` 的新 `caret` 后调用 `[inputContext invalidateCharacterCoordinates]`，本机输入法立即把候选窗挪过去。实际效果：第一个字母后约一个来回内候选窗挪到位，之后的字母不动（组字起点不变）。
 
 ### 6.4 远程没有输入框时
@@ -215,7 +220,7 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 
 ### 7.3 输入源
 
-- 客户端发 `mode:"on"`：agent 记下当前输入源，选中 RDMachine 输入法（`rda_injector_select_input_source`）。它放过的按键由应用按它关联的 ASCII 布局（ABC）解释，所以不组字时和 ABC 一样。
+- 客户端在“用这台 Mac 的输入法”模式下发 `mode:"on"`（不论它当前是拼音还是 ABC）：agent 记下当前输入源，选中 RDMachine 输入法（`rda_injector_select_input_source`）。它放过的按键由应用按它关联的 ASCII 布局（ABC）解释，所以不组字时和 ABC 一样。
 - `mode:"off"`、会话结束：切回记下的输入源；客户端改用普通布局时按现有的 `ChooseInputSource` 选。
 - 登录窗口不用（第三方输入法在那里不存在），照 3.2.3 选 ASCII 布局。
 - 安全输入：agent 每次组字前和状态变化时查 `IsSecureEventInputEnabled()`，为真就报 `secure`。

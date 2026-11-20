@@ -225,7 +225,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // The client's input method (docs/ime.md), kept in the main window's
   // controller for all of the session's windows. Main thread.
   std::optional<rdm::ImeState> _imeState;  // the server's last word; none = it does not offer it
-  BOOL _imeMode;                // keys go to this Mac's input method
+  BOOL _imeMode;                // the server is on RDMachine Input for us
+  BOOL _imeLocalIsIM;           // this Mac's input source composes (Pinyin, ...): keys go through it
   uint64_t _imeSeq;             // the last ime message sent
   uint64_t _imeComposingSeq;    // the message that started the composition
   NSString* _imeMarked;         // the composition, nil when none
@@ -871,9 +872,13 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (_extraIndex >= 0) return;
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
-  const bool local_ime = rda_current_input_source(&cur) == RDA_OK && cur.input_method != 0;
+  const BOOL was_im = _imeLocalIsIM;
+  _imeLocalIsIM = rda_current_input_source(&cur) == RDA_OK && cur.input_method != 0;
+  if (was_im && !_imeLocalIsIM && _imeMarked) [self imeUnmark];  // switched away mid-composition
+  // The server stays on RDMachine Input whatever this Mac is on: with ABC
+  // here the keys go as keys and pass through it as ABC there.
   const BOOL want = UseLocalInputMethod() && !gObserveOnly && _viewer && _imeState && _imeState->available &&
-                    !_imeState->secure && local_ime;
+                    !_imeState->secure;
   if (want == _imeMode) return;
   if (!want && _imeMarked) {
     [_imeView.inputContext discardMarkedText];
@@ -887,6 +892,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   m.mode_on = want;
   [self imeSend:m];
   NSLog(@"this Mac's input method: %@", want ? @"on (the server is on RDMachine Input)" : @"off");
+  [self renderStats];
   if (!want) {
     _sentInputSource.clear();
     [self sendInputSource:YES];  // the server follows this Mac's input source again
@@ -897,6 +903,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 // method took the key, or it is the key-up of one it took.
 - (BOOL)imeTakes:(NSEvent*)e from:(RemoteWindowController*)window {
   if (!_imeMode || (e.type != NSEventTypeKeyDown && e.type != NSEventTypeKeyUp)) return NO;
+  if (!_imeLocalIsIM && e.type == NSEventTypeKeyDown) return NO;  // ABC here: a key as a key
   if (e.type == NSEventTypeKeyUp) {
     if (!_imeTaken.count(e.keyCode)) return NO;
     _imeTaken.erase(e.keyCode);

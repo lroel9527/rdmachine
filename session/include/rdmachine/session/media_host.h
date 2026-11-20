@@ -175,6 +175,7 @@ class MediaHost : public ServerDelegate {
   // Leaves the input method mode: the input source from before comes back.
   void EndImeMode(const char* why);
   bool ImeSourceEnabled();
+  void ImeAfterInput(const rda_input_event* ev);
   // About once a second while a session runs: a SessionStatsReport to the
   // client for its overlay (docs/protocol.md, "会话统计").
   void StatsLoop();
@@ -229,6 +230,7 @@ class MediaHost : public ServerDelegate {
   bool ime_sent_ = false;        // something went out this session
   bool ime_available_ = false;   // this session can take the client's input method
   bool ime_mode_ = false;        // the client types with its input method now
+  std::atomic<bool> ime_mode_on_{false};  // the same, for the input path without the lock
   std::string ime_prev_source_;  // the input source before ime_mode_
   std::vector<int32_t> ime_displays_;  // rdaccel's display index of each session display (0 = main)
   std::atomic<bool> media_connected_{false};

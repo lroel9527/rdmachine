@@ -1042,10 +1042,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   } else if (item.action == @selector(setStatsOpacity:)) {
     item.state = item.tag == StatsOpacity() ? NSControlStateValueOn : NSControlStateValueOff;
     return StatsShown();
-  } else if (item.action == @selector(toggleSyncKeyboardLanguage:)) {
-    item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
-  } else if (item.action == @selector(toggleUseLocalInputMethod:)) {
-    item.state = UseLocalInputMethod() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(setInputMode:)) {
+    item.state = item.tag == static_cast<NSInteger>(CurrentInputMode()) ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleUseAllDisplays:)) {
     item.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(togglePlaySound:)) {
@@ -1094,17 +1092,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSNotificationCenter.defaultCenter postNotificationName:kUseAllDisplaysChanged object:nil];
 }
 
-- (void)toggleUseLocalInputMethod:(NSMenuItem*)item {
-  const bool on = !UseLocalInputMethod();
-  [NSUserDefaults.standardUserDefaults setBool:on forKey:kUseLocalInputMethodKey];
-  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+- (void)setInputMode:(NSMenuItem*)item {
+  SetInputMode(static_cast<InputMode>(item.tag));
+  // Each window leaves or enters the input method mode first, then the sync
+  // follows (or stops).
   [NSNotificationCenter.defaultCenter postNotificationName:kUseLocalInputMethodChanged object:nil];
-}
-
-- (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
-  const bool on = !SyncKeyboardLanguage();
-  [NSUserDefaults.standardUserDefaults setBool:on forKey:kSyncKeyboardLanguageKey];
-  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kSyncKeyboardLanguageChanged object:nil];
 }
 
@@ -1250,18 +1242,29 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   observe.target = self;
   observe.toolTip = @"只看那台 Mac 的画面：这里的键盘、鼠标和滚动都不发过去。再选一次（或按 ⌃⌥⌘O）恢复控制。每次打开客户端都从控制开始。";
   [view addItem:NSMenuItem.separatorItem];
-  NSMenuItem* sync = [view addItemWithTitle:@"同步键盘语言"
-                                     action:@selector(toggleSyncKeyboardLanguage:)
-                              keyEquivalent:@""];
-  sync.target = self;
-  sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
-  sync.toolTip = @"被控端跟着这台 Mac 切换输入法（拼音、ABC 等），包括用 Caps Lock 切换的时候。";
-  NSMenuItem* localIme = [view addItemWithTitle:@"用这台 Mac 的输入法"
-                                         action:@selector(toggleUseLocalInputMethod:)
-                                  keyEquivalent:@""];
-  localIme.target = self;
-  localIme.state = UseLocalInputMethod() ? NSControlStateValueOn : NSControlStateValueOff;
-  localIme.toolTip = @"用这台 Mac 的输入法打字，候选窗在这里画、贴着那台 Mac 的光标，不用等网络。需要被控端 6.2.0 以上，并在它的系统设置里加上 RDMachine Input。";
+  // Typing: one of three (docs/ime.md). The server follows: RDMachine Input
+  // for this Mac's input method, the matching input source for sync.
+  struct InputItem {
+    NSString* title;
+    NSString* tip;
+    InputMode mode;
+  };
+  const InputItem inputs[] = {
+      {@"输入：用这台 Mac 的输入法",
+       @"用这台 Mac 的输入法打字，候选窗在这里画、贴着那台 Mac 的光标，不用等网络；那台 Mac 自动切到 RDMachine Input。"
+       @"需要被控端 6.2 以上，并在它的系统设置里加上 RDMachine Input；不满足时按“同步键盘语言”。",
+       InputMode::kLocal},
+      {@"输入：同步键盘语言", @"被控端跟着这台 Mac 切换输入法（拼音、ABC 等），包括用 Caps Lock 切换的时候；组字和候选窗在被控端。",
+       InputMode::kSync},
+      {@"输入：按键原样发", @"不同步，也不用这台 Mac 的输入法：被控端用它自己选的输入法。", InputMode::kOff},
+  };
+  for (const InputItem& in : inputs) {
+    NSMenuItem* item = [view addItemWithTitle:in.title action:@selector(setInputMode:) keyEquivalent:@""];
+    item.target = self;
+    item.tag = static_cast<NSInteger>(in.mode);
+    item.state = CurrentInputMode() == in.mode ? NSControlStateValueOn : NSControlStateValueOff;
+    item.toolTip = in.tip;
+  }
   NSMenuItem* textMode = [view addItemWithTitle:@"省流量（文字清晰）"
                                          action:@selector(toggleTextMode:)
                                   keyEquivalent:@""];

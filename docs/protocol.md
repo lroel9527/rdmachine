@@ -340,7 +340,8 @@ data 走 rdaccel 1.10 的批量通道（`rda_*_send_bulk_message`）：排在画
 
 - `0x10014` ime（`kImeMessageType`，`core/include/rdmachine/ime_wire.h`），客户端到服务端，用 `rda_viewer_send_input_message` 发，和按键同序：`{"seq":1,"mark":"ni'hao","sel":[6,0]}`（组字更新）、`{"seq":2,"commit":"你好"}`（上屏）、`{"seq":3,"cancel":true}`、`{"seq":4,"mode":"on"|"off"}`（开始/停止用本机输入法）。
 - `0x10015` ime state（`kImeStateMessageType`），服务端到客户端，画面连接建立时发一次，之后有变化才发：`{"available":true,"client":true,"secure":false,"app":"com.apple.Safari","seq":1,"caret":{"display":0,"x":1312,"y":384,"w":2,"h":48},"marked":[0,6],"sel":[6,0]}`；`ended` 为真表示组字被远程结束了（点了别处、换了应用）。`caret` 是那块显示器画面的像素（0 = 主画面，1.. = 扩展桌面的显示器），左上角为原点。
-- 服务端收到 `mode:"on"` 时记下当前输入源、选中 RDMachine Input（`org.rdmachine.inputmethod.Remote`），`off` 或会话结束时切回；这期间不理会键盘语言同步。上屏时等输入法回执最多 100 ms（这期间后面的按键排队）；没有接受输入法的输入框或没有回执时，按文字注入（`RDA_INPUT_TEXT`）。
+- 客户端在“显示 → 输入 → 用这台 Mac 的输入法”下发 `mode:"on"`（6.3.0 起不论它当前是拼音还是 ABC），“同步键盘语言”下发 `off`。服务端收到 `mode:"on"` 时记下当前输入源、选中 RDMachine Input（`org.rdmachine.inputmethod.Remote`），`off` 或会话结束时切回；这期间不理会键盘语言同步。上屏时等输入法回执最多 100 ms（这期间后面的按键排队）；没有接受输入法的输入框或没有回执时，按文字注入（`RDA_INPUT_TEXT`）。
+- 光标位置不等组字就报（6.3.0）：输入框获得焦点时，以及服务端注入鼠标抬起、按键抬起后约 60 ms，客户端打第一个字时候选窗就在对的地方。
 - 服务端的 agent 在 `~/Library/Application Support/RDMachine/ime.sock` 等 RDMachine Input 连进来（只认同一个证书签的程序），帧格式同守护进程和 agent 之间。RDMachine Input 由 `rdmachine-service install` 装到 `/Library/Input Methods`；用户要在系统设置 → 键盘 → 输入法里手动加一次，服务端菜单里有入口。
 
 ## 会话统计

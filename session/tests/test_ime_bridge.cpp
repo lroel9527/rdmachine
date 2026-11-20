@@ -172,3 +172,16 @@ TEST(ImeBridge, SomeoneElsesProcessIsTurnedAway) {
   EXPECT_EQ(ch.Receive(1000).status, AgentChannel::Received::kClosed);
   EXPECT_FALSE(f.bridge->connected());
 }
+
+TEST(ImeBridge, AsksForAReportOnlyWhenAFieldHasTheFocus) {
+  Fixture f;
+  f.Connect();
+  f.bridge->RequestReport(60);  // no field: nothing goes out
+  f.ime->Send({{"type", "client"}, {"active", true}, {"app", "a"}});
+  ASSERT_TRUE(WaitUntil([&] { return f.bridge->client_active(); }));
+  f.bridge->RequestReport(60);
+  const nlohmann::json m = f.Next();
+  EXPECT_EQ(m["type"], "report");
+  EXPECT_EQ(m["delay"], 60);
+  EXPECT_FALSE(m.contains("seq"));  // it does not stand for a client message
+}

@@ -89,6 +89,10 @@ bool ImeBridge::Commit(uint64_t seq, const std::string& text, int timeout_ms) {
 
 void ImeBridge::Cancel(uint64_t seq) { Send({{"type", "cancel"}, {"seq", seq}}); }
 
+void ImeBridge::RequestReport(int delay_ms) {
+  if (connected_ && client_active_) Send({{"type", "report"}, {"delay", delay_ms}});
+}
+
 void ImeBridge::Handle(const nlohmann::json& m) {
   const std::string type = m.value("type", "");
   std::lock_guard cb(cb_mu_);

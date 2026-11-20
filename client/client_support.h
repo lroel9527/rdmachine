@@ -89,7 +89,12 @@ NSScreen* ScreenAt(NSScreen* home, int32_t x, int32_t y);
 pid_t SecureInputHolder();
 pid_t ReleaseSecureInput();
 NSString* DescribeProcess(pid_t pid);
-bool SyncKeyboardLanguage();
+// View > 输入 (docs/ime.md): this Mac's input method, keyboard language
+// sync, or neither.
+enum class InputMode { kLocal = 0, kSync = 1, kOff = 2 };
+InputMode CurrentInputMode();
+void SetInputMode(InputMode m);
+bool SyncKeyboardLanguage();  // the server follows this Mac's input source (also the local mode's fallback)
 bool UseLocalInputMethod();
 extern NSString* const kStatsShownKey;
 extern NSString* const kStatsFieldsKey;
