@@ -1242,29 +1242,6 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   observe.target = self;
   observe.toolTip = @"只看那台 Mac 的画面：这里的键盘、鼠标和滚动都不发过去。再选一次（或按 ⌃⌥⌘O）恢复控制。每次打开客户端都从控制开始。";
   [view addItem:NSMenuItem.separatorItem];
-  // Typing: one of three (docs/ime.md). The server follows: RDMachine Input
-  // for this Mac's input method, the matching input source for sync.
-  struct InputItem {
-    NSString* title;
-    NSString* tip;
-    InputMode mode;
-  };
-  const InputItem inputs[] = {
-      {@"输入：用这台 Mac 的输入法",
-       @"用这台 Mac 的输入法打字，候选窗在这里画、贴着那台 Mac 的光标，不用等网络；那台 Mac 自动切到 RDMachine Input。"
-       @"需要被控端 6.2 以上，并在它的系统设置里加上 RDMachine Input；不满足时按“同步键盘语言”。",
-       InputMode::kLocal},
-      {@"输入：同步键盘语言", @"被控端跟着这台 Mac 切换输入法（拼音、ABC 等），包括用 Caps Lock 切换的时候；组字和候选窗在被控端。",
-       InputMode::kSync},
-      {@"输入：按键原样发", @"不同步，也不用这台 Mac 的输入法：被控端用它自己选的输入法。", InputMode::kOff},
-  };
-  for (const InputItem& in : inputs) {
-    NSMenuItem* item = [view addItemWithTitle:in.title action:@selector(setInputMode:) keyEquivalent:@""];
-    item.target = self;
-    item.tag = static_cast<NSInteger>(in.mode);
-    item.state = CurrentInputMode() == in.mode ? NSControlStateValueOn : NSControlStateValueOff;
-    item.toolTip = in.tip;
-  }
   NSMenuItem* textMode = [view addItemWithTitle:@"省流量（文字清晰）"
                                          action:@selector(toggleTextMode:)
                                   keyEquivalent:@""];
@@ -1307,6 +1284,34 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   }
   statsItem.submenu = stats;
   viewItem.submenu = view;
+  // 输入法: a menu of its own, one choice of three.
+  NSMenuItem* imeItem = [[NSMenuItem alloc] init];
+  [bar addItem:imeItem];
+  NSMenu* ime = [[NSMenu alloc] initWithTitle:@"输入法"];
+  // Typing: one of three (docs/ime.md). The server follows: RDMachine Input
+  // for this Mac's input method, the matching input source for sync.
+  struct InputItem {
+    NSString* title;
+    NSString* tip;
+    InputMode mode;
+  };
+  const InputItem inputs[] = {
+      {@"用这台 Mac 的输入法",
+       @"用这台 Mac 的输入法打字，候选窗在这里画、贴着那台 Mac 的光标，不用等网络；那台 Mac 自动切到 RDMachine Input。"
+       @"需要被控端 6.2 以上，并在它的系统设置里加上 RDMachine Input；不满足时按“同步键盘语言”。",
+       InputMode::kLocal},
+      {@"同步键盘语言", @"被控端跟着这台 Mac 切换输入法（拼音、ABC 等），包括用 Caps Lock 切换的时候；组字和候选窗在被控端。",
+       InputMode::kSync},
+      {@"按键原样发", @"不同步，也不用这台 Mac 的输入法：被控端用它自己选的输入法。", InputMode::kOff},
+  };
+  for (const InputItem& in : inputs) {
+    NSMenuItem* item = [ime addItemWithTitle:in.title action:@selector(setInputMode:) keyEquivalent:@""];
+    item.target = self;
+    item.tag = static_cast<NSInteger>(in.mode);
+    item.state = CurrentInputMode() == in.mode ? NSControlStateValueOn : NSControlStateValueOff;
+    item.toolTip = in.tip;
+  }
+  imeItem.submenu = ime;
   NSApp.mainMenu = bar;
 }
 

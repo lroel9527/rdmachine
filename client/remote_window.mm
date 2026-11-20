@@ -225,6 +225,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // The client's input method (docs/ime.md), kept in the main window's
   // controller for all of the session's windows. Main thread.
   std::optional<rdm::ImeState> _imeState;  // the server's last word; none = it does not offer it
+  // A state that came before attachSession (the picture connects before the
+  // window has the session): taken over once it does.
+  std::optional<rdm::ImeState> _imeEarly;
   BOOL _imeMode;                // the server is on RDMachine Input for us
   BOOL _imeLocalIsIM;           // this Mac's input source composes (Pinyin, ...): keys go through it
   uint64_t _imeSeq;             // the last ime message sent
@@ -636,6 +639,12 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
                                              name:kUseLocalInputMethodChanged
                                            object:nil];
   [self imeReset];  // a new session: the server says again whether it offers it
+  if (_imeEarly) {
+    // It said so before this window had the session.
+    const rdm::ImeState early = *_imeEarly;
+    _imeEarly.reset();
+    [self imeStateReport:early];
+  }
   [NSNotificationCenter.defaultCenter addObserver:self
                                          selector:@selector(sendPictureMode)
                                              name:kTextModeChanged
@@ -1035,7 +1044,11 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   const rdm::ImeState copy = s;
   dispatch_async(dispatch_get_main_queue(), ^{
     RemoteWindowController* me = weakSelf;
-    if (!me || !me->_session) return;
+    if (!me) return;
+    if (!me->_session) {
+      me->_imeEarly = copy;
+      return;
+    }
     const std::optional<rdm::ImeRect> before = me->_imeState ? me->_imeState->caret : std::nullopt;
     me->_imeState = copy;
     if (copy.ended && me->_imeMarked) {
@@ -1096,10 +1109,15 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (!force && _sentInputSource == cur.id) return;
   const rdm::InputSourceState s{cur.id, cur.name, cur.language, cur.input_method != 0, cur.ascii_capable != 0};
   const std::string payload = rdm::EncodeInputSource(s);
-  if (_session->SendMessage(rdm::kInputSourceMessageType, reinterpret_cast<const uint8_t*>(payload.data()),
-                              payload.size()) == RDA_OK) {
-    _sentInputSource = cur.id;
-  }
+  const auto* bytes = reinterpret_cast<const uint8_t*>(payload.data());
+  // On the input channel where the server takes it (6.2 and later): in order
+  // with the input method's mode messages, so a switch back to sync is never
+  // overtaken by the sync itself (the server ignores sync while it is on
+  // RDMachine Input). Older servers: the message channel, as before.
+  rda_status st = _imeState ? _session->SendInputMessage(rdm::kInputSourceMessageType, bytes, payload.size())
+                            : RDA_ERR_UNSUPPORTED;
+  if (st == RDA_ERR_UNSUPPORTED) st = _session->SendMessage(rdm::kInputSourceMessageType, bytes, payload.size());
+  if (st == RDA_OK) _sentInputSource = cur.id;
 }
 
 - (void)inputSourceChanged:(NSNotification*)note {
