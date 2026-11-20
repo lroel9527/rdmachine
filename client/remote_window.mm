@@ -238,6 +238,15 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   std::set<uint16_t> _imeTaken;  // keys whose key-down the input method took (their key-up goes nowhere)
   __weak RemoteView* _imeView;  // where the input method works now
   NSRect _imeLastCaret;         // screen coordinates; empty = none yet
+  // Where the caret will be once the text just committed is in, until the
+  // server says (a round trip: the next composition starts before that).
+  // Stream pixels; the committed text's width is guessed from its width in
+  // the system font, scaled by what the last commits really took (6.3.6).
+  std::optional<rdm::ImeRect> _imeAhead;
+  uint64_t _imeAheadSeq;        // the commit it waits for
+  int32_t _imeAheadFromX;       // the caret the server last gave, before those commits
+  double _imeAheadUnits;        // their width at 100 pt
+  double _imePixelsPerUnit;     // learned; 0 = not yet
   NSPanel* _imeOverlay;         // the composition, when no remote field shows it
   NSTextField* _imeOverlayText;
 }
@@ -866,6 +875,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeEvent = nil;
   _imeTaken.clear();
   _imeLastCaret = NSZeroRect;
+  _imeAhead.reset();
+  _imePixelsPerUnit = 0;
   [self imeShowOverlay];
 }
 
@@ -961,8 +972,31 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   RemoteWindowController* root = [self imeRoot];
   if (root != self) return [root imeInsert:text];
   _imeMarked = nil;
-  if (text.length) [self imeSend:{rdm::ImeInput::Kind::kCommit, ++_imeSeq, text.UTF8String ?: ""}];
+  if (text.length) {
+    [self imeSend:{rdm::ImeInput::Kind::kCommit, ++_imeSeq, text.UTF8String ?: ""}];
+    [self imeGuessAhead:text];
+  }
   [self imeShowOverlay];
+}
+
+// The caret after `text`, for the composition that may start before the
+// server's answer (see _imeAhead).
+- (void)imeGuessAhead:(NSString*)text {
+  if (!_imeState || !_imeState->client) return;
+  const std::optional<rdm::ImeRect> from = _imeAhead ? _imeAhead : _imeState->caret;
+  if (!from) return;
+  if (!_imeAhead) {
+    _imeAheadFromX = from->x;
+    _imeAheadUnits = 0;
+  }
+  const double units = [text sizeWithAttributes:@{NSFontAttributeName : [NSFont systemFontOfSize:100]}].width;
+  // Before any commit was measured: text about 0.8 of the line height.
+  const double per_unit = _imePixelsPerUnit > 0 ? _imePixelsPerUnit : from->height * 0.8 / 100.0;
+  rdm::ImeRect r = *from;
+  r.x += static_cast<int32_t>(std::lround(units * per_unit));
+  _imeAhead = r;
+  _imeAheadSeq = _imeSeq;
+  _imeAheadUnits += units;
 }
 
 // The input method gives the key back (it is not composing, or it is a key
@@ -988,6 +1022,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 - (void)imeMouseDown {
   RemoteWindowController* root = [self imeRoot];
   if (root != self) return [root imeMouseDown];
+  _imeAhead.reset();  // the caret goes where the click is
   if (!_imeMarked) return;
   [_imeView.inputContext discardMarkedText];
   _imeMarked = nil;
@@ -1019,8 +1054,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 - (NSRect)imeCaretRect {
   RemoteWindowController* root = [self imeRoot];
   if (root != self) return [root imeCaretRect];
-  if (_imeState && _imeState->caret) {
-    const rdm::ImeRect& c = *_imeState->caret;
+  if (_imeState && (_imeAhead || _imeState->caret)) {
+    const rdm::ImeRect& c = _imeAhead ? *_imeAhead : *_imeState->caret;
     RemoteWindowController* w = nil;
     if (c.display == 0) {
       w = self;
@@ -1049,7 +1084,27 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
       me->_imeEarly = copy;
       return;
     }
-    const std::optional<rdm::ImeRect> before = me->_imeState ? me->_imeState->caret : std::nullopt;
+    std::optional<rdm::ImeRect> before = me->_imeState ? me->_imeState->caret : std::nullopt;
+    bool answered_ahead = false;
+    if (me->_imeAhead) {
+      // The server's answer to the commits: after them, or the caret moved
+      // from where it was before them. Their real width teaches the guess.
+      const bool answered = copy.seq > me->_imeAheadSeq ||
+                            (copy.seq == me->_imeAheadSeq && copy.caret && copy.caret != before);
+      if (answered || !copy.client) {
+        if (answered && copy.caret && copy.caret->display == me->_imeAhead->display &&
+            copy.caret->y == me->_imeAhead->y && me->_imeAheadUnits > 0) {
+          const double dx = copy.caret->x - me->_imeAheadFromX;
+          const double guess = copy.caret->height * 0.8 / 100.0;
+          if (dx > 0 && dx / me->_imeAheadUnits > guess / 3 && dx / me->_imeAheadUnits < guess * 3) {
+            me->_imePixelsPerUnit = dx / me->_imeAheadUnits;
+          }
+        }
+        before = me->_imeAhead;  // what the input method was given
+        me->_imeAhead.reset();
+        answered_ahead = answered;
+      }
+    }
     me->_imeState = copy;
     if (copy.ended && me->_imeMarked) {
       // Ended over there (a click, another app): this Mac's input method lets go too.
@@ -1058,7 +1113,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     }
     [me imeUpdateMode];
     // A new position for the composition under way: the candidate window moves.
-    if (me->_imeMarked && copy.caret != before && copy.seq >= me->_imeComposingSeq) {
+    // The answer to the commit just before this composition counts too: it
+    // is where this composition starts, and it carries the commit's number.
+    if (me->_imeMarked && copy.caret != before && (copy.seq >= me->_imeComposingSeq || answered_ahead)) {
       [me->_imeView.inputContext invalidateCharacterCoordinates];
     }
     [me imeShowOverlay];
