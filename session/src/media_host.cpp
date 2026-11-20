@@ -506,6 +506,8 @@ void MediaHost::SendImeState(bool force) {
   rda_host* h = mode_host_.load();
   if (!h || !options_.ime) return;
   std::string payload;
+  bool first = false;
+  bool available = false;
   {
     std::lock_guard lock(ime_mu_);
     ImeState s = ime_state_;
@@ -513,11 +515,18 @@ void MediaHost::SendImeState(bool force) {
     s.secure = SecureInputActive();
     s.client = s.client && options_.ime->connected();
     if (!force && ime_sent_ && s == ime_last_sent_) return;
+    first = !ime_sent_;
+    available = s.available;
     ime_last_sent_ = s;
     ime_sent_ = true;
     payload = EncodeImeState(s);
   }
-  rda_host_send_message(h, kImeStateMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  const rda_status st =
+      rda_host_send_message(h, kImeStateMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  if (first) {
+    Log(std::string("the client's input method: ") + (available ? "offered to the client" : "not offered") +
+        (st == RDA_OK ? "" : std::string(" (could not send: ") + rda_status_str(st) + ")"));
+  }
 }
 
 void MediaHost::OnState(void* user, rda_state state, rda_status reason) {
@@ -957,6 +966,10 @@ void MediaHost::StatsLoop() {
       static thread_local int tick = 0;
       if (++tick % 5 == 0) LogInput();
     }
+    // The client's input method: the first state (the picture may connect
+    // before mode_host_ is set, and that first message then goes nowhere),
+    // and a password field taking secure input or letting it go.
+    if (media_connected_) SendImeState(false);
     {
       std::lock_guard lock(mu_);  // host_ stays alive while it is held
       if (!host_) break;
