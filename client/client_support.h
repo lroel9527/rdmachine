@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "rdmachine/desktop.h"
+#include "rdmachine/ime_wire.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/audio_control.h"
 #include "rdmachine/picture_mode.h"
@@ -66,6 +67,8 @@ NSString* NS(const std::string& s);
 uint32_t Modifiers(NSEventModifierFlags f);
 extern NSString* const kSyncKeyboardLanguageKey;
 extern NSString* const kSyncKeyboardLanguageChanged;
+extern NSString* const kUseLocalInputMethodKey;
+extern NSString* const kUseLocalInputMethodChanged;
 extern NSString* const kTextModeKey;
 extern NSString* const kTextModeChanged;
 bool TextMode();
@@ -87,6 +90,7 @@ pid_t SecureInputHolder();
 pid_t ReleaseSecureInput();
 NSString* DescribeProcess(pid_t pid);
 bool SyncKeyboardLanguage();
+bool UseLocalInputMethod();
 extern NSString* const kStatsShownKey;
 extern NSString* const kStatsFieldsKey;
 extern NSString* const kStatsFieldsKnownKey;

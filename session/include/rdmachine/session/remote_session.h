@@ -88,6 +88,9 @@ class RemoteSession {
   // session moves, so do not keep the viewer pointer). Thread-safe.
   rda_status SendInput(const rda_input_event& ev);
   rda_status SendMessage(uint32_t type, const uint8_t* payload, size_t n);
+  // In order with SendInput (rda_viewer_send_input_message): the client's
+  // input method (docs/ime.md).
+  rda_status SendInputMessage(uint32_t type, const uint8_t* payload, size_t n);
   // On rdaccel's bulk channel (below the picture), and how much of it waits
   // there (-1: not known).
   rda_status SendBulkMessage(uint32_t type, const uint8_t* payload, size_t n);

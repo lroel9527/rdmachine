@@ -5,8 +5,11 @@
 
 @class RemoteWindowController;
 
-// The picture, the remote cursor on top, and all local input.
-@interface RemoteView : NSView
+// The picture, the remote cursor on top, and all local input. It is the text
+// input client of this Mac's input method when the client types with it
+// (docs/ime.md): what the input method composes and commits goes to the
+// server, and its candidate window is put next to the remote caret.
+@interface RemoteView : NSView <NSTextInputClient>
 @property(nonatomic, weak) RemoteWindowController* owner;
 @property(nonatomic) BOOL pointerInside;
 // Mouse moves count even when the window is not the key one: the windows of
@@ -86,6 +89,17 @@
 - (void)streamInfo:(int32_t)w height:(int32_t)h;
 - (void)cursor:(const rda_cursor_state*)c;
 - (void)statsReport:(const rdm::SessionStatsReport&)r;
+// The client's input method (docs/ime.md). imeStateReport: on the transport
+// thread; the rest on the main thread, from RemoteView's text input client.
+- (void)imeStateReport:(const rdm::ImeState&)s;
+- (void)imeMark:(NSString*)text selected:(NSRange)sel;
+- (void)imeInsert:(NSString*)text;
+- (void)imeCommand;
+- (void)imeUnmark;
+- (void)imeMouseDown;
+- (BOOL)imeHasMarked;
+- (NSRange)imeMarkedRange;
+- (NSRect)imeCaretRect;
 @end
 
 namespace rdmclient {

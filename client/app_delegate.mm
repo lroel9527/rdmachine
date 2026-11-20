@@ -1044,6 +1044,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     return StatsShown();
   } else if (item.action == @selector(toggleSyncKeyboardLanguage:)) {
     item.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
+  } else if (item.action == @selector(toggleUseLocalInputMethod:)) {
+    item.state = UseLocalInputMethod() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(toggleUseAllDisplays:)) {
     item.state = UseAllDisplays() ? NSControlStateValueOn : NSControlStateValueOff;
   } else if (item.action == @selector(togglePlaySound:)) {
@@ -1090,6 +1092,13 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kUseAllDisplaysKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kUseAllDisplaysChanged object:nil];
+}
+
+- (void)toggleUseLocalInputMethod:(NSMenuItem*)item {
+  const bool on = !UseLocalInputMethod();
+  [NSUserDefaults.standardUserDefaults setBool:on forKey:kUseLocalInputMethodKey];
+  item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+  [NSNotificationCenter.defaultCenter postNotificationName:kUseLocalInputMethodChanged object:nil];
 }
 
 - (void)toggleSyncKeyboardLanguage:(NSMenuItem*)item {
@@ -1247,6 +1256,12 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   sync.target = self;
   sync.state = SyncKeyboardLanguage() ? NSControlStateValueOn : NSControlStateValueOff;
   sync.toolTip = @"被控端跟着这台 Mac 切换输入法（拼音、ABC 等），包括用 Caps Lock 切换的时候。";
+  NSMenuItem* localIme = [view addItemWithTitle:@"用这台 Mac 的输入法"
+                                         action:@selector(toggleUseLocalInputMethod:)
+                                  keyEquivalent:@""];
+  localIme.target = self;
+  localIme.state = UseLocalInputMethod() ? NSControlStateValueOn : NSControlStateValueOff;
+  localIme.toolTip = @"用这台 Mac 的输入法打字，候选窗在这里画、贴着那台 Mac 的光标，不用等网络。需要被控端 6.2.0 以上，并在它的系统设置里加上 RDMachine Input。";
   NSMenuItem* textMode = [view addItemWithTitle:@"省流量（文字清晰）"
                                          action:@selector(toggleTextMode:)
                                   keyEquivalent:@""];

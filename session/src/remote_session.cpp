@@ -186,6 +186,11 @@ rda_status RemoteSession::SendMessage(uint32_t type, const uint8_t* payload, siz
   return viewer_ ? rda_viewer_send_message(viewer_, type, payload, n) : RDA_ERR_CLOSED;
 }
 
+rda_status RemoteSession::SendInputMessage(uint32_t type, const uint8_t* payload, size_t n) {
+  std::lock_guard lock(mu_);
+  return viewer_ ? rda_viewer_send_input_message(viewer_, type, payload, n) : RDA_ERR_CLOSED;
+}
+
 rda_status RemoteSession::SendBulkMessage(uint32_t type, const uint8_t* payload, size_t n) {
   std::lock_guard lock(mu_);
   return viewer_ ? rda_viewer_send_bulk_message(viewer_, type, payload, n) : RDA_ERR_CLOSED;

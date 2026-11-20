@@ -20,6 +20,11 @@ uint32_t Modifiers(NSEventModifierFlags f) {
 // (docs/protocol.md, "键盘语言同步"). On unless turned off.
 NSString* const kSyncKeyboardLanguageKey = @"SyncKeyboardLanguage";
 NSString* const kSyncKeyboardLanguageChanged = @"RDMSyncKeyboardLanguageChanged";
+// View > Use This Mac's Input Method: compose with this Mac's input method,
+// its candidate window next to the remote caret (docs/ime.md). On unless
+// turned off; needs a server of 6.2.0 or later with RDMachine Input enabled.
+NSString* const kUseLocalInputMethodKey = @"UseLocalInputMethod";
+NSString* const kUseLocalInputMethodChanged = @"RDMUseLocalInputMethodChanged";
 
 // View > Data Saver (Sharp Text): text mode (docs/protocol.md, "文字模式"): the
 // server sends as little as it can with text that stays sharp. Off unless
@@ -136,6 +141,11 @@ NSString* DescribeProcess(pid_t pid) {
   NSRunningApplication* app = pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;
   return app.localizedName ? [NSString stringWithFormat:@"%@ (pid %d)", app.localizedName, pid]
                            : pid > 0 ? [NSString stringWithFormat:@"process %d", pid] : @"another process";
+}
+
+bool UseLocalInputMethod() {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  return [d objectForKey:kUseLocalInputMethodKey] ? [d boolForKey:kUseLocalInputMethodKey] : true;
 }
 
 bool SyncKeyboardLanguage() {

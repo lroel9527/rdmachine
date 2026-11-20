@@ -17,6 +17,12 @@ void OnFrame(void* user, const rda_image* img, const rda_rect* changed, size_t n
 }
 void OnCursor(void* user, const rda_cursor_state* c) { [(__bridge RemoteWindowController*)user cursor:c]; }
 void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
+  if (type == rdm::kImeStateMessageType) {
+    if (auto s = rdm::DecodeImeState(std::string(reinterpret_cast<const char*>(payload), n))) {
+      [(__bridge RemoteWindowController*)user imeStateReport:*s];
+    }
+    return;
+  }
   if (type != rdm::kSessionStatsMessageType) return;
   if (auto r = rdm::DecodeSessionStats(std::string(reinterpret_cast<const char*>(payload), n))) {
     [(__bridge RemoteWindowController*)user statsReport:*r];
@@ -79,9 +85,15 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
 - (void)mouseDragged:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_MOVE]; }
 - (void)rightMouseDragged:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_MOVE]; }
 - (void)otherMouseDragged:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_MOVE]; }
-- (void)mouseDown:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_DOWN]; }
+- (void)mouseDown:(NSEvent*)e {
+  [self.owner imeMouseDown];
+  [self pointer:e kind:RDA_INPUT_MOUSE_DOWN];
+}
 - (void)mouseUp:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_UP]; }
-- (void)rightMouseDown:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_DOWN]; }
+- (void)rightMouseDown:(NSEvent*)e {
+  [self.owner imeMouseDown];
+  [self pointer:e kind:RDA_INPUT_MOUSE_DOWN];
+}
 - (void)rightMouseUp:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_UP]; }
 - (void)otherMouseDown:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_DOWN]; }
 - (void)otherMouseUp:(NSEvent*)e { [self pointer:e kind:RDA_INPUT_MOUSE_UP]; }
@@ -103,6 +115,47 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   if (ev.delta_x == 0 && ev.delta_y == 0) return;
   ev.modifiers = Modifiers(e.modifierFlags);
   [self.owner send:ev];
+}
+
+// ---- NSTextInputClient: this Mac's input method (docs/ime.md) ----
+// Only the composition is kept here; the text itself is the remote app's.
+
+static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.class] ? [s string] : (NSString*)s; }
+
+- (void)insertText:(id)string replacementRange:(NSRange)range {
+  [self.owner imeInsert:PlainString(string) ?: @""];
+}
+- (void)setMarkedText:(id)string selectedRange:(NSRange)sel replacementRange:(NSRange)range {
+  [self.owner imeMark:PlainString(string) ?: @"" selected:sel];
+}
+- (void)unmarkText {
+  [self.owner imeUnmark];
+}
+- (void)doCommandBySelector:(SEL)selector {
+  [self.owner imeCommand];
+}
+- (BOOL)hasMarkedText {
+  return [self.owner imeHasMarked];
+}
+- (NSRange)markedRange {
+  return [self.owner imeMarkedRange];
+}
+- (NSRange)selectedRange {
+  const NSRange m = [self.owner imeMarkedRange];
+  return m.location == NSNotFound ? NSMakeRange(0, 0) : NSMakeRange(NSMaxRange(m), 0);
+}
+- (NSArray<NSAttributedStringKey>*)validAttributesForMarkedText {
+  return @[];
+}
+- (NSAttributedString*)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actual {
+  return nil;
+}
+- (NSUInteger)characterIndexForPoint:(NSPoint)point {
+  return NSNotFound;
+}
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual {
+  if (actual) *actual = range;
+  return [self.owner imeCaretRect];
 }
 
 @end
@@ -169,6 +222,20 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   NSInteger _extraIndex;
   __weak RemoteWindowController* _parent;
   BOOL _extraLive;
+  // The client's input method (docs/ime.md), kept in the main window's
+  // controller for all of the session's windows. Main thread.
+  std::optional<rdm::ImeState> _imeState;  // the server's last word; none = it does not offer it
+  BOOL _imeMode;                // keys go to this Mac's input method
+  uint64_t _imeSeq;             // the last ime message sent
+  uint64_t _imeComposingSeq;    // the message that started the composition
+  NSString* _imeMarked;         // the composition, nil when none
+  NSEvent* _imeEvent;           // the key the input method is handling now
+  BOOL _imeEventRaw;            // ... and it said the key should go as a key
+  std::set<uint16_t> _imeTaken;  // keys whose key-down the input method took (their key-up goes nowhere)
+  __weak RemoteView* _imeView;  // where the input method works now
+  NSRect _imeLastCaret;         // screen coordinates; empty = none yet
+  NSPanel* _imeOverlay;         // the composition, when no remote field shows it
+  NSTextField* _imeOverlayText;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -564,6 +631,11 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
                                              name:kSyncKeyboardLanguageChanged
                                            object:nil];
   [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(imeUpdateMode)
+                                             name:kUseLocalInputMethodChanged
+                                           object:nil];
+  [self imeReset];  // a new session: the server says again whether it offers it
+  [NSNotificationCenter.defaultCenter addObserver:self
                                          selector:@selector(sendPictureMode)
                                              name:kTextModeChanged
                                            object:nil];
@@ -607,6 +679,7 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   if (!_session) return;
   [self hideStatus];
   [self releaseHeld];  // the new session never saw those keys go down
+  [self imeReset];     // nor the composition; its server says again what it offers
   _desktopWanted = ready.desktop;
   _desktopBuilt = ready.desktop.has_value();
   if (_desktopBuilt) {
@@ -630,6 +703,8 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   [NSNotificationCenter.defaultCenter removeObserver:self name:kTextModeChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kPlaySoundChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kObserveChanged object:nil];
+  [NSNotificationCenter.defaultCenter removeObserver:self name:kUseLocalInputMethodChanged object:nil];
+  [self imeReset];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kStatsChanged object:nil];
   [NSNotificationCenter.defaultCenter removeObserver:self name:kUseAllDisplaysChanged object:nil];
   if (_keyMonitor) {
@@ -764,10 +839,250 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
   [self desktopNeedsUpdate];
 }
 
+// ---- the client's input method (docs/ime.md) ------------------------------
+
+// The session's state lives in the main window's controller.
+- (RemoteWindowController*)imeRoot {
+  return _extraIndex >= 0 && _parent ? _parent : self;
+}
+
+// Forgets the session's input method state (no message: the session it
+// belonged to is gone or new).
+- (void)imeReset {
+  if (_imeMarked) [_imeView.inputContext discardMarkedText];
+  _imeState.reset();
+  _imeMode = NO;
+  _imeMarked = nil;
+  _imeEvent = nil;
+  _imeTaken.clear();
+  _imeLastCaret = NSZeroRect;
+  [self imeShowOverlay];
+}
+
+- (void)imeSend:(const rdm::ImeInput&)m {
+  if (!_session) return;
+  const std::string p = rdm::EncodeImeInput(m);
+  _session->SendInputMessage(rdm::kImeMessageType, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+}
+
+// Whether keys should go to this Mac's input method now, and telling the
+// server when that changes.
+- (void)imeUpdateMode {
+  if (_extraIndex >= 0) return;
+  rda_input_source_info cur{};
+  cur.struct_size = sizeof(cur);
+  const bool local_ime = rda_current_input_source(&cur) == RDA_OK && cur.input_method != 0;
+  const BOOL want = UseLocalInputMethod() && !gObserveOnly && _viewer && _imeState && _imeState->available &&
+                    !_imeState->secure && local_ime;
+  if (want == _imeMode) return;
+  if (!want && _imeMarked) {
+    [_imeView.inputContext discardMarkedText];
+    [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
+    _imeMarked = nil;
+    [self imeShowOverlay];
+  }
+  _imeMode = want;
+  _imeTaken.clear();
+  rdm::ImeInput m{rdm::ImeInput::Kind::kMode, ++_imeSeq};
+  m.mode_on = want;
+  [self imeSend:m];
+  NSLog(@"this Mac's input method: %@", want ? @"on (the server is on RDMachine Input)" : @"off");
+  if (!want) {
+    _sentInputSource.clear();
+    [self sendInputSource:YES];  // the server follows this Mac's input source again
+  }
+}
+
+// From the key monitor (any of the session's windows): YES when the input
+// method took the key, or it is the key-up of one it took.
+- (BOOL)imeTakes:(NSEvent*)e from:(RemoteWindowController*)window {
+  if (!_imeMode || (e.type != NSEventTypeKeyDown && e.type != NSEventTypeKeyUp)) return NO;
+  if (e.type == NSEventTypeKeyUp) {
+    if (!_imeTaken.count(e.keyCode)) return NO;
+    _imeTaken.erase(e.keyCode);
+    return YES;
+  }
+  // Shortcuts go as keys, as they do past an input method on this Mac; a
+  // composition under way goes in first.
+  if (e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) {
+    if (_imeMarked) [self imeUnmark];
+    return NO;
+  }
+  RemoteView* view = window->_view;
+  if (_imeView && _imeView != view && _imeMarked) [self imeUnmark];
+  _imeView = view;
+  _imeEvent = e;
+  _imeEventRaw = NO;
+  const BOOL handled = [view.inputContext handleEvent:e];
+  _imeEvent = nil;
+  if (!handled || _imeEventRaw) return NO;  // a key as a key (arrows, Return, Delete when not composing)
+  _imeTaken.insert(e.keyCode);
+  return YES;
+}
+
+- (void)imeMark:(NSString*)text selected:(NSRange)sel {
+  RemoteWindowController* root = [self imeRoot];
+  if (root != self) return [root imeMark:text selected:sel];
+  if (text.length == 0) {
+    if (_imeMarked) [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
+    _imeMarked = nil;
+  } else {
+    if (!_imeMarked) _imeComposingSeq = _imeSeq + 1;
+    _imeMarked = [text copy];
+    rdm::ImeInput m{rdm::ImeInput::Kind::kMark, ++_imeSeq, text.UTF8String ?: ""};
+    if (sel.location != NSNotFound && NSMaxRange(sel) <= text.length) {
+      m.sel_location = static_cast<uint32_t>(sel.location);
+      m.sel_length = static_cast<uint32_t>(sel.length);
+    } else {
+      m.sel_location = static_cast<uint32_t>(text.length);
+    }
+    [self imeSend:m];
+  }
+  [self imeShowOverlay];
+}
+
+- (void)imeInsert:(NSString*)text {
+  RemoteWindowController* root = [self imeRoot];
+  if (root != self) return [root imeInsert:text];
+  _imeMarked = nil;
+  if (text.length) [self imeSend:{rdm::ImeInput::Kind::kCommit, ++_imeSeq, text.UTF8String ?: ""}];
+  [self imeShowOverlay];
+}
+
+// The input method gives the key back (it is not composing, or it is a key
+// it has no use for): it goes to the server as a key.
+- (void)imeCommand {
+  RemoteWindowController* root = [self imeRoot];
+  if (root != self) return [root imeCommand];
+  if (_imeEvent) _imeEventRaw = YES;
+}
+
+// The composition goes in as it stands.
+- (void)imeUnmark {
+  RemoteWindowController* root = [self imeRoot];
+  if (root != self) return [root imeUnmark];
+  if (!_imeMarked) return;
+  NSString* text = _imeMarked;
+  [_imeView.inputContext discardMarkedText];
+  [self imeInsert:text];
+}
+
+// A click: the composition is dropped on both sides first (the click may
+// move the caret or the focus over there).
+- (void)imeMouseDown {
+  RemoteWindowController* root = [self imeRoot];
+  if (root != self) return [root imeMouseDown];
+  if (!_imeMarked) return;
+  [_imeView.inputContext discardMarkedText];
+  _imeMarked = nil;
+  [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
+  [self imeShowOverlay];
+}
+
+- (BOOL)imeHasMarked {
+  return [self imeRoot]->_imeMarked != nil;
+}
+
+- (NSRange)imeMarkedRange {
+  NSString* m = [self imeRoot]->_imeMarked;
+  return m ? NSMakeRange(0, m.length) : NSMakeRange(NSNotFound, 0);
+}
+
+// A rectangle in the pixels of this window's picture, in screen points.
+- (BOOL)screenRectOfStream:(const rdm::ImeRect&)r out:(NSRect*)out {
+  double s, ox, oy;
+  if (![self fitScale:&s ox:&ox oy:&oy] || !_window.isVisible) return NO;
+  const NSRect inView = NSMakeRect(ox + r.x * s, oy + (_streamH - r.y - r.height) * s, std::max(1.0, r.width * s),
+                                   std::max(1.0, r.height * s));
+  *out = [_window convertRectToScreen:[_view convertRect:inView toView:nil]];
+  return YES;
+}
+
+// Where this Mac's candidate window goes: under the remote composition (or
+// caret); before the server has said, where it last was, or at the pointer.
+- (NSRect)imeCaretRect {
+  RemoteWindowController* root = [self imeRoot];
+  if (root != self) return [root imeCaretRect];
+  if (_imeState && _imeState->caret) {
+    const rdm::ImeRect& c = *_imeState->caret;
+    RemoteWindowController* w = nil;
+    if (c.display == 0) {
+      w = self;
+    } else if (c.display > 0 && static_cast<NSUInteger>(c.display) <= _extras.count) {
+      w = _extras[static_cast<NSUInteger>(c.display) - 1];
+    }
+    NSRect r;
+    if (w && [w screenRectOfStream:c out:&r]) {
+      _imeLastCaret = r;
+      return r;
+    }
+  }
+  if (!NSIsEmptyRect(_imeLastCaret) || _imeLastCaret.size.height > 0) return _imeLastCaret;
+  const NSPoint p = NSEvent.mouseLocation;
+  return NSMakeRect(p.x, p.y - 20, 1, 20);
+}
+
+// Transport thread -> main thread.
+- (void)imeStateReport:(const rdm::ImeState&)s {
+  __weak RemoteWindowController* weakSelf = self;
+  const rdm::ImeState copy = s;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    RemoteWindowController* me = weakSelf;
+    if (!me || !me->_session) return;
+    const std::optional<rdm::ImeRect> before = me->_imeState ? me->_imeState->caret : std::nullopt;
+    me->_imeState = copy;
+    if (copy.ended && me->_imeMarked) {
+      // Ended over there (a click, another app): this Mac's input method lets go too.
+      [me->_imeView.inputContext discardMarkedText];
+      me->_imeMarked = nil;
+    }
+    [me imeUpdateMode];
+    // A new position for the composition under way: the candidate window moves.
+    if (me->_imeMarked && copy.caret != before && copy.seq >= me->_imeComposingSeq) {
+      [me->_imeView.inputContext invalidateCharacterCoordinates];
+    }
+    [me imeShowOverlay];
+  });
+}
+
+// The composition in a small window of its own, for when no remote text
+// field shows it (a game, an app without input method support): there is
+// nothing over there to underline.
+- (void)imeShowOverlay {
+  const BOOL show = _imeMarked && _imeState && !_imeState->client;
+  if (!show) {
+    [_imeOverlay orderOut:nil];
+    return;
+  }
+  if (!_imeOverlay) {
+    _imeOverlay = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 100, 24)
+                                             styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                                               backing:NSBackingStoreBuffered
+                                                 defer:YES];
+    _imeOverlay.level = NSPopUpMenuWindowLevel;
+    _imeOverlay.backgroundColor = NSColor.textBackgroundColor;
+    _imeOverlay.hasShadow = YES;
+    _imeOverlay.ignoresMouseEvents = YES;
+    _imeOverlayText = [NSTextField labelWithString:@""];
+    _imeOverlayText.font = [NSFont systemFontOfSize:15];
+    [_imeOverlay.contentView addSubview:_imeOverlayText];
+  }
+  NSDictionary* attrs = @{NSUnderlineStyleAttributeName : @(NSUnderlineStyleSingle),
+                          NSFontAttributeName : [NSFont systemFontOfSize:15]};
+  _imeOverlayText.attributedStringValue = [[NSAttributedString alloc] initWithString:_imeMarked attributes:attrs];
+  [_imeOverlayText sizeToFit];
+  const NSSize sz = NSMakeSize(_imeOverlayText.frame.size.width + 12, _imeOverlayText.frame.size.height + 6);
+  _imeOverlayText.frameOrigin = NSMakePoint(6, 3);
+  const NSRect caret = [self imeCaretRect];
+  [_imeOverlay setFrame:NSMakeRect(caret.origin.x, caret.origin.y - sz.height, sz.width, sz.height) display:YES];
+  [_imeOverlay orderFront:nil];
+}
+
 // Main thread. Tells the server which input source this Mac uses, unless it
 // already knows (`force`: say it anyway, e.g. when the session starts).
 - (void)sendInputSource:(BOOL)force {
   if (!_viewer || !SyncKeyboardLanguage() || gObserveOnly) return;
+  if (_imeMode) return;  // the server stays on RDMachine Input meanwhile
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
   if (rda_current_input_source(&cur) != RDA_OK) return;
@@ -781,6 +1096,7 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
 }
 
 - (void)inputSourceChanged:(NSNotification*)note {
+  [self imeUpdateMode];
   [self sendInputSource:NO];
 }
 
@@ -805,6 +1121,7 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
 // what is held (the server would keep it down). Controlling again: the
 // server hears this Mac's input source again.
 - (void)observeChanged {
+  [self imeUpdateMode];
   if (gObserveOnly) {
     [self releaseHeld];
   } else {
@@ -862,6 +1179,7 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
 
 - (void)windowDidResignKey:(NSNotification*)note {
   [self releaseHeld];
+  [self imeRoot]->_imeTaken.clear();
 }
 
 // Transport thread -> main thread.
@@ -1031,7 +1349,12 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
     _lastX = ev.x;
     _lastY = ev.y;
   }
-  if (_extraIndex >= 0) {
+  if (_extraIndex >= 0 && (ev.kind == RDA_INPUT_KEY_DOWN || ev.kind == RDA_INPUT_KEY_UP) && _parent) {
+    // Keys go through the main picture's connection whichever window has
+    // them (they go to the focused app, not to a display): there they stay
+    // in order with the input method's text (docs/ime.md).
+    [_parent send:ev];
+  } else if (_extraIndex >= 0) {
     [_parent sendExtra:static_cast<NSUInteger>(_extraIndex) event:ev];
   } else {
     _session->SendInput(ev);
@@ -1039,6 +1362,14 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
 }
 
 - (void)key:(NSEvent*)e {
+  RemoteWindowController* root = [self imeRoot];
+  if ([root imeTakes:e from:self]) return;
+  [self rawKey:e];
+}
+
+// A key as a key: the server's keyboard layout (and input method, without
+// the client's) makes it a character.
+- (void)rawKey:(NSEvent*)e {
   rda_input_event ev = Event(RDA_INPUT_KEY_DOWN);
   ev.modifiers = Modifiers(e.modifierFlags);
   ev.code = rda_keycode_from_mac(e.keyCode);
