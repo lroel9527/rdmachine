@@ -10,7 +10,7 @@
 
 顺带的好处：
 
-- 用的是客户端自己的词库、习惯和输入法（搜狗、微信输入法、Rime 等），服务端不用装同样的输入法。
+- 用的是客户端自己的输入法和它的词库、习惯，服务端不用装同样的输入法。
 - 候选窗不再出现在服务端的屏幕上，不进视频，省一点流量（省流模式正需要）。
 - 表情与符号（⌃⌘空格）等客户端的文字输入也能直接用。
 
@@ -68,13 +68,13 @@
 
 **没测的几处，按源码定**（lroel 决定不再补测，2026-11-20）：
 
-- **Chromium 类应用（Claude、VS Code、Chrome、微信网页内容）**：`content/browser/renderer_host/render_widget_host_view_mac.mm`。
+- **Chromium 类应用（Claude、VS Code、Chrome）**：`content/browser/renderer_host/render_widget_host_view_mac.mm`。
   - 组字时：`GetCachedFirstRectForCharacterRange` 把请求换算到组字范围里，用渲染进程送来的 `character_bounds`。代码检查它的个数等于组字长度，所以**组字的每个字都有位置，长度不限**。请求组字起点给第一个字的左边缘，请求组字末尾给最后一个字的右边缘（`GetFirstRectForCompositionRange`）。所以 Claude 长词不会再停住。
   - 没有组字时：只有请求正好从光标开始才用缓存的 `caret_rect`；别的位置用选区的矩形，或者落到 `SyncGetFirstRectForRange`，同步等渲染进程回答。这就是第一版停住、以及刚组字后立即查询要几十毫秒的原因。
   - 缓存是渲染进程异步送来的，刚 `setMarkedText` 后可能还是旧的，所以第 5 节要在 16 ms、60 ms 后再查。
 - **iTerm2**：`sources/TerminalView/PTYTextView.m` 的 `firstRectForCharacterRange:actualRange:` 按字符网格算：列 × 字宽、行 × 行高，换成屏幕坐标，任何时候都准。系统终端不开源，没法从源码确认；它支持带下划线的组字，系统拼音的候选窗在里面位置正确，所以按同样的路子处理。
 - **文本编辑第二个词为空**：文本编辑就是 `NSTextView`，它是 `NSTextInputClient` 的标准实现，系统拼音在里面位置正确，所以更可能是我的探测程序问法的问题（只问了 `attributesForCharacterIndex:`、只问了组字起点）。实现时按第 7.1 节的顺序多问几处，都为空才算拿不到。
-- **信息/微信**：不开源。信息是 AppKit 文本控件；微信的聊天框没法确认。拿不到时走第 6.3 节的退路。
+- **信息**：不开源，是 AppKit 文本控件。拿不到时走第 6.3 节的退路。
 
 ## 3. 总览
 
@@ -251,6 +251,6 @@ void (*on_input_message)(void* user, uint32_t type, const uint8_t* payload, size
 1. **rdaccel 3.2.0**：和输入同序的应用消息，单元测试，CHANGELOG。
 2. **服务端**：RDMachine 输入法、agent 的套接字和转发、坐标换算、输入源切换、菜单里的启用状态、pkg。只有服务端时客户端照旧，可以先装上验证输入法本身（用一个测试客户端发 ime 消息）。
 3. **客户端**：`NSTextInputClient`、按键分流、候选窗位置、小浮层、菜单开关。
-4. **实测**：第 8 节的数值，包括终端、信息/微信等源码定不了的应用，lroel 实际使用的感受，写进[决定](decisions.md)。
+4. **实测**：第 8 节的数值，包括终端、信息等源码定不了的应用，lroel 实际使用的感受，写进[决定](decisions.md)。
 
 版本：rdaccel 3.2.0；rdmachine 6.2.0（客户端和服务端都要升级才生效，任何一边是旧的都照旧工作）。
