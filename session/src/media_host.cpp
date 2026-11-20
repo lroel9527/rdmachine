@@ -578,8 +578,13 @@ void MediaHost::OnImeReport(const ImeBridge::Report& r) {
     char p[96] = "-";
     if (caret) snprintf(p, sizeof p, "d%d %d,%d %dx%d", caret->display, caret->x, caret->y, caret->width, caret->height);
     Log("ime debug " + Millis() + " report seq=" + std::to_string(r.seq) + " marked=" + RangeText(r.marked) +
-        " sel=" + RangeText(r.selected) + " global=" + g + " pixels=" + p);
+        " sel=" + RangeText(r.selected) + " global=" + g + " pixels=" + p +
+        (r.active ? (*r.active ? " active " : " inactive ") + r.app : std::string()));
   }
+  // A late report of a field that lost the focus (each app and field has its
+  // own controller over there, and its timers outlive the focus): not where
+  // the caret is now.
+  if (r.active && !*r.active) return;
   {
     std::lock_guard lock(ime_mu_);
     if (r.active && *r.active) {

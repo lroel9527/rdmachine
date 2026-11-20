@@ -97,7 +97,7 @@ static __weak RemoteController* gCurrent;
   // the old place at first. The agent sends the client only what changed.
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (ms + 250) * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
     RemoteController* me = weakSelf;
-    if (me && me->_requestGen == gen && me->_markedLength == 0) SendToAgent([me report]);
+    if (me && me->_requestGen == gen && me->_markedLength == 0 && gCurrent == me) SendToAgent([me report]);
   });
 }
 
@@ -164,6 +164,9 @@ static __weak RemoteController* gCurrent;
 // still change: web content answers from a cache its renderer fills in
 // shortly after the composition changes (docs/ime.md, 2).
 - (void)reportSoon {
+  // Only the field with the focus says where the caret is: a controller that
+  // lost it still has timers running (6.3.9).
+  if (gCurrent != self) return;
   const uint64_t gen = ++_reportGen;
   auto last = std::make_shared<nlohmann::json>([self report]);
   SendToAgent(*last);
@@ -171,7 +174,7 @@ static __weak RemoteController* gCurrent;
   for (int ms : {16, 60}) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
       RemoteController* me = weakSelf;
-      if (!me || me->_reportGen != gen) return;
+      if (!me || me->_reportGen != gen || gCurrent != me) return;
       nlohmann::json again = [me report];
       if (again != *last) {
         SendToAgent(again);
