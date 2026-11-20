@@ -174,6 +174,9 @@ class MediaHost : public ServerDelegate {
   void SendImeState(bool force);
   // Leaves the input method mode: the input source from before comes back.
   void EndImeMode(const char* why);
+  // While in that mode: RDMachine Input again when the system put another
+  // source in its place (unlocking the screen does), outside secure input.
+  void KeepImeSource();
   bool ImeSourceEnabled();
   void ImeAfterInput(const rda_input_event* ev);
   // About once a second while a session runs: a SessionStatsReport to the
@@ -233,6 +236,7 @@ class MediaHost : public ServerDelegate {
   std::atomic<bool> ime_mode_on_{false};
   std::atomic<bool> ime_debug_{false};  // ImeDebugLog: positions and composition messages to the log  // the same, for the input path without the lock
   std::string ime_prev_source_;  // the input source before ime_mode_
+  bool ime_keep_failed_ = false;  // under ime_mu_: KeepImeSource said it could not
   std::vector<int32_t> ime_displays_;  // rdaccel's display index of each session display (0 = main)
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_

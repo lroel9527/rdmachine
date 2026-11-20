@@ -450,6 +450,7 @@ void MediaHost::OnImeInput(const ImeInput& in) {
         std::lock_guard lock(ime_mu_);
         ime_mode_ = true;
         ime_mode_on_ = true;
+        ime_keep_failed_ = false;
         if (prev != kImeInputSourceId) ime_prev_source_ = prev;
         ime_state_.seq = in.seq;
       }
@@ -493,6 +494,26 @@ void MediaHost::OnImeInput(const ImeInput& in) {
       bridge->Cancel(in.seq);
       break;
   }
+}
+
+void MediaHost::KeepImeSource() {
+  if (!ime_mode_on_ || !injector_ || SecureInputActive()) return;
+  // Under ime_mu_: EndImeMode clears the mode under it before it puts the
+  // source from before back, so this cannot select RDMachine Input after that.
+  std::lock_guard lock(ime_mu_);
+  if (!ime_mode_) return;
+  rda_input_source_info cur{};
+  cur.struct_size = sizeof(cur);
+  if (rda_current_input_source(&cur) != RDA_OK || cur.id == std::string(kImeInputSourceId)) return;
+  const std::string other = cur.id;
+  if (rda_injector_select_input_source(injector_, kImeInputSourceId) != RDA_OK) {
+    if (ime_keep_failed_) return;  // said once per mode
+    ime_keep_failed_ = true;
+    Log("the client's input method: " + other + " took the place of RDMachine Input, which could not be selected again: " +
+        rda_last_error());
+    return;
+  }
+  Log("the client's input method: " + other + " took the place of RDMachine Input, selected it again");
 }
 
 void MediaHost::EndImeMode(const char* why) {
@@ -1031,6 +1052,9 @@ void MediaHost::StatsLoop() {
     // before mode_host_ is set, and that first message then goes nowhere),
     // and a password field taking secure input or letting it go.
     if (media_connected_) SendImeState(false);
+    // The system may change the input source under the mode (the lock
+    // screen puts an ASCII layout in, and unlocking does not always undo it).
+    KeepImeSource();
     {
       std::lock_guard lock(mu_);  // host_ stays alive while it is held
       if (!host_) break;
