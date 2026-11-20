@@ -47,7 +47,7 @@
 
 - 选区在所有应用里都对，包括退格。
 - 光标矩形：VS Code、Safari 网页输入框、邮件每个字符都跟着动（约 7 px 一个字符）；Safari 地址栏、访达和系统设置的搜索框只有第一个字符对，之后为空；Claude 前 3 个字符对，之后停住。
-- 原因（推测）：没有组字文字时，光标在文字末尾，“光标处的字符”不存在，系统就不给；Chromium 类应用只在组字时计算精确的字符位置。
+- 原因：没有组字文字时，光标在文字末尾，“光标处的字符”不存在，系统就不给；Chromium 只在组字时有每个字的位置（见下文的源码）。
 - `firstRectForCharacterRange:actualRange:` 经过输入法连接返回的是垃圾值，不能用；`attributesForCharacterIndex:lineHeightRectangle:` 可以用。
 - `length` 在 Electron 和网页里是 0，不能用。
 
@@ -66,7 +66,15 @@
 
 **耗时**：原生文本框每次查询 0.3–2 ms；Safari、邮件在刚放完组字文字后立即查询要 6–48 ms（要等网页进程处理完），60 ms 后再查约 1 ms。所以**服务端不能在注入按键的线程上同步等这些查询**（第 5 节）。
 
-**还没测的**：终端、信息/微信、文本编辑点到行中间、Claude 长词。实现第 3 阶段之前先补测（第 10 节）。
+**没测的几处，按源码定**（lroel 决定不再补测，2026-11-20）：
+
+- **Chromium 类应用（Claude、VS Code、Chrome、微信网页内容）**：`content/browser/renderer_host/render_widget_host_view_mac.mm`。
+  - 组字时：`GetCachedFirstRectForCharacterRange` 把请求换算到组字范围里，用渲染进程送来的 `character_bounds`。代码检查它的个数等于组字长度，所以**组字的每个字都有位置，长度不限**。请求组字起点给第一个字的左边缘，请求组字末尾给最后一个字的右边缘（`GetFirstRectForCompositionRange`）。所以 Claude 长词不会再停住。
+  - 没有组字时：只有请求正好从光标开始才用缓存的 `caret_rect`；别的位置用选区的矩形，或者落到 `SyncGetFirstRectForRange`，同步等渲染进程回答。这就是第一版停住、以及刚组字后立即查询要几十毫秒的原因。
+  - 缓存是渲染进程异步送来的，刚 `setMarkedText` 后可能还是旧的，所以第 5 节要在 16 ms、60 ms 后再查。
+- **iTerm2**：`sources/TerminalView/PTYTextView.m` 的 `firstRectForCharacterRange:actualRange:` 按字符网格算：列 × 字宽、行 × 行高，换成屏幕坐标，任何时候都准。系统终端不开源，没法从源码确认；它支持带下划线的组字，系统拼音的候选窗在里面位置正确，所以按同样的路子处理。
+- **文本编辑第二个词为空**：文本编辑就是 `NSTextView`，它是 `NSTextInputClient` 的标准实现，系统拼音在里面位置正确，所以更可能是我的探测程序问法的问题（只问了 `attributesForCharacterIndex:`、只问了组字起点）。实现时按第 7.1 节的顺序多问几处，都为空才算拿不到。
+- **信息/微信**：不开源。信息是 AppKit 文本控件；微信的聊天框没法确认。拿不到时走第 6.3 节的退路。
 
 ## 3. 总览
 
@@ -191,7 +199,7 @@ void (*on_input_message)(void* user, uint32_t type, const uint8_t* payload, size
 - `RDMachine Input.app`，装在 `/Library/Input Methods`（pkg 以 root 安装），bundle id `org.rdmachine.inputmethod.Remote`，`InputMethodServerControllerClass`、`InputMethodConnectionName` 按 InputMethodKit 的要求写；用 rdmachine Local Signing 签名，和服务端一样。
 - 控制器（每个输入框一个实例）：
   - `handleEvent:client:`：一律返回 `NO`。组字和上屏不经过按键，经过 agent 的消息。
-  - 收到 agent 的 `mark`：`setMarkedText:` 到当前客户端（系统的下划线样式用 `markForStyle:`）；然后按第 5 节的时机查询 `markedRange`、`selectedRange`、组字起点和最后一个字的 `attributesForCharacterIndex:lineHeightRectangle:`，报给 agent。
+  - 收到 agent 的 `mark`：`setMarkedText:` 到当前客户端（系统的下划线样式用 `markForStyle:`）；然后按第 5 节的时机查询 `markedRange`、`selectedRange` 和位置，报给 agent。位置依次问，拿到非空的就停：组字起点的 `attributesForCharacterIndex:lineHeightRectangle:`；组字最后一个字的同一查询（用它的右边缘）；光标前一个字（右边缘）。
   - 收到 `commit`：`insertText:replacementRange:`，回执给 agent；收到 `cancel`：`setMarkedText:@""`。
   - `activateServer:` / `deactivateServer:`：报给 agent（远程有没有输入框、是哪个应用）。
   - `commitComposition:`（系统在切应用、点别处时调用）：把当前组字原样上屏，告诉 agent “组字被远程结束了”，agent 转告客户端，客户端 `discardMarkedText`。
@@ -240,10 +248,9 @@ void (*on_input_message)(void* user, uint32_t type, const uint8_t* payload, size
 
 ## 10. 阶段
 
-1. **补测**（探测程序第二版）：终端、信息/微信、文本编辑点到行中间、Claude 长词。结论写进第 2 节；如果 Chromium 长词或终端拿不到位置，第 6.3 节的退路（上一次位置、鼠标位置）要先做好。
-2. **rdaccel 3.2.0**：和输入同序的应用消息，单元测试，CHANGELOG。
-3. **服务端**：RDMachine 输入法、agent 的套接字和转发、坐标换算、输入源切换、菜单里的启用状态、pkg。只有服务端时客户端照旧，可以先装上验证输入法本身（用一个测试客户端发 ime 消息）。
-4. **客户端**：`NSTextInputClient`、按键分流、候选窗位置、小浮层、菜单开关。
-5. **实测**：第 8 节的数值，lroel 实际使用的感受，写进[决定](decisions.md)。
+1. **rdaccel 3.2.0**：和输入同序的应用消息，单元测试，CHANGELOG。
+2. **服务端**：RDMachine 输入法、agent 的套接字和转发、坐标换算、输入源切换、菜单里的启用状态、pkg。只有服务端时客户端照旧，可以先装上验证输入法本身（用一个测试客户端发 ime 消息）。
+3. **客户端**：`NSTextInputClient`、按键分流、候选窗位置、小浮层、菜单开关。
+4. **实测**：第 8 节的数值，包括终端、信息/微信等源码定不了的应用，lroel 实际使用的感受，写进[决定](decisions.md)。
 
 版本：rdaccel 3.2.0；rdmachine 6.2.0（客户端和服务端都要升级才生效，任何一边是旧的都照旧工作）。
