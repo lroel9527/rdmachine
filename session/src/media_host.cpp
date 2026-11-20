@@ -1,5 +1,7 @@
 #include "rdmachine/session/media_host.h"
 
+#include <CoreFoundation/CoreFoundation.h>
+
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -348,6 +350,33 @@ void MediaHost::SyncInputSource(const InputSourceState& wanted) {
   input_source_ = selected;
 }
 
+namespace {
+
+// `defaults write org.rdmachine.server ImeDebugLog -bool YES` (read when a
+// session starts): every position RDMachine Input reports, and every
+// composition message from the client, go to the log with milliseconds (no
+// text), to see why a candidate window moves.
+bool ImeDebugLogWanted() {
+  CFPreferencesAppSynchronize(CFSTR("org.rdmachine.server"));
+  Boolean valid = false;
+  return CFPreferencesGetAppBooleanValue(CFSTR("ImeDebugLog"), CFSTR("org.rdmachine.server"), &valid) && valid;
+}
+
+std::string Millis() {
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+  char buf[16];
+  snprintf(buf, sizeof buf, "%02lld.%03lld", static_cast<long long>(ms / 1000 % 60), static_cast<long long>(ms % 1000));
+  return buf;
+}
+
+std::string RangeText(const std::optional<ImeRange>& r) {
+  return r ? std::to_string(r->location) + "+" + std::to_string(r->length) : "-";
+}
+
+}  // namespace
+
 bool MediaHost::ImeSourceEnabled() {
   size_t count = 0;
   if (rda_list_input_sources(nullptr, 0, &count) != RDA_OK || count == 0) return false;
@@ -386,6 +415,14 @@ std::vector<uint32_t> CodePoints(const std::string& s) {
 void MediaHost::OnImeInput(const ImeInput& in) {
   ImeBridge* bridge = options_.ime.get();
   if (!bridge) return;
+  if (ime_debug_) {
+    static const char* kKinds[] = {"mark", "commit", "cancel", "mode"};
+    Log("ime debug " + Millis() + " client " + kKinds[static_cast<int>(in.kind)] + " seq=" + std::to_string(in.seq) +
+        (in.kind == ImeInput::Kind::kMark || in.kind == ImeInput::Kind::kCommit
+             ? " len=" + std::to_string(in.text.size()) + " sel=" + std::to_string(in.sel_location) + "+" +
+                   std::to_string(in.sel_length)
+             : ""));
+  }
   switch (in.kind) {
     case ImeInput::Kind::kMode: {
       if (!in.mode_on) {
@@ -478,6 +515,7 @@ void MediaHost::EndImeMode(const char* why) {
   Log(std::string("the client's input method: off (") + why + ")" + (prev.empty() ? "" : ", back to " + prev));
 }
 
+
 void MediaHost::OnImeReport(const ImeBridge::Report& r) {
   std::optional<ImeRect> caret;
   if (r.rect) {
@@ -503,6 +541,14 @@ void MediaHost::OnImeReport(const ImeBridge::Report& r) {
         }
       }
     }
+  }
+  if (ime_debug_) {
+    char g[96] = "-";
+    if (r.rect) snprintf(g, sizeof g, "%.1f,%.1f %.1fx%.1f", r.rect->x, r.rect->y, r.rect->width, r.rect->height);
+    char p[96] = "-";
+    if (caret) snprintf(p, sizeof p, "d%d %d,%d %dx%d", caret->display, caret->x, caret->y, caret->width, caret->height);
+    Log("ime debug " + Millis() + " report seq=" + std::to_string(r.seq) + " marked=" + RangeText(r.marked) +
+        " sel=" + RangeText(r.selected) + " global=" + g + " pixels=" + p);
   }
   {
     std::lock_guard lock(ime_mu_);
@@ -532,6 +578,7 @@ void MediaHost::SendImeState(bool force) {
     ime_sent_ = true;
     payload = EncodeImeState(s);
   }
+  if (ime_debug_) Log("ime debug " + Millis() + " sent " + payload);
   const rda_status st =
       rda_host_send_message(h, kImeStateMessageType, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
   if (first) {
@@ -863,6 +910,8 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     ime_mode_on_ = false;
     ime_prev_source_.clear();
     ime_displays_ = {display_index};
+    ime_debug_ = options_.ime && ImeDebugLogWanted();
+    if (ime_debug_) Log("ime debug: on (ImeDebugLog)");
     // Not at the login window (no third-party input method there), not view only.
     ime_available_ = options_.ime && injector && !options_.login_window && ImeSourceEnabled();
     if (options_.ime && injector && !options_.login_window && !ime_available_) {
