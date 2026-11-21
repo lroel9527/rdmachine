@@ -218,6 +218,15 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 - **只对 RDMachine Input 不切到 ABC**（rdaccel 3.4.0 `rda_injector_set_text_passthrough_source`）：3.3 的开关对所有输入法都不切，系统把输入源换成拼音的那一会儿，按文字注入的字会被拼音吞掉。
 - **客户端的输入法回应“丢掉组字”时插入的那次不再发**（Cmd/Ctrl 快捷键、点击、远程结束时），只发我们自己的那次上屏，直到下一个按键交给输入法。
 - 调试日志的每条报告记 `answers`（反映到哪条）和 `ctl`。RDMachine Input 在系统日志里记控制器的创建、释放、激活、停用和按键接管（不含文字）：`/usr/bin/log show --predicate 'subsystem == "org.rdmachine.inputmethod"'`。
+
+6.5.0：**被控端只在用户改模式时切换输入源**。6.4.0 装上后重连仍然“没有输入框”：IMK 日志里，每次被控端从后台选中 RDMachine Input，前台应用里都是激活后 1 毫秒又停用（今早 6.3.4 每秒重选 6 次，6 次都是；测试工具从后台切换也是；今晚两次重连也是），之后要等焦点变化或一个真实按键才再激活；单按 Control、Shift 都不行，被控端逐字补打的文字也不行（6.4.0 的“按键到了谁那里”从没触发：按键根本没进 RDMachine Input）。lroel 拒绝了“用隐形窗口抢一下焦点”的绕法：根本原因是被控端在切换，而 lroel 最初的想法就是被控端不用切换输入法。原来的切换时机：
+
+- 每次会话开始切到 RDMachine Input、结束切回（重连 = 一来一回）；
+- 客户端在“用这台 Mac 的输入法”下连接时仍同步键盘语言，被控端先切到拼音再切回；
+- 进出密码框时客户端发 `off`/`on`，被控端切回拼音又切回来；
+- 6.3.4 的每秒检查（`KeepImeSource`）自己切回 RDMachine Input，也会和用户的手动切换打架。
+
+现在：会话结束不切回；客户端在这个模式下不同步键盘语言；密码框由客户端改发原始按键（RDMachine Input 原样放过，macOS 在密码框里本来也不用输入法）；删掉每秒检查；客户端每次连接说一次模式，`off` 时被控端把记下的原输入源放回去（换成“同步键盘语言”或“按键原样发”时）。代价：远程用完后 Mac mini 停在 RDMachine Input，本机打中文要自己切回拼音（Ctrl+空格）。仍会发生的：用户在被控端切换应用时，macOS 偶尔也给出“激活后马上停用”（20:33:03），这时退回客户端小窗和逐字补打，下一次焦点变化恢复，不做绕法。
 - 收到对应当前 `seq` 的新 `caret` 后调用 `[inputContext invalidateCharacterCoordinates]`，本机输入法立即把候选窗挪过去。实际效果：第一个字母后约一个来回内候选窗挪到位，之后的字母不动（组字起点不变）。
 
 ### 6.4 远程没有输入框时

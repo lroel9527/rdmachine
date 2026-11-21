@@ -176,11 +176,11 @@ class MediaHost : public ServerDelegate {
   // Types text as characters (no text field takes input methods, or the
   // input method refused it).
   void TypeText(const std::string& text);
-  // Leaves the input method mode: the input source from before comes back.
-  void EndImeMode(const char* why);
-  // While in that mode: RDMachine Input again when the system put another
-  // source in its place (unlocking the screen does), outside secure input.
-  void KeepImeSource();
+  // Leaves the input method mode. restore: the user chose another mode, and
+  // the input source from before comes back; otherwise (the session ends)
+  // this Mac stays on RDMachine Input: the input source changes only when
+  // the user changes the mode (6.5.0, docs/ime.md).
+  void EndImeMode(const char* why, bool restore);
   bool ImeSourceEnabled();
   void ImeAfterInput(const rda_input_event* ev);
   // About once a second while a session runs: a SessionStatsReport to the
@@ -240,14 +240,16 @@ class MediaHost : public ServerDelegate {
   bool ime_mode_ = false;        // the client types with its input method now
   std::atomic<bool> ime_mode_on_{false};
   std::atomic<bool> ime_debug_{false};  // ImeDebugLog: positions and composition messages to the log
-  std::string ime_prev_source_;  // the input source before ime_mode_
+  // The input source RDMachine Input was selected in place of: it comes back
+  // when the user picks another mode, also in a later session (a session
+  // ending leaves RDMachine Input selected). Empty = none known.
+  std::string ime_prev_source_;
   // Held while the input source is changed for the mode (selecting RDMachine
-  // Input, putting the one from before back, selecting it again): those
-  // calls wait for the main thread, which takes ime_mu_ for the menu, so
-  // they must not run under ime_mu_. Never taken on the main thread while a
-  // session runs. Taken before ime_mu_.
+  // Input, putting the one from before back): those calls wait for the main
+  // thread, which takes ime_mu_ for the menu, so they must not run under
+  // ime_mu_. Never taken on the main thread while a session runs. Taken
+  // before ime_mu_.
   std::mutex ime_source_mu_;
-  bool ime_keep_failed_ = false;  // under ime_source_mu_: KeepImeSource said it could not
   std::vector<int32_t> ime_displays_;  // rdaccel's display index of each session display (0 = main)
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_

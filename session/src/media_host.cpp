@@ -447,7 +447,7 @@ void MediaHost::OnImeInput(const ImeInput& in) {
     case ImeInput::Kind::kMode: {
       bridge->NoteClientMessage(in.seq);
       if (!in.mode_on) {
-        EndImeMode("the client stopped typing with its input method");
+        EndImeMode("the client stopped typing with its input method", /*restore=*/true);
         break;
       }
       std::lock_guard src(ime_source_mu_);
@@ -468,15 +468,15 @@ void MediaHost::OnImeInput(const ImeInput& in) {
         Log(std::string("the client's input method: RDMachine Input could not be selected: ") + rda_last_error());
         break;
       }
-      ime_keep_failed_ = false;
       {
         std::lock_guard lock(ime_mu_);
         ime_mode_ = true;
         ime_mode_on_ = true;
         if (prev != kImeInputSourceId) ime_prev_source_ = prev;
       }
-      Log("the client types with its own input method (this Mac on RDMachine Input" +
-          (prev.empty() || prev == kImeInputSourceId ? std::string(")") : ", was " + prev + ")"));
+      Log("the client types with its own input method (this Mac " +
+          (prev == kImeInputSourceId ? std::string("already on RDMachine Input, nothing switched)")
+                                     : "on RDMachine Input" + (prev.empty() ? std::string(")") : ", was " + prev + ")")));
       SendImeState(false);
       break;
     }
@@ -521,50 +521,42 @@ void MediaHost::TypeText(const std::string& text) {
   }
 }
 
-void MediaHost::KeepImeSource() {
-  if (!ime_mode_on_ || !injector_ || SecureInputActive()) return;
-  // EndImeMode clears the mode under ime_source_mu_ before it puts the source
-  // from before back, so this cannot select RDMachine Input after that. Not
-  // under ime_mu_: the calls below wait for the main thread, which takes
-  // ime_mu_ to show the menu.
-  std::lock_guard src(ime_source_mu_);
-  {
-    std::lock_guard lock(ime_mu_);
-    if (!ime_mode_) return;
-  }
-  rda_input_source_info cur{};
-  cur.struct_size = sizeof(cur);
-  if (rda_current_input_source(&cur) != RDA_OK || cur.id == std::string(kImeInputSourceId)) return;
-  const std::string other = cur.id;
-  if (rda_injector_select_input_source(injector_, kImeInputSourceId) != RDA_OK) {
-    if (ime_keep_failed_) return;  // said once per mode
-    ime_keep_failed_ = true;
-    Log("the client's input method: " + other + " took the place of RDMachine Input, which could not be selected again: " +
-        rda_last_error());
-    return;
-  }
-  Log("the client's input method: " + other + " took the place of RDMachine Input, selected it again");
-}
-
-void MediaHost::EndImeMode(const char* why) {
+void MediaHost::EndImeMode(const char* why, bool restore) {
+  if (restore && !injector_) return;  // view only: no input source changes, nor forgetting the one to restore
   std::lock_guard src(ime_source_mu_);
   std::string prev;
   {
     std::lock_guard lock(ime_mu_);
-    if (!ime_mode_) return;
+    // Not in the mode in this session, but an earlier one left RDMachine
+    // Input selected: a client in another mode says so when it connects, and
+    // the source from before comes back then.
+    if (!ime_mode_ && !(restore && !ime_prev_source_.empty())) return;
     ime_mode_ = false;
     ime_mode_on_ = false;
+    if (!restore) {
+      // Selecting an input method from this background process does not
+      // reliably reach the app in front (macOS activates RDMachine Input
+      // there and deactivates it again): every session starting and ending
+      // with a switch was a reconnect without a text field (docs/ime.md).
+      Log(std::string("the client's input method: off (") + why + "), this Mac stays on RDMachine Input");
+      return;
+    }
     prev = std::move(ime_prev_source_);
     ime_prev_source_.clear();
   }
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
-  if (injector_ && !prev.empty() && rda_current_input_source(&cur) == RDA_OK && cur.id == std::string(kImeInputSourceId)) {
-    if (rda_injector_select_input_source(injector_, prev.c_str()) != RDA_OK) {
-      Log("input source " + prev + " could not be selected again: " + rda_last_error());
-    }
+  std::string outcome;
+  if (prev.empty()) {
+    outcome = ", no input source from before to put back";
+  } else if (!injector_ || rda_current_input_source(&cur) != RDA_OK || cur.id != std::string(kImeInputSourceId)) {
+    outcome = ", left as it is (no longer RDMachine Input)";
+  } else if (rda_injector_select_input_source(injector_, prev.c_str()) != RDA_OK) {
+    outcome = ", " + prev + " could not be selected again: " + rda_last_error();
+  } else {
+    outcome = ", back to " + prev;
   }
-  Log(std::string("the client's input method: off (") + why + ")" + (prev.empty() ? "" : ", back to " + prev));
+  Log(std::string("the client's input method: off (") + why + ")" + outcome);
 }
 
 void MediaHost::OnImeReport(const ImeBridge::Report& r) {
@@ -979,7 +971,6 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     ime_sent_ = false;
     ime_mode_ = false;
     ime_mode_on_ = false;
-    ime_prev_source_.clear();
     ime_displays_ = {display_index};
     // A text field that got the focus before this session: RDMachine Input
     // says so only when that changes. The client numbers its messages from 1
@@ -1112,9 +1103,6 @@ void MediaHost::StatsLoop() {
     // before mode_host_ is set, and that first message then goes nowhere),
     // and a password field taking secure input or letting it go.
     if (media_connected_) SendImeState(false);
-    // The system may change the input source under the mode (the lock
-    // screen puts an ASCII layout in, and unlocking does not always undo it).
-    KeepImeSource();
     {
       std::lock_guard lock(mu_);  // host_ stays alive while it is held
       if (!host_) break;
@@ -1449,7 +1437,7 @@ void MediaHost::EndSession() {
   StopStats();
   StopDesktopLoop();
   StopCaptureLoop();
-  EndImeMode("the session ends");  // through injector_, destroyed below
+  EndImeMode("the session ends", /*restore=*/false);
   rda_host* host;
   rda_injector* injector;
   std::unique_ptr<VirtualDesktop> desktop;

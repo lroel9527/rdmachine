@@ -229,6 +229,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // window has the session): taken over once it does.
   std::optional<rdm::ImeState> _imeEarly;
   BOOL _imeMode;                // the server is on RDMachine Input for us
+  BOOL _imeModeSaid;            // this session's server heard which mode this Mac is in
+  BOOL _imeServerSilent;        // no ime state came: a server older than 6.2.0
+  uint64_t _imeGen;             // counts sessions, for timers that outlive one
   BOOL _imeLocalIsIM;           // this Mac's input source composes (Pinyin, ...): keys go through it
   uint64_t _imeSeq;             // the last ime message sent
   uint64_t _imeComposingSeq;    // the message that started the composition
@@ -673,6 +676,18 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (!PlaySound()) _session->SetAudioPaused(true);  // turned off while connecting
   [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(observeChanged) name:kObserveChanged object:nil];
   [self sendInputSource:YES];
+  // A server older than 6.2.0 never says whether it takes this Mac's input
+  // method: typing with it then follows the keyboard language, as before.
+  {
+    __weak RemoteWindowController* weakSelf = self;
+    const uint64_t gen = _imeGen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+      RemoteWindowController* me = weakSelf;
+      if (!me || me->_imeGen != gen || !me->_session || me->_imeState) return;
+      me->_imeServerSilent = YES;
+      [me sendInputSource:YES];
+    });
+  }
   [NSNotificationCenter.defaultCenter addObserver:self
                                          selector:@selector(checkDisplays)
                                              name:kUseAllDisplaysChanged
@@ -883,6 +898,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeEvent = nil;
   _imeTaken.clear();
   _imeLastCaret = NSZeroRect;
+  _imeModeSaid = NO;
+  _imeServerSilent = NO;
+  ++_imeGen;
   _imeClicked = NO;
   _imeField = 0;
   _imeLastApp.clear();
@@ -908,16 +926,22 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeLocalIsIM = rda_current_input_source(&cur) == RDA_OK && cur.input_method != 0;
   if (was_im && !_imeLocalIsIM && _imeMarked) [self imeUnmark];  // switched away mid-composition
   // The server stays on RDMachine Input whatever this Mac is on: with ABC
-  // here the keys go as keys and pass through it as ABC there.
-  const BOOL want = UseLocalInputMethod() && !gObserveOnly && _viewer && _imeState && _imeState->available &&
-                    !_imeState->secure;
-  if (want == _imeMode) return;
-  if (!want && _imeMarked) {
+  // here the keys go as keys and pass through it as ABC there. Only the
+  // setting and what the server can do decide it: a password field or
+  // observing does not, as each change of the mode switches the server's
+  // input source (6.5.0).
+  const BOOL want = UseLocalInputMethod() && _viewer && _imeState && _imeState->available;
+  if (_imeMarked && (!want || _imeState->secure)) {
+    _imeDropInsert = YES;
     [_imeView.inputContext discardMarkedText];
     [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
     _imeMarked = nil;
     [self imeShowOverlay];
   }
+  // Said once per session even when it is off: a server an earlier session
+  // left on RDMachine Input puts the input source from before back.
+  if (want == _imeMode && (_imeModeSaid || !_imeState)) return;
+  _imeModeSaid = YES;
   _imeMode = want;
   _imeTaken.clear();
   rdm::ImeInput m{rdm::ImeInput::Kind::kMode, ++_imeSeq};
@@ -935,6 +959,11 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 // method took the key, or it is the key-up of one it took.
 - (BOOL)imeTakes:(NSEvent*)e from:(RemoteWindowController*)window {
   if (!_imeMode || (e.type != NSEventTypeKeyDown && e.type != NSEventTypeKeyUp)) return NO;
+  if (gObserveOnly) return NO;  // observing: nothing is typed over there (rawKey sends nothing either)
+  // A password field over there (secure input): keys go as keys. The server
+  // stays on RDMachine Input, which passes them through; macOS uses no input
+  // method in such a field anyway.
+  if (_imeState && _imeState->secure && e.type == NSEventTypeKeyDown) return NO;
   if (!_imeLocalIsIM && e.type == NSEventTypeKeyDown) return NO;  // ABC here: a key as a key
   if (e.type == NSEventTypeKeyUp) {
     if (!_imeTaken.count(e.keyCode)) return NO;
@@ -1195,6 +1224,12 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 // already knows (`force`: say it anyway, e.g. when the session starts).
 - (void)sendInputSource:(BOOL)force {
   if (!_viewer || !SyncKeyboardLanguage() || gObserveOnly) return;
+  // Typing with this Mac's input method: the server stays on RDMachine Input,
+  // and its input source changes only when the mode does (6.5.0; switching it
+  // at every connection is what lost the text field over there). Only a
+  // server that cannot take this Mac's input method follows the keyboard
+  // language instead, as does one that says nothing about it.
+  if (UseLocalInputMethod() && !(_imeState ? !_imeState->available : _imeServerSilent)) return;
   if (_imeMode) return;  // the server stays on RDMachine Input meanwhile
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
