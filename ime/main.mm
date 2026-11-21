@@ -87,6 +87,11 @@ static uint64_t gNextCtl = 1;
   NSUInteger _markedLength;  // UTF-16 length of what we marked, 0 = no composition
   NSString* _markedText;     // what we marked
   uint64_t _markId;          // the agent's id of that mark
+  // Its field does not hold the compositions put into it (Claude's other
+  // view, say): the agent hears that no field takes input methods, so the
+  // client shows the composition itself and the text goes in as typed.
+  BOOL _refusing;
+  uint64_t _markGen;         // later marks supersede the check of an earlier one
   uint64_t _seq;             // the last agent message applied here (the client's number)
   uint64_t _ctl;             // this controller, for the agent
   uint64_t _reportGen;       // later reports supersede earlier ones
@@ -113,10 +118,32 @@ static uint64_t gNextCtl = 1;
   return _ctl;
 }
 
+// Whether the field holds a composition now (what we marked, or one it made
+// up: Chromium's marked range can be).
+- (BOOL)holdsComposition:(id)client {
+  NSRange mk = NSMakeRange(NSNotFound, 0);
+  @try {
+    mk = [client markedRange];
+  } @catch (NSException*) {
+  }
+  return mk.location != NSNotFound && mk.length > 0;
+}
+
+// The field turned out not to hold compositions, or to hold them after all.
+- (void)setRefusing:(BOOL)refusing client:(id)client {
+  if (refusing == _refusing) return;
+  _refusing = refusing;
+  os_log(Log(), "%llu %{public}s", _ctl,
+         refusing ? "does not hold the composition: no field that takes input methods" : "holds compositions again");
+  SendToAgent({{"type", "client"}, {"active", !refusing}, {"app", [[client bundleIdentifier] ?: @"" UTF8String]},
+               {"ctl", _ctl}});
+}
+
 // This controller's field has the focus now.
 - (void)becomeCurrent:(id)sender {
   gCurrent = self;
   gCurrentId = (__bridge const void*)self;
+  _refusing = NO;  // a field that just took the focus is given the benefit of the doubt
   // A composition it remembers that the field no longer has (it was ended
   // or replaced while another controller had the focus) is over.
   if (_markedLength > 0) {
@@ -223,7 +250,7 @@ static uint64_t gNextCtl = 1;
   id client = self.client;
   const std::string type = m.value("type", "");
   if (m.contains("seq")) _seq = m.value("seq", uint64_t{0});
-  const uint64_t id = m.value("id", uint64_t{0});
+  const uint64_t agent_id = m.value("id", uint64_t{0});
   const NSRange none = NSMakeRange(NSNotFound, NSNotFound);
   if (type == "mark") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
@@ -235,15 +262,40 @@ static uint64_t gNextCtl = 1;
          replacementRange:none];
     _markedLength = text.length;
     _markedText = text;
-    _markId = id;
+    _markId = agent_id;
+    if (_refusing && [self holdsComposition:client]) [self setRefusing:NO client:client];
     [self reportSoon];
+    // Still nothing marked a little later (web content answers from a cache
+    // its renderer fills in shortly after): this field does not take it.
+    const uint64_t gen = ++_markGen;
+    __weak RemoteController* weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      RemoteController* me = weakSelf;
+      if (!me || me->_markGen != gen || me->_markedLength == 0 || gCurrent != me) return;
+      id c = me.client;
+      if (![me holdsComposition:c]) [me setRefusing:YES client:c];
+    });
   } else if (type == "commit") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
+    if (_markedLength > 0 && ![self holdsComposition:client]) {
+      // Its composition never showed up in the field: it does not take the
+      // text this way either. The agent types it, as a keyboard would. (Had
+      // it been there after all, only slow to say so, it goes first: no
+      // pinyin left next to the typed text.)
+      [client setMarkedText:@"" selectionRange:NSMakeRange(0, 0) replacementRange:none];
+      _markedLength = 0;
+      _markedText = nil;
+      _markId = 0;
+      ++_markGen;
+      [self setRefusing:YES client:client];
+      SendToAgent({{"type", "ack"}, {"seq", _seq}, {"id", agent_id}, {"ok", false}});
+      return;
+    }
     [client insertText:text replacementRange:none];
     _markedLength = 0;
     _markedText = nil;
     _markId = 0;
-    SendToAgent({{"type", "ack"}, {"seq", _seq}, {"id", id}, {"ok", true}});
+    SendToAgent({{"type", "ack"}, {"seq", _seq}, {"id", agent_id}, {"ok", true}});
     [self reportSoon];  // where the next composition will start
   } else if (type == "report") {
     [self reportAfter:std::clamp(m.value("delay", 0), 0, 1000)];
@@ -287,7 +339,7 @@ static uint64_t gNextCtl = 1;
   nlohmann::json r{{"type", "state"}, {"seq", _seq}, {"after", gAppliedId}, {"ctl", _ctl}};
   // Whether this is the field that has the focus, each time: the agent's
   // sessions come and go, and the "client" message is sent only on a change.
-  r["active"] = gCurrent == self;
+  r["active"] = gCurrent == self && !_refusing;
   r["app"] = [[client bundleIdentifier] ?: @"" UTF8String];
   @try {
     const NSRange mk = [client markedRange];
