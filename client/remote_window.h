@@ -11,6 +11,9 @@
 // server, and its candidate window is put next to the remote caret.
 @interface RemoteView : NSView <NSTextInputClient>
 @property(nonatomic, weak) RemoteWindowController* owner;
+// Its text input context whether or not it offers one to macOS now (see
+// -inputContext): for the input method calls the session makes itself.
+- (NSTextInputContext*)imeContext;
 @property(nonatomic) BOOL pointerInside;
 // Mouse moves count even when the window is not the key one: the windows of
 // an extended desktop, where the pointer goes from screen to screen.
@@ -100,6 +103,10 @@
 - (BOOL)imeHasMarked;
 - (NSRange)imeMarkedRange;
 - (NSRect)imeCaretRect;
+// Whether a text field that takes input methods has the focus over there (and
+// this Mac's input method is used): only then is the remote view a text field
+// for macOS, with an input method and its input source indicator (6.5.4).
+- (BOOL)imeOffersText;
 @end
 
 namespace rdmclient {

@@ -39,6 +39,19 @@ void OnMessage(void* user, uint32_t type, const uint8_t* payload, size_t n) {
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent*)e { return YES; }
 
+// A text field for macOS only while one over there takes text: as on that Mac,
+// where nothing takes text no input method is active and no input source
+// indicator shows (scrolling Claude's conversation moved its focus off the
+// text field, and the indicator kept popping up here). AppKit asks again at
+// the end of each pass of the event loop.
+- (NSTextInputContext*)inputContext {
+  return [self.owner imeOffersText] ? [super inputContext] : nil;
+}
+
+- (NSTextInputContext*)imeContext {
+  return [super inputContext];
+}
+
 - (void)updateTrackingAreas {
   [super updateTrackingAreas];
   if (_tracking) [self removeTrackingArea:_tracking];
@@ -230,6 +243,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   std::optional<rdm::ImeState> _imeEarly;
   BOOL _imeMode;                // the server is on RDMachine Input for us
   BOOL _imeModeSaid;            // this session's server heard which mode this Mac is in
+  BOOL _imeOffered;             // the remote view offered macOS a text input context, as last told
   BOOL _imeServerSilent;        // no ime state came: a server older than 6.2.0
   uint64_t _imeGen;             // counts sessions, for timers that outlive one
   BOOL _imeLocalIsIM;           // this Mac's input source composes (Pinyin, ...): keys go through it
@@ -889,7 +903,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 // Forgets the session's input method state (no message: the session it
 // belonged to is gone or new).
 - (void)imeReset {
-  if (_imeMarked) [_imeView.inputContext discardMarkedText];
+  if (_imeMarked) [[_imeView imeContext] discardMarkedText];
   _imeState.reset();
   _imeMode = NO;
   _imeMarked = nil;
@@ -905,6 +919,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeDropInsert = NO;
   _imeAhead.reset();
   _imePixelsPerUnit = 0;
+  [self imeOfferChanged];  // no session's field any more: not a text field for macOS
 }
 
 - (void)imeSend:(const rdm::ImeInput&)m {
@@ -930,13 +945,16 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   const BOOL want = UseLocalInputMethod() && _viewer && _imeState && _imeState->available;
   if (_imeMarked && (!want || !_imeState->client || _imeState->secure)) {
     _imeDropInsert = YES;
-    [_imeView.inputContext discardMarkedText];
+    [[_imeView imeContext] discardMarkedText];
     [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
     _imeMarked = nil;
   }
   // Said once per session even when it is off: a server an earlier session
   // left on RDMachine Input puts the input source from before back.
-  if (want == _imeMode && (_imeModeSaid || !_imeState)) return;
+  if (want == _imeMode && (_imeModeSaid || !_imeState)) {
+    [self imeOfferChanged];
+    return;
+  }
   _imeModeSaid = YES;
   _imeMode = want;
   _imeTaken.clear();
@@ -949,6 +967,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     _sentInputSource.clear();
     [self sendInputSource:YES];  // the server follows this Mac's input source again
   }
+  [self imeOfferChanged];
 }
 
 // From the key monitor (any of the session's windows): YES when the input
@@ -979,7 +998,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeDropInsert = NO;  // what the input method puts in from here on is this key's
   _imeEvent = e;
   _imeEventRaw = NO;
-  const BOOL handled = [view.inputContext handleEvent:e];
+  const BOOL handled = [[view imeContext] handleEvent:e];
   _imeEvent = nil;
   if (!handled || _imeEventRaw) return NO;  // a key as a key (arrows, Return, Delete when not composing)
   _imeTaken.insert(e.keyCode);
@@ -1055,7 +1074,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // Dropped over here, put in by us: once, whether or not the input method
   // also answers the discard by putting it in.
   _imeDropInsert = YES;
-  [_imeView.inputContext discardMarkedText];
+  [[_imeView imeContext] discardMarkedText];
   _imeDropInsert = NO;
   [self imeInsert:text];
   _imeDropInsert = YES;  // its answer may also come a little later
@@ -1071,9 +1090,25 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeClicked = YES;
   if (!_imeMarked) return;
   _imeDropInsert = YES;  // dropped on both sides: nothing of it goes in
-  [_imeView.inputContext discardMarkedText];
+  [[_imeView imeContext] discardMarkedText];
   _imeMarked = nil;
   [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
+}
+
+- (BOOL)imeOffersText {
+  RemoteWindowController* root = [self imeRoot];
+  return root->_imeMode && root->_imeState && root->_imeState->client && !root->_imeState->secure && !gObserveOnly;
+}
+
+// AppKit asks -inputContext again at the end of the event loop's pass; this
+// makes sure there is one when the offer changed without an event here (a
+// message from the server).
+- (void)imeOfferChanged {
+  const BOOL offers = [self imeOffersText];
+  if (offers == _imeOffered) return;
+  _imeOffered = offers;
+  [NSApp setWindowsNeedUpdate:YES];
+  [NSApp updateWindows];
 }
 
 - (BOOL)imeHasMarked {
@@ -1167,7 +1202,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
       // Ended over there (a click, another app): this Mac's input method lets
       // go too, and what it may put in for that is not sent.
       me->_imeDropInsert = YES;
-      [me->_imeView.inputContext discardMarkedText];
+      [[me->_imeView imeContext] discardMarkedText];
       me->_imeMarked = nil;
     }
     [me imeUpdateMode];
@@ -1175,7 +1210,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     // moves. A caret that reflects everything before the composition's first
     // mark (the commit just before it, say) is where it starts.
     if (me->_imeMarked && copy.caret != before && copy.seq + 1 >= me->_imeComposingSeq) {
-      [me->_imeView.inputContext invalidateCharacterCoordinates];
+      [[me->_imeView imeContext] invalidateCharacterCoordinates];
     }
   });
 }
