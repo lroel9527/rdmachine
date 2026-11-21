@@ -72,6 +72,7 @@ static __weak RemoteController* gCurrent;
 
 @implementation RemoteController {
   NSUInteger _markedLength;  // UTF-16 length of what we marked, 0 = no composition
+  NSString* _markedText;     // what we marked
   uint64_t _seq;             // the last agent message applied here
   uint64_t _reportGen;       // later reports supersede earlier ones
   uint64_t _requestGen;      // the same for the agent's report requests
@@ -122,12 +123,12 @@ static __weak RemoteController* gCurrent;
 // as it stands, and the client hears that it is over.
 - (void)commitComposition:(id)sender {
   if (_markedLength == 0) return;
-  NSRange mk = [sender markedRange];
-  if (mk.location != NSNotFound && mk.length > 0) {
-    NSAttributedString* s = [sender attributedSubstringFromRange:mk];
-    if (s.length) [sender insertText:s.string replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
-  }
+  // What we marked ourselves, not what the app says its marked range holds:
+  // Chromium's marked range can be made up (docs/ime.md), and the text there
+  // was then typed a second time (6.3.10).
+  if (_markedText.length) [sender insertText:_markedText replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
   _markedLength = 0;
+  _markedText = nil;
   SendToAgent({{"type", "ended"}, {"seq", _seq}});
 }
 
@@ -145,11 +146,13 @@ static __weak RemoteController* gCurrent;
            selectionRange:sel
          replacementRange:none];
     _markedLength = text.length;
+    _markedText = text;
     [self reportSoon];
   } else if (type == "commit") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
     [client insertText:text replacementRange:none];
     _markedLength = 0;
+    _markedText = nil;
     SendToAgent({{"type", "ack"}, {"seq", _seq}, {"ok", true}});
     [self reportSoon];  // where the next composition will start
   } else if (type == "report") {
@@ -157,6 +160,7 @@ static __weak RemoteController* gCurrent;
   } else if (type == "cancel") {
     [client setMarkedText:@"" selectionRange:NSMakeRange(0, 0) replacementRange:none];
     _markedLength = 0;
+    _markedText = nil;
   }
 }
 

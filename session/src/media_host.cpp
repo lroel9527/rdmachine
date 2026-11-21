@@ -89,6 +89,8 @@ rda_status BindMediaUdp(const std::string& local_ip, uint16_t port, rda_transpor
   return rda_udp_bind(port, out);
 }
 
+std::string Millis();  // the ime debug log's time, below
+
 InputSourceState FromRda(const rda_input_source_info& i) {
   return InputSourceState{i.id, i.name, i.language, i.input_method != 0, i.ascii_capable != 0};
 }
@@ -100,6 +102,7 @@ MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
     ImeBridge::Events ev;
     ev.on_connection = [this](bool) { SendImeState(false); };
     ev.on_client = [this](bool active, const std::string& app) {
+      if (ime_debug_) Log("ime debug " + Millis() + " field " + (active ? "active " : "inactive ") + app);
       {
         std::lock_guard lock(ime_mu_);
         ime_state_.client = active;
@@ -112,7 +115,8 @@ MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
       SendImeState(false);
     };
     ev.on_report = [this](const ImeBridge::Report& r) { OnImeReport(r); };
-    ev.on_ended = [this](uint64_t) {
+    ev.on_ended = [this](uint64_t seq) {
+      if (ime_debug_) Log("ime debug " + Millis() + " ended over there seq=" + std::to_string(seq));
       {
         std::lock_guard lock(ime_mu_);
         ime_state_.ended = true;
