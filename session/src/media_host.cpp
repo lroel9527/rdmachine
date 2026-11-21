@@ -478,6 +478,10 @@ void MediaHost::OnImeInput(const ImeInput& in) {
           (prev == kImeInputSourceId ? std::string("already on RDMachine Input, nothing switched)")
                                      : "on RDMachine Input" + (prev.empty() ? std::string(")") : ", was " + prev + ")")));
       SendImeState(false);
+      // Where the caret is before the first letter. Nothing else asks now:
+      // the field kept the focus (no input source switch, so no activation
+      // and its report), and the client sends no keys while it composes.
+      bridge->RequestReport(0);
       break;
     }
     case ImeInput::Kind::kMark: {
