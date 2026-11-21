@@ -233,17 +233,20 @@ int MediaHost::OnAuth(void* user, const uint8_t* token, size_t n) {
 }
 
 void MediaHost::OnInput(void* user, const rda_input_event* ev) {
+  if (ev) static_cast<MediaHost*>(user)->InjectInput(*ev);
+}
+
+void MediaHost::InjectInput(const rda_input_event& ev) {
   // injector_ is set before the host exists and cleared after it is
   // destroyed (no callback runs after rda_host_destroy), so no lock here.
-  auto* self = static_cast<MediaHost*>(user);
-  std::lock_guard lock(self->inject_mu_);
-  ++self->input_events_;
-  if (ev && ev->kind < 32) self->input_kinds_ |= 1u << ev->kind;
-  if (self->injector_ && rda_injector_inject(self->injector_, ev) != RDA_OK) {
-    ++self->input_failed_;
-    self->input_error_ = rda_last_error();
+  std::lock_guard lock(inject_mu_);
+  ++input_events_;
+  if (static_cast<uint32_t>(ev.kind) < 32) input_kinds_ |= 1u << ev.kind;
+  if (injector_ && rda_injector_inject(injector_, &ev) != RDA_OK) {
+    ++input_failed_;
+    input_error_ = rda_last_error();
   }
-  self->ImeAfterInput(ev);
+  ImeAfterInput(&ev);
 }
 
 // A click or a key may have moved the caret: the client hears where it is
@@ -426,14 +429,115 @@ std::vector<uint32_t> CodePoints(const std::string& s) {
   return out;
 }
 
+const char* ImeKindName(ImeInput::Kind kind) {
+  static const char* kKinds[] = {"mark", "commit", "cancel", "mode", "key"};
+  return kKinds[static_cast<int>(kind)];
+}
+
 }  // namespace
 
 void MediaHost::OnImeInput(const ImeInput& in) {
+  if (!options_.ime) return;
+  if (in.kind == ImeInput::Kind::kKey) {
+    OnImeKey(in);
+    return;
+  }
+  bool takes = true;
+  if (in.kind != ImeInput::Kind::kMode) {
+    std::lock_guard lock(ime_mu_);
+    takes = ime_keys_.TakesMessage(in.ack);
+  }
+  if (takes) {
+    TakeImeMessage(in);
+  } else {
+    DropImeMessage(in);
+  }
+}
+
+// docs/ime.md, 6.6.0.
+void MediaHost::OnImeKey(const ImeInput& in) {
   ImeBridge* bridge = options_.ime.get();
-  if (!bridge) return;
+  // What the client would be told now (SendImeState).
+  const bool secure = SecureInputActive();
+  ImeKeyJudge::Verdict v;
+  bool field_now;
+  bool waited_for = false;
+  uint64_t back, typed;
+  {
+    std::lock_guard lock(ime_mu_);
+    field_now = ime_.state().client && bridge->connected() && !secure;
+    // The client holds its next keys while one it sent before it heard of a
+    // text field may still come back (its keys go back, or this state says
+    // they were judged): it has heard of one, and this key could have.
+    waited_for = ime_last_sent_.client && !ime_last_sent_.secure &&
+                 ((!in.im && in.field && !*in.field) || (in.im && in.ack < ime_keys_.typed()));
+    v = ime_keys_.OnKey({in.key, in.ack, in.im, in.field}, field_now);
+    back = ime_keys_.back();
+    typed = ime_keys_.typed();
+    ime_last_input_ = in.seq;
+  }
   if (ime_debug_) {
-    static const char* kKinds[] = {"mark", "commit", "cancel", "mode"};
-    Log("ime debug " + Millis() + " client " + kKinds[static_cast<int>(in.kind)] + " seq=" + std::to_string(in.seq) +
+    static const char* kKeys[] = {"nothing in", "keys in", "typed as a key"};
+    std::string ev;
+    for (const ImeKeyEvent& e : in.events) {
+      ev += (ev.empty() ? "" : ",") + std::string(e.kind == RDA_INPUT_KEY_DOWN ? "down " : "up ") + std::to_string(e.code);
+    }
+    Log("ime debug " + Millis() + " client key " + std::to_string(in.key) + " ack=" + std::to_string(in.ack) +
+        (in.im ? " im" : " raw") + " field=" + (in.field ? (*in.field ? "yes" : "no") : "-") + " ev=" +
+        (ev.empty() ? "-" : ev) + " then=" + std::to_string(in.then.size()) + " here=" + (field_now ? "field" : "none") +
+        " -> " + (v.messages ? "messages, " : "") + kKeys[static_cast<int>(v.keys)] +
+        (v.told ? " (told: back=" + std::to_string(back) + " typed=" + std::to_string(typed) + ")" : ""));
+  }
+  // The client hears it before anything else this key brings; one that may
+  // be holding its keys for this one hears that it went in after all.
+  if (v.told) {
+    SendImeState(false);
+  } else if (waited_for) {
+    SendImeState(true);
+  }
+  for (const ImeInput& t : in.then) {
+    if (v.messages) {
+      TakeImeMessage(t);
+    } else {
+      DropImeMessage(t);
+    }
+  }
+  for (const ImeKeyEvent& e : in.events) {
+    if (v.keys == ImeKeyJudge::Verdict::Keys::kNone) break;
+    if (v.keys == ImeKeyJudge::Verdict::Keys::kTyped && e.kind != RDA_INPUT_KEY_DOWN) continue;
+    rda_input_event ev;
+    rda_input_event_default(&ev);
+    ev.kind = static_cast<rda_input_kind>(e.kind);
+    ev.code = e.code;
+    ev.modifiers = e.modifiers;
+    if (ev.kind != RDA_INPUT_KEY_DOWN && ev.kind != RDA_INPUT_KEY_UP) continue;  // keys only
+    InjectInput(ev);
+    if (v.keys == ImeKeyJudge::Verdict::Keys::kTyped) {
+      // Let go at once: the client's input method has its key-up, and a key
+      // held here meanwhile would repeat (auto-repeat comes from the client).
+      ev.kind = RDA_INPUT_KEY_UP;
+      InjectInput(ev);
+    }
+  }
+}
+
+void MediaHost::DropImeMessage(const ImeInput& in) {
+  if (ime_debug_) {
+    Log("ime debug " + Millis() + " client " + ImeKindName(in.kind) + " seq=" + std::to_string(in.seq) +
+        " ack=" + std::to_string(in.ack) + " not used");
+  }
+  {
+    std::lock_guard lock(ime_mu_);
+    ime_last_input_ = in.seq;
+  }
+  // A report reflects it once it reflects everything sent before it.
+  options_.ime->NoteClientMessage(in.seq);
+}
+
+void MediaHost::TakeImeMessage(const ImeInput& in) {
+  ImeBridge* bridge = options_.ime.get();
+  if (ime_debug_) {
+    Log("ime debug " + Millis() + " client " + ImeKindName(in.kind) + " seq=" + std::to_string(in.seq) +
         (in.kind == ImeInput::Kind::kMark || in.kind == ImeInput::Kind::kCommit
              ? " len=" + std::to_string(in.text.size()) + " sel=" + std::to_string(in.sel_location) + "+" +
                    std::to_string(in.sel_length)
@@ -509,6 +613,7 @@ void MediaHost::OnImeInput(const ImeInput& in) {
       ime_.OnCompositionDone();
       break;
     }
+    case ImeInput::Kind::kKey: break;  // OnImeKey
   }
 }
 
@@ -628,7 +733,13 @@ void MediaHost::SendImeState(bool force) {
     s.available = ime_available_;
     s.secure = SecureInputActive();
     s.client = s.client && options_.ime->connected();
+    s.keys = true;
+    s.back = ime_keys_.back();
+    s.typed = ime_keys_.typed();
+    // Not a change of its own: it goes with whatever is sent.
+    s.judged = ime_last_sent_.judged;
     if (!force && ime_sent_ && s == ime_last_sent_) return;
+    s.judged = ime_keys_.judged();
     first = !ime_sent_;
     available = s.available;
     ime_last_sent_ = s;
@@ -986,6 +1097,7 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       ime_.Reset(false, "", 0);
     }
     ime_last_input_ = 0;
+    ime_keys_.Reset();
     ime_debug_ = options_.ime && ImeDebugLogWanted();
     if (ime_debug_) Log("ime debug: on (ImeDebugLog)");
     // Not at the login window (no third-party input method there), not view only.

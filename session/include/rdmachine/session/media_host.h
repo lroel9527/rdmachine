@@ -20,6 +20,7 @@
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
 #include "rdmachine/session/ime_bridge.h"
+#include "rdmachine/session/ime_key_judge.h"
 #include "rdmachine/session/ime_state_tracker.h"
 #include "rdmachine/session/login_screen.h"
 #include "rdmachine/session/virtual_desktop.h"
@@ -169,6 +170,12 @@ class MediaHost : public ServerDelegate {
   // The client's input method (docs/ime.md). OnImeInput runs on the
   // transport thread, in order with the keys; the bridge's events on its own.
   void OnImeInput(const ImeInput& in);
+  // A key the client numbered (6.6.0): judged as it arrives (ImeKeyJudge).
+  void OnImeKey(const ImeInput& in);
+  // A mark, commit, cancel or mode change that goes in.
+  void TakeImeMessage(const ImeInput& in);
+  // One that does not (ImeKeyJudge): it changes nothing over there.
+  void DropImeMessage(const ImeInput& in);
   void OnImeReport(const ImeBridge::Report& r);
   // Tells the client what changed (all of it when `force`), on the message
   // channel of the main picture.
@@ -204,6 +211,8 @@ class MediaHost : public ServerDelegate {
   void StopTypeLogin();
   void LogInput();  // the input summary line, if anything came since the last
   void Inject(const rda_input_event& ev);
+  // A key or a click from the client (transport thread): injected and counted.
+  void InjectInput(const rda_input_event& ev);
   void Log(const std::string& line);
 
   const MediaHostOptions options_;
@@ -233,6 +242,7 @@ class MediaHost : public ServerDelegate {
   // bridge's thread both use it, and neither may wait for mu_.
   std::mutex ime_mu_;
   ImeStateTracker ime_;          // what is known now
+  ImeKeyJudge ime_keys_;         // the client's keys as they arrive (6.6.0)
   uint64_t ime_last_input_ = 0;  // the client's last ImeInput (for an input method that does not say)
   ImeState ime_last_sent_;       // what the client was last told
   bool ime_sent_ = false;        // something went out this session

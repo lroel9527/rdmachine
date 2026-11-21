@@ -94,8 +94,7 @@ static uint64_t gNextCtl = 1;
   // input methods, and the client sends keys as keys, as a keyboard would
   // where nothing takes text: no input method composes there (6.5.3).
   BOOL _takesText;
-  uint64_t _markGen;         // later marks supersede the check of an earlier one
-  uint64_t _checkGen;        // the same for the checks while it has not shown it
+  uint64_t _checkGen;        // later checks supersede earlier ones, while it has not shown it
   uint64_t _seq;             // the last agent message applied here (the client's number)
   uint64_t _ctl;             // this controller, for the agent
   uint64_t _reportGen;       // later reports supersede earlier ones
@@ -307,29 +306,25 @@ static uint64_t gNextCtl = 1;
     _markId = agent_id;
     if (!_takesText && [self holdsComposition:client]) [self setTakesText:YES client:client];
     [self reportSoon];
-    // Still nothing marked a little later (web content answers from a cache
-    // its renderer fills in shortly after): this field does not take it.
-    const uint64_t gen = ++_markGen;
-    __weak RemoteController* weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-      RemoteController* me = weakSelf;
-      if (!me || me->_markGen != gen || me->_markedLength == 0 || gCurrent != me) return;
-      id c = me.client;
-      if (![me holdsComposition:c]) [me setTakesText:NO client:c];
-    });
+    // A field that says where its selection is takes text even when it does
+    // not show the composition (or shows it late: web content answers from a
+    // cache its renderer fills in shortly after), as it does for an input
+    // method on that Mac; its commit is typed (below). 6.5.2's "not shown
+    // 80 ms later: no field" is gone (6.6.0): the server judges the client's
+    // keys by whether a field takes text, and a field the user is typing into
+    // must not turn into "none" for that (docs/ime.md, 6.6).
   } else if (type == "commit") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
     if (_markedLength > 0 && ![self holdsComposition:client]) {
       // Its composition never showed up in the field: it does not take the
-      // text this way either. The agent types it, as a keyboard would. (Had
-      // it been there after all, only slow to say so, it goes first: no
-      // pinyin left next to the typed text.)
+      // text this way either. The agent types it, as the text an input
+      // method puts into such a field. (Had it been there after all, only
+      // slow to say so, it goes first: no pinyin left next to the typed
+      // text.) The field still takes text (6.6.0).
       [client setMarkedText:@"" selectionRange:NSMakeRange(0, 0) replacementRange:none];
       _markedLength = 0;
       _markedText = nil;
       _markId = 0;
-      ++_markGen;
-      [self setTakesText:NO client:client];
       SendToAgent({{"type", "ack"}, {"seq", _seq}, {"id", agent_id}, {"ok", false}});
       return;
     }

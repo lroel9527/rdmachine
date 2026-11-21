@@ -1,6 +1,39 @@
 #include "remote_window.h"
 
+#include <deque>
+#include <iterator>
+
 using namespace rdmclient;
+
+namespace {
+
+// A key handled while typing with this Mac's input method, for a server that
+// judges keys as they arrive (6.6.0, docs/ime.md): kept while it may still
+// come back.
+struct ImeKeyRecord {
+  uint64_t id = 0;
+  NSEvent* event = nil;
+  __weak RemoteWindowController* window = nil;
+  std::set<uint32_t> held;    // that window's keys down over there, before it
+  std::set<uint16_t> taken;   // keys whose key-down the input method took, before it
+  uint64_t releases = 0;      // that window's releaseHeld count, before it
+  // How it went, for whether it may still come back (imeAwaitsJudgement):
+  bool raw_no_field = false;  // as keys, this Mac taking it that no text field takes text there
+  bool im = false;            // its key-down went to the input method
+  uint64_t ack = 0;           // what this Mac had heard of back and typed then
+};
+
+// A key typed while one sent earlier may still come back: it goes in after
+// that is settled, in order.
+struct ImeHeldKey {
+  NSEvent* event = nil;
+  __weak RemoteWindowController* window = nil;
+  uint64_t releases = 0;  // that window's releaseHeld count when it was typed
+};
+// Far more than can be under way: a key comes back within a network trip.
+constexpr size_t kImeKeysKept = 256;
+
+}  // namespace
 
 @implementation ExtraDisplayWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
@@ -204,6 +237,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   rda_viewer* _viewer;                           // _session's, while attached
   std::set<uint32_t> _heldKeys, _heldButtons;    // main thread
   BOOL _releasing;       // releaseHeld is sending: goes out even in observe mode
+  uint64_t _releaseGen;  // counts releaseHeld (the input method's kept keys, 6.6.0)
   uint64_t _trafficBase;  // received by this window's earlier sessions (it reconnects in place)
   int32_t _lastX, _lastY;
 
@@ -272,6 +306,25 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   int32_t _imeAheadFromX;       // the caret the server last gave, before those commits
   double _imeAheadUnits;        // their width at 100 pt
   double _imePixelsPerUnit;     // learned; 0 = not yet
+  // A server that judges keys as they arrive (6.6.0, docs/ime.md): each key
+  // handled while typing with this Mac's input method goes over numbered,
+  // with what the input method said for it, and is kept a while. The server
+  // may give it back (a text field took input methods there when it came:
+  // handled again here), or say the composition went nowhere (no field took
+  // it there: the keys were typed as keys).
+  uint64_t _imeKeyId;                        // the last key's number
+  uint64_t _imeBackSeen, _imeTypedSeen;      // the server's back and typed, as last heard
+  uint64_t _imeAck;                          // the larger: what the server knows this Mac heard
+  BOOL _imeCollecting;                       // a key is being handled: what the input method says goes with it
+  std::vector<rdm::ImeInput> _imeCollected;
+  BOOL _imeCapture;                          // ... and so do the keys it sends as keys (send:)
+  std::vector<rda_input_event> _imeCaptured;
+  std::deque<ImeKeyRecord> _imeKeys;         // oldest first
+  uint64_t _imeJudgedSeen;                   // the server's judged, as last heard
+  // A key sent before this Mac heard of a text field over there may still
+  // come back: the keys typed meanwhile wait, to go in after it.
+  BOOL _imeHolding;
+  std::vector<ImeHeldKey> _imeHeld;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -919,11 +972,26 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeDropInsert = NO;
   _imeAhead.reset();
   _imePixelsPerUnit = 0;
+  _imeKeyId = 0;  // the server numbers them from 1 again too
+  _imeBackSeen = _imeTypedSeen = _imeAck = 0;
+  _imeCollecting = _imeCapture = NO;
+  _imeCollected.clear();
+  _imeCaptured.clear();
+  _imeKeys.clear();
+  _imeJudgedSeen = 0;
+  _imeHolding = NO;
+  _imeHeld.clear();
   [self imeOfferChanged];  // no session's field any more: not a text field for macOS
 }
 
-- (void)imeSend:(const rdm::ImeInput&)m {
+- (void)imeSend:(rdm::ImeInput)m {
   if (!_session) return;
+  m.ack = _imeAck;
+  if (_imeCollecting && (m.kind == rdm::ImeInput::Kind::kMark || m.kind == rdm::ImeInput::Kind::kCommit ||
+                         m.kind == rdm::ImeInput::Kind::kCancel)) {
+    _imeCollected.push_back(std::move(m));  // goes over with the key (imeKey:from:)
+    return;
+  }
   const std::string p = rdm::EncodeImeInput(m);
   _session->SendInputMessage(rdm::kImeMessageType, reinterpret_cast<const uint8_t*>(p.data()), p.size());
 }
@@ -953,6 +1021,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // left on RDMachine Input puts the input source from before back.
   if (want == _imeMode && (_imeModeSaid || !_imeState)) {
     [self imeOfferChanged];
+    if (_imeHolding && ![self imeJudged]) [self imeLetHeldGo];
     return;
   }
   _imeModeSaid = YES;
@@ -968,6 +1037,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     [self sendInputSource:YES];  // the server follows this Mac's input source again
   }
   [self imeOfferChanged];
+  if (_imeHolding && ![self imeJudged]) [self imeLetHeldGo];
 }
 
 // From the key monitor (any of the session's windows): YES when the input
@@ -1003,6 +1073,161 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (!handled || _imeEventRaw) return NO;  // a key as a key (arrows, Return, Delete when not composing)
   _imeTaken.insert(e.keyCode);
   return YES;
+}
+
+// Keys go over numbered, for the server to judge as they arrive (6.6.0).
+- (BOOL)imeJudged {
+  return _imeMode && _imeState && _imeState->keys && _session;
+}
+
+// A key, numbered: how this Mac handled it, by what the server last said
+// (imeTakes, rawKey), goes over in one message with what its input method
+// said meanwhile, for the server to judge as it arrives (docs/ime.md).
+- (void)imeKey:(NSEvent*)e from:(RemoteWindowController*)window {
+  if (_imeHolding) {
+    // One sent before this Mac heard of the text field over there may still
+    // come back: this one goes in after it, as on that Mac.
+    _imeHeld.push_back({e, window, window->_releaseGen});
+    return;
+  }
+  const uint64_t key_id = ++_imeKeyId;
+  ImeKeyRecord rec;
+  rec.id = key_id;
+  rec.event = e;
+  rec.window = window;
+  rec.held = window->_heldKeys;
+  rec.taken = _imeTaken;
+  rec.releases = window->_releaseGen;
+  _imeKeys.push_back(std::move(rec));
+  while (_imeKeys.size() > kImeKeysKept) _imeKeys.pop_front();
+  const BOOL down = e.type == NSEventTypeKeyDown;
+  // A key-down whose way goes by whether a text field over there takes text
+  // (imeTakes): what this Mac takes that to be.
+  std::optional<bool> field;
+  if (down && _imeLocalIsIM && !(e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl))) {
+    field = _imeState && _imeState->client && !_imeState->secure;
+  }
+  _imeCollecting = YES;
+  _imeCollected.clear();
+  const BOOL took = [self imeTakes:e from:window];
+  _imeCollecting = NO;
+  rdm::ImeInput k;
+  k.kind = rdm::ImeInput::Kind::kKey;
+  k.key = key_id;
+  k.im = took;
+  k.field = took ? std::optional<bool>(true) : field;
+  if (took) {
+    if (!down) return;  // the key-up of one the input method took: nothing goes
+    rda_input_event ev;
+    if ([window keyEventOf:e into:&ev]) k.events.push_back({static_cast<uint32_t>(ev.kind), ev.code, ev.modifiers});
+  } else {
+    _imeCapture = YES;
+    _imeCaptured.clear();
+    [window rawKey:e];
+    _imeCapture = NO;
+    for (const rda_input_event& ev : _imeCaptured) {
+      k.events.push_back({static_cast<uint32_t>(ev.kind), ev.code, ev.modifiers});
+    }
+    _imeCaptured.clear();
+  }
+  k.then = std::move(_imeCollected);
+  _imeCollected.clear();
+  if (!k.im && k.events.empty() && k.then.empty()) return;  // nothing goes (Fn, say)
+  if (!_imeKeys.empty() && _imeKeys.back().id == key_id) {
+    _imeKeys.back().raw_no_field = !k.im && k.field && !*k.field;
+    _imeKeys.back().im = k.im;
+    _imeKeys.back().ack = _imeAck;
+  }
+  k.seq = _imeSeq;  // not a message of its own: what it holds has its numbers
+  [self imeSend:k];
+}
+
+// A key-down this Mac sent before it heard of a text field over there, not
+// judged yet when the server last said, that the server gives back if a
+// field takes input methods there when it comes: one sent as a key, taking
+// it that none did, or one of a composition that went nowhere.
+- (BOOL)imeAwaitsJudgement {
+  for (auto it = _imeKeys.rbegin(); it != _imeKeys.rend() && it->id > _imeJudgedSeen; ++it) {
+    if (it->raw_no_field || (it->im && it->ack < _imeTypedSeen)) return YES;
+  }
+  return NO;
+}
+
+// The keys held meanwhile go in, in order.
+- (void)imeLetHeldGo {
+  _imeHolding = NO;
+  std::vector<ImeHeldKey> held;
+  held.swap(_imeHeld);
+  NSMutableSet<RemoteWindowController*>* late = [NSMutableSet set];
+  for (const ImeHeldKey& h : held) {
+    RemoteWindowController* w = h.window;
+    if (!w || !_session) continue;
+    [w key:h.event];
+    if (h.releases != w->_releaseGen) [late addObject:w];
+  }
+  [self imeLetGoAfter:late];
+}
+
+// Windows that lost the focus (releaseHeld) after keys that went in only now:
+// nothing stays down over there, as when they lost it.
+- (void)imeLetGoAfter:(NSSet<RemoteWindowController*>*)late {
+  for (RemoteWindowController* w in late) [w releaseHeld];
+  if (late.count) _imeTaken.clear();
+}
+
+// What the server said about this Mac's keys (6.6.0): it judged some
+// otherwise than they were sent, or how far it has judged them.
+- (void)imeHeard:(const rdm::ImeState&)s {
+  _imeJudgedSeen = std::max(_imeJudgedSeen, s.judged);
+  const BOOL typed = s.typed > _imeTypedSeen;
+  const BOOL back = s.back > _imeBackSeen;
+  if (typed || back) {
+    _imeTypedSeen = std::max(_imeTypedSeen, s.typed);
+    _imeBackSeen = std::max(_imeBackSeen, s.back);
+    _imeAck = std::max(_imeTypedSeen, _imeBackSeen);
+    // The composition went nowhere there (its keys were typed as keys), or
+    // it is made again below: dropped here without a word, and what this
+    // Mac's input method may put in for that is not sent. (Keys typed while
+    // one could still come back are held, so a composition is rarely here.)
+    if (_imeMarked) {
+      _imeDropInsert = YES;
+      [[_imeView imeContext] discardMarkedText];
+      _imeMarked = nil;
+    }
+    _imeAhead.reset();
+  }
+  if (back) {
+    // The keys from s.back on, all sent before this was heard, were not
+    // used: handled again first, in order, as things stood before the first
+    // of them; the keys held meanwhile go after them.
+    auto first = std::find_if(_imeKeys.begin(), _imeKeys.end(),
+                              [&](const ImeKeyRecord& r) { return r.id >= s.back; });
+    if (first != _imeKeys.end()) {
+      std::vector<ImeKeyRecord> again(std::make_move_iterator(first), std::make_move_iterator(_imeKeys.end()));
+      _imeKeys.erase(first, _imeKeys.end());
+      if (RemoteWindowController* w = again.front().window) w->_heldKeys = again.front().held;
+      _imeTaken = again.front().taken;
+      const BOOL holding = _imeHolding;
+      _imeHolding = NO;
+      NSMutableSet<RemoteWindowController*>* late = [NSMutableSet set];
+      for (const ImeKeyRecord& r : again) {
+        RemoteWindowController* w = r.window;
+        if (!w || !_session) continue;
+        [w key:r.event];  // numbered again (or as before, should the mode have ended)
+        if (r.releases != w->_releaseGen) [late addObject:w];
+      }
+      _imeHolding = holding;
+      [self imeLetGoAfter:late];
+    }
+  }
+  // While a key sent before this Mac heard of the text field over there may
+  // still come back, the keys typed meanwhile wait: composed now, they would
+  // go to the input method before it.
+  if ([self imeJudged] && s.client && !s.secure && [self imeAwaitsJudgement]) {
+    _imeHolding = YES;
+  } else if (_imeHolding || !_imeHeld.empty()) {
+    [self imeLetHeldGo];
+  }
 }
 
 - (void)imeMark:(NSString*)text selected:(NSRange)sel {
@@ -1206,6 +1431,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
       me->_imeMarked = nil;
     }
     [me imeUpdateMode];
+    [me imeHeard:copy];
     // A new position for the composition under way: the candidate window
     // moves. A caret that reflects everything before the composition's first
     // mark (the commit just before it, say) is where it starts.
@@ -1505,6 +1731,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     [_parent send:ev];
   } else if (_extraIndex >= 0) {
     [_parent sendExtra:static_cast<NSUInteger>(_extraIndex) event:ev];
+  } else if (_imeCapture && (ev.kind == RDA_INPUT_KEY_DOWN || ev.kind == RDA_INPUT_KEY_UP)) {
+    _imeCaptured.push_back(ev);  // goes over with the key's number (imeKey:from:)
   } else {
     _session->SendInput(ev);
   }
@@ -1512,8 +1740,19 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 
 - (void)key:(NSEvent*)e {
   RemoteWindowController* root = [self imeRoot];
+  if ([root imeJudged]) return [root imeKey:e from:self];
   if ([root imeTakes:e from:self]) return;
   [self rawKey:e];
+}
+
+// The key as rawKey sends a key-down or key-up (NO: no HID code, e.g. Fn).
+- (BOOL)keyEventOf:(NSEvent*)e into:(rda_input_event*)out {
+  rda_input_event ev = Event(e.type == NSEventTypeKeyDown ? RDA_INPUT_KEY_DOWN : RDA_INPUT_KEY_UP);
+  ev.modifiers = Modifiers(e.modifierFlags);
+  ev.code = rda_keycode_from_mac(e.keyCode);
+  if (ev.code == 0) return NO;
+  *out = ev;
+  return YES;
 }
 
 // A key as a key: the server's keyboard layout (and input method, without
@@ -1545,6 +1784,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 }
 
 - (void)releaseHeld {
+  ++_releaseGen;
   const std::set<uint32_t> keys = _heldKeys, buttons = _heldButtons;
   _releasing = YES;
   for (uint32_t k : keys) {

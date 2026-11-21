@@ -22,10 +22,9 @@ bool GetRange(const json& j, const char* key, ImeRange* out) {
   return true;
 }
 
-}  // namespace
-
-std::string EncodeImeInput(const ImeInput& m) {
+json InputToJson(const ImeInput& m) {
   json j{{"seq", m.seq}};
+  if (m.ack) j["ack"] = m.ack;
   switch (m.kind) {
     case ImeInput::Kind::kMark:
       j["mark"] = m.text;
@@ -34,17 +33,38 @@ std::string EncodeImeInput(const ImeInput& m) {
     case ImeInput::Kind::kCommit: j["commit"] = m.text; break;
     case ImeInput::Kind::kCancel: j["cancel"] = true; break;
     case ImeInput::Kind::kMode: j["mode"] = m.mode_on ? "on" : "off"; break;
+    case ImeInput::Kind::kKey: {
+      json k{{"id", m.key}};
+      if (m.im) k["im"] = true;
+      if (m.field) k["field"] = *m.field;
+      if (!m.events.empty()) {
+        json ev = json::array();
+        for (const ImeKeyEvent& e : m.events) ev.push_back({e.kind, e.code, e.modifiers});
+        k["ev"] = std::move(ev);
+      }
+      if (!m.then.empty()) {
+        json then = json::array();
+        for (const ImeInput& t : m.then) then.push_back(InputToJson(t));
+        k["then"] = std::move(then);
+      }
+      j["key"] = std::move(k);
+      break;
+    }
   }
-  return j.dump();
+  return j;
 }
 
-std::optional<ImeInput> DecodeImeInput(const std::string& payload) {
-  const json j = json::parse(payload, nullptr, /*allow_exceptions=*/false);
+// nested: inside a key's "then", where only marks, commits and cancels go.
+std::optional<ImeInput> InputFromJson(const json& j, bool nested) {
   if (!j.is_object()) return std::nullopt;
   auto seq = j.find("seq");
   if (seq == j.end() || !seq->is_number_unsigned()) return std::nullopt;
   ImeInput m;
   m.seq = seq->get<uint64_t>();
+  if (auto it = j.find("ack"); it != j.end()) {
+    if (!it->is_number_unsigned()) return std::nullopt;
+    m.ack = it->get<uint64_t>();
+  }
   int kinds = 0;
   if (auto it = j.find("mark"); it != j.end()) {
     if (!it->is_string()) return std::nullopt;
@@ -70,13 +90,56 @@ std::optional<ImeInput> DecodeImeInput(const std::string& payload) {
     ++kinds;
   }
   if (auto it = j.find("mode"); it != j.end()) {
-    if (!it->is_string() || (*it != "on" && *it != "off")) return std::nullopt;
+    if (nested || !it->is_string() || (*it != "on" && *it != "off")) return std::nullopt;
     m.kind = ImeInput::Kind::kMode;
     m.mode_on = *it == "on";
     ++kinds;
   }
+  if (auto it = j.find("key"); it != j.end()) {
+    if (nested || !it->is_object()) return std::nullopt;
+    const json& k = *it;
+    auto id = k.find("id");
+    if (id == k.end() || !id->is_number_unsigned()) return std::nullopt;
+    m.kind = ImeInput::Kind::kKey;
+    m.key = id->get<uint64_t>();
+    if (auto f = k.find("im"); f != k.end()) {
+      if (!f->is_boolean()) return std::nullopt;
+      m.im = f->get<bool>();
+    }
+    if (auto f = k.find("field"); f != k.end()) {
+      if (!f->is_boolean()) return std::nullopt;
+      m.field = f->get<bool>();
+    }
+    if (auto f = k.find("ev"); f != k.end()) {
+      if (!f->is_array()) return std::nullopt;
+      for (const json& e : *f) {
+        if (!e.is_array() || e.size() != 3) return std::nullopt;
+        for (const json& n : e) {
+          if (!n.is_number_unsigned() || n.get<uint64_t>() > UINT32_MAX) return std::nullopt;
+        }
+        m.events.push_back({e[0].get<uint32_t>(), e[1].get<uint32_t>(), e[2].get<uint32_t>()});
+      }
+    }
+    if (auto f = k.find("then"); f != k.end()) {
+      if (!f->is_array()) return std::nullopt;
+      for (const json& t : *f) {
+        auto in = InputFromJson(t, /*nested=*/true);
+        if (!in) return std::nullopt;
+        m.then.push_back(std::move(*in));
+      }
+    }
+    ++kinds;
+  }
   if (kinds != 1) return std::nullopt;
   return m;
+}
+
+}  // namespace
+
+std::string EncodeImeInput(const ImeInput& m) { return InputToJson(m).dump(); }
+
+std::optional<ImeInput> DecodeImeInput(const std::string& payload) {
+  return InputFromJson(json::parse(payload, nullptr, /*allow_exceptions=*/false), /*nested=*/false);
 }
 
 std::string EncodeImeState(const ImeState& s) {
@@ -90,6 +153,10 @@ std::string EncodeImeState(const ImeState& s) {
   if (s.marked) j["marked"] = {s.marked->location, s.marked->length};
   if (s.selected) j["sel"] = {s.selected->location, s.selected->length};
   if (s.ended) j["ended"] = true;
+  if (s.keys) j["keys"] = true;
+  if (s.back) j["back"] = s.back;
+  if (s.typed) j["typed"] = s.typed;
+  if (s.judged) j["judged"] = s.judged;
   return j.dump();
 }
 
@@ -104,8 +171,12 @@ std::optional<ImeState> DecodeImeState(const std::string& payload) {
   flag("client", &s.client);
   flag("secure", &s.secure);
   flag("ended", &s.ended);
+  flag("keys", &s.keys);
   if (auto it = j.find("app"); it != j.end() && it->is_string()) s.app = it->get<std::string>();
   if (auto it = j.find("seq"); it != j.end() && it->is_number_unsigned()) s.seq = it->get<uint64_t>();
+  if (auto it = j.find("back"); it != j.end() && it->is_number_unsigned()) s.back = it->get<uint64_t>();
+  if (auto it = j.find("typed"); it != j.end() && it->is_number_unsigned()) s.typed = it->get<uint64_t>();
+  if (auto it = j.find("judged"); it != j.end() && it->is_number_unsigned()) s.judged = it->get<uint64_t>();
   if (auto it = j.find("field"); it != j.end() && it->is_number_unsigned() &&
                                  it->get<uint64_t>() <= UINT32_MAX) {
     s.field = static_cast<uint32_t>(it->get<uint64_t>());

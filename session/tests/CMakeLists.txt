@@ -3,7 +3,7 @@ add_executable(rdm_session_tests
   test_live_stats.cpp
   test_media_e2e.cpp
   test_daemon_e2e.cpp
-  test_ime_bridge.cpp test_ime_state_tracker.cpp)
+  test_ime_bridge.cpp test_ime_state_tracker.cpp test_ime_key_judge.cpp)
 # The real NSPasteboard; needs a logged-in session (a pasteboard server).
 # The real virtual display (RDM_TEST_VIRTUAL_DESKTOP=1: it rearranges the displays).
 target_sources(rdm_session_tests PRIVATE test_system_clipboard_mac.mm test_virtual_desktop_mac.mm)

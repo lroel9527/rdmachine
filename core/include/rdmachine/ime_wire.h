@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace rdm {
 
@@ -23,23 +24,56 @@ constexpr uint32_t kImeStateMessageType = 0x10015;
 // The server's input method, as Text Input Sources knows it.
 inline constexpr const char* kImeInputSourceId = "org.rdmachine.inputmethod.Remote";
 
+// One key event as rdaccel carries it (rda_input_event): kind
+// RDA_INPUT_KEY_DOWN or RDA_INPUT_KEY_UP, a USB HID usage, RDA_MOD_* bits.
+struct ImeKeyEvent {
+  uint32_t kind = 0;
+  uint32_t code = 0;
+  uint32_t modifiers = 0;
+
+  bool operator==(const ImeKeyEvent&) const = default;
+};
+
 // Client to server. UTF-16 indices, as NSTextInputClient counts.
 struct ImeInput {
-  enum class Kind { kMark, kCommit, kCancel, kMode };
+  enum class Kind { kMark, kCommit, kCancel, kMode, kKey };
   Kind kind = Kind::kMark;
   uint64_t seq = 0;
   std::string text;          // kMark: the composition; kCommit: what goes in
   uint32_t sel_location = 0;  // kMark: the selection inside the composition
   uint32_t sel_length = 0;
   bool mode_on = false;  // kMode: the client starts (true) or stops typing with its input method
+  // The latest key number of the server's back and typed (ImeState) the
+  // client had heard of when it sent this (6.6.0; 0 = none).
+  uint64_t ack = 0;
+
+  // kKey (6.6.0, to a server that says keys): one key the client handled
+  // while it types with its input method, and how it handled it. The server
+  // judges it as it arrives, by whether a text field takes input methods
+  // there then, as a Mac decides when its app handles the key (docs/ime.md).
+  uint64_t key = 0;  // the client's number for it, rising through the session
+  bool im = false;   // its input method took it; otherwise it goes in as `events`
+  // A key-down that went by whether a text field over there takes text: what
+  // the client took that to be. Absent for keys that go the same way either
+  // way (shortcuts, key-ups, modifiers, ABC here).
+  std::optional<bool> field{};
+  // im: the key-down as a key (typed if no text field takes it there);
+  // otherwise the keys that go in.
+  std::vector<ImeKeyEvent> events{};
+  // What the client's input method did while it handled the key (marks,
+  // commits, cancels), in order: they go in before `events`.
+  std::vector<ImeInput> then{};
 
   bool operator==(const ImeInput&) const = default;
 };
 
 // {"seq":1,"mark":"ni'hao","sel":[6,0]}, {"seq":2,"commit":"你好"},
-// {"seq":3,"cancel":true}, {"seq":4,"mode":"on"|"off"}.
+// {"seq":3,"cancel":true}, {"seq":4,"mode":"on"|"off"},
+// {"seq":4,"key":{"id":7,"im":true,"field":true,"ev":[[5,17,0]],"then":[{"seq":5,"mark":"n"}]}};
+// any of them with "ack":N.
 std::string EncodeImeInput(const ImeInput& m);
-// nullopt for anything that is not exactly one of those.
+// nullopt for anything that is not exactly one of those (a key's "then"
+// holds only marks, commits and cancels).
 std::optional<ImeInput> DecodeImeInput(const std::string& payload);
 
 struct ImeRange {
@@ -76,6 +110,21 @@ struct ImeState {
   // The composition was ended over there (a click elsewhere, another app):
   // the client drops its own.
   bool ended = false;
+  // 6.6.0: this server judges the client's keys as they arrive (ImeInput
+  // kKey); the client numbers them.
+  bool keys = false;
+  // The client's key from which the keys it sent before it heard this were
+  // not used: a text field took input methods here when they came, so its
+  // input method gets them. It handles them again, in order (0 = none).
+  uint64_t back = 0;
+  // The client's key from which what its input method took was typed here
+  // as keys, no text field taking input methods when they came: its
+  // composition went nowhere (0 = none).
+  uint64_t typed = 0;
+  // The client's last key the server had judged when it sent this (0 =
+  // none): later ones were still on their way. Not a change of its own (the
+  // state is not sent for it alone).
+  uint64_t judged = 0;
 
   bool operator==(const ImeState&) const = default;
 };
