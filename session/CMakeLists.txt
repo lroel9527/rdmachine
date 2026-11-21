@@ -12,7 +12,7 @@ add_library(rdm_session STATIC
   src/remote_session.cpp
   src/daemon.cpp
   src/agent_host.cpp
-  src/ime_bridge.cpp)
+  src/ime_bridge.cpp src/ime_state_tracker.cpp)
 target_sources(rdm_session PRIVATE src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm
   src/file_target_mac.mm src/ime_bridge_mac.mm)
 set_source_files_properties(src/system_clipboard_mac.mm src/virtual_desktop_mac.mm src/login_screen_mac.mm src/code_identity_mac.mm

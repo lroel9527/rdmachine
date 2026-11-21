@@ -100,32 +100,41 @@ InputSourceState FromRda(const rda_input_source_info& i) {
 MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
   if (options_.ime) {
     ImeBridge::Events ev;
-    ev.on_connection = [this](bool) { SendImeState(false); };
-    ev.on_client = [this](bool active, const std::string& app) {
-      if (ime_debug_) Log("ime debug " + Millis() + " field " + (active ? "active " : "inactive ") + app);
+    ev.on_connection = [this](bool connected) {
       {
         std::lock_guard lock(ime_mu_);
-        ime_state_.client = active;
-        ime_state_.app = active ? app : std::string();
-        // Another field (or none): the old place is not where it is. A field
-        // that took the focus reports its own; switching apps, the new one's
-        // activation comes before the old one lets go, so not only on "none".
-        ime_state_.caret.reset();
+        ime_.OnConnection(connected);
+      }
+      SendImeState(false);
+    };
+    ev.on_client = [this](bool active, const std::string& app, uint64_t ctl) {
+      if (ime_debug_) {
+        Log("ime debug " + Millis() + " field " + (active ? "active " : "inactive ") + app + " ctl=" + std::to_string(ctl));
+      }
+      {
+        std::lock_guard lock(ime_mu_);
+        ime_.OnField(active, app, ctl);
       }
       SendImeState(false);
     };
     ev.on_report = [this](const ImeBridge::Report& r) { OnImeReport(r); };
-    ev.on_ended = [this](uint64_t seq) {
-      if (ime_debug_) Log("ime debug " + Millis() + " ended over there seq=" + std::to_string(seq));
+    ev.on_ended = [this](std::optional<uint64_t> mark_id) {
+      bool current;
       {
         std::lock_guard lock(ime_mu_);
-        ime_state_.ended = true;
-        ime_state_.marked.reset();
+        current = ime_.OnEnded(mark_id);
+        if (current) ime_.state().ended = true;
       }
+      if (ime_debug_) {
+        Log("ime debug " + Millis() + " ended over there id=" + (mark_id ? std::to_string(*mark_id) : "-") +
+            (current ? "" : " (not the composition under way: ignored)"));
+      }
+      if (!current) return;
       SendImeState(false);
       std::lock_guard lock(ime_mu_);
-      ime_state_.ended = false;
+      ime_.state().ended = false;
     };
+    ev.on_late_refusal = [this](const std::string& text) { TypeText(text); };
     options_.ime->SetEvents(std::move(ev));
   }
 }
@@ -430,12 +439,18 @@ void MediaHost::OnImeInput(const ImeInput& in) {
                    std::to_string(in.sel_length)
              : ""));
   }
+  {
+    std::lock_guard lock(ime_mu_);
+    ime_last_input_ = in.seq;
+  }
   switch (in.kind) {
     case ImeInput::Kind::kMode: {
+      bridge->NoteClientMessage(in.seq);
       if (!in.mode_on) {
         EndImeMode("the client stopped typing with its input method");
         break;
       }
+      std::lock_guard src(ime_source_mu_);
       bool available;
       {
         std::lock_guard lock(ime_mu_);
@@ -453,67 +468,70 @@ void MediaHost::OnImeInput(const ImeInput& in) {
         Log(std::string("the client's input method: RDMachine Input could not be selected: ") + rda_last_error());
         break;
       }
+      ime_keep_failed_ = false;
       {
         std::lock_guard lock(ime_mu_);
         ime_mode_ = true;
         ime_mode_on_ = true;
-        ime_keep_failed_ = false;
         if (prev != kImeInputSourceId) ime_prev_source_ = prev;
-        ime_state_.seq = in.seq;
       }
-      // A commit with no text field to take it is typed as text, which would
-      // otherwise put an ASCII layout in place of RDMachine Input (it passes
-      // every key through, so the characters go in as they are) and, with no
-      // key coming in this mode, leave it there.
-      rda_injector_set_text_leaves_input_method(injector_, 0);
       Log("the client types with its own input method (this Mac on RDMachine Input" +
           (prev.empty() || prev == kImeInputSourceId ? std::string(")") : ", was " + prev + ")"));
       SendImeState(false);
       break;
     }
-    case ImeInput::Kind::kMark:
-      {
-        std::lock_guard lock(ime_mu_);
-        ime_state_.seq = in.seq;
-      }
-      bridge->Mark(in.seq, in.text, in.sel_location, in.sel_length);
+    case ImeInput::Kind::kMark: {
+      // Under the lock with the send: the input method may say the system
+      // ended this very composition before Mark() returns.
+      std::lock_guard lock(ime_mu_);
+      ime_.OnMark(bridge->Mark(in.seq, in.text, in.sel_location, in.sel_length));
       break;
+    }
     case ImeInput::Kind::kCommit: {
       {
         std::lock_guard lock(ime_mu_);
-        ime_state_.seq = in.seq;
-        ime_state_.marked.reset();
+        ime_.OnCompositionDone();
       }
       // The keys after it wait here (this is the thread that injects them),
-      // so they cannot overtake the text; not longer than 100 ms.
-      if (bridge->Commit(in.seq, in.text, 100)) break;
-      // No text field that takes input methods (or no answer): typed as text.
-      for (uint32_t cp : CodePoints(in.text)) {
-        rda_input_event ev;
-        rda_input_event_default(&ev);
-        ev.kind = RDA_INPUT_TEXT;
-        ev.code = cp;
-        Inject(ev);
-      }
+      // so they cannot overtake the text; not longer than 100 ms. Typed only
+      // when nothing else will put it in: typed and put in by the input
+      // method was the text twice.
+      if (bridge->Commit(in.seq, in.text, 100) == ImeBridge::CommitResult::kNotTaken) TypeText(in.text);
       break;
     }
-    case ImeInput::Kind::kCancel:
-      {
-        std::lock_guard lock(ime_mu_);
-        ime_state_.seq = in.seq;
-        ime_state_.marked.reset();
-      }
+    case ImeInput::Kind::kCancel: {
+      std::lock_guard lock(ime_mu_);
       bridge->Cancel(in.seq);
+      ime_.OnCompositionDone();
       break;
+    }
+  }
+}
+
+void MediaHost::TypeText(const std::string& text) {
+  // RDMachine Input passes keys through, so the characters go into it as they
+  // are (rda_injector_set_text_passthrough_source); another input method that
+  // has taken its place is stepped away from as for any typed text.
+  for (uint32_t cp : CodePoints(text)) {
+    rda_input_event ev;
+    rda_input_event_default(&ev);
+    ev.kind = RDA_INPUT_TEXT;
+    ev.code = cp;
+    Inject(ev);
   }
 }
 
 void MediaHost::KeepImeSource() {
   if (!ime_mode_on_ || !injector_ || SecureInputActive()) return;
-  // Under ime_mu_: EndImeMode clears the mode under it before it puts the
-  // source from before back, so this cannot select RDMachine Input after that.
-  std::lock_guard lock(ime_mu_);
-  if (!ime_mode_) return;
+  // EndImeMode clears the mode under ime_source_mu_ before it puts the source
+  // from before back, so this cannot select RDMachine Input after that. Not
+  // under ime_mu_: the calls below wait for the main thread, which takes
+  // ime_mu_ to show the menu.
+  std::lock_guard src(ime_source_mu_);
+  {
+    std::lock_guard lock(ime_mu_);
+    if (!ime_mode_) return;
+  }
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
   if (rda_current_input_source(&cur) != RDA_OK || cur.id == std::string(kImeInputSourceId)) return;
@@ -529,6 +547,7 @@ void MediaHost::KeepImeSource() {
 }
 
 void MediaHost::EndImeMode(const char* why) {
+  std::lock_guard src(ime_source_mu_);
   std::string prev;
   {
     std::lock_guard lock(ime_mu_);
@@ -538,7 +557,6 @@ void MediaHost::EndImeMode(const char* why) {
     prev = std::move(ime_prev_source_);
     ime_prev_source_.clear();
   }
-  if (injector_) rda_injector_set_text_leaves_input_method(injector_, 1);
   rda_input_source_info cur{};
   cur.struct_size = sizeof(cur);
   if (injector_ && !prev.empty() && rda_current_input_source(&cur) == RDA_OK && cur.id == std::string(kImeInputSourceId)) {
@@ -548,7 +566,6 @@ void MediaHost::EndImeMode(const char* why) {
   }
   Log(std::string("the client's input method: off (") + why + ")" + (prev.empty() ? "" : ", back to " + prev));
 }
-
 
 void MediaHost::OnImeReport(const ImeBridge::Report& r) {
   std::optional<ImeRect> caret;
@@ -581,23 +598,24 @@ void MediaHost::OnImeReport(const ImeBridge::Report& r) {
     if (r.rect) snprintf(g, sizeof g, "%.1f,%.1f %.1fx%.1f", r.rect->x, r.rect->y, r.rect->width, r.rect->height);
     char p[96] = "-";
     if (caret) snprintf(p, sizeof p, "d%d %d,%d %dx%d", caret->display, caret->x, caret->y, caret->width, caret->height);
-    Log("ime debug " + Millis() + " report seq=" + std::to_string(r.seq) + " marked=" + RangeText(r.marked) +
-        " sel=" + RangeText(r.selected) + " global=" + g + " pixels=" + p +
+    Log("ime debug " + Millis() + " report seq=" + std::to_string(r.seq) +
+        " answers=" + (r.answers ? std::to_string(*r.answers) : "-") + " ctl=" + std::to_string(r.ctl) +
+        " marked=" + RangeText(r.marked) + " sel=" + RangeText(r.selected) + " global=" + g + " pixels=" + p +
         (r.active ? (*r.active ? " active " : " inactive ") + r.app : std::string()));
   }
-  // A late report of a field that lost the focus (each app and field has its
-  // own controller over there, and its timers outlive the focus): not where
-  // the caret is now.
-  if (r.active && !*r.active) return;
+  ImeStateTracker::Report t;
+  t.active = r.active;
+  t.ctl = r.ctl;
+  t.app = r.app;
+  t.answers = r.answers;
+  t.caret = caret;
+  t.marked = r.marked;
+  t.selected = r.selected;
   {
     std::lock_guard lock(ime_mu_);
-    if (r.active && *r.active) {
-      ime_state_.client = true;
-      ime_state_.app = r.app;
-    }
-    ime_state_.marked = r.marked;
-    ime_state_.selected = r.selected;
-    if (caret) ime_state_.caret = caret;  // not found: the client keeps the one it has
+    // A late report of a field that lost the focus (each field has its own
+    // controller over there, and its timers outlive the focus) does not count.
+    if (!ime_.OnReport(t, ime_last_input_)) return;
   }
   SendImeState(false);
 }
@@ -610,7 +628,7 @@ void MediaHost::SendImeState(bool force) {
   bool available = false;
   {
     std::lock_guard lock(ime_mu_);
-    ImeState s = ime_state_;
+    ImeState s = ime_.state();
     s.available = ime_available_;
     s.secure = SecureInputActive();
     s.client = s.client && options_.ime->connected();
@@ -803,6 +821,11 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
       Log(std::string("input injection unavailable (") + rda_status_str(s) + "): " + rda_last_error() +
           "; this session is view-only");
       injector = nullptr;
+    } else {
+      // Typed text goes into RDMachine Input as it is (it passes every key
+      // through); stepping away from it would leave an ASCII layout in its
+      // place, which nothing brings back while only text comes (rdaccel 3.4).
+      rda_injector_set_text_passthrough_source(injector, kImeInputSourceId);
     }
   }
 
@@ -891,7 +914,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     client_input_source_.clear();
     input_source_.clear();
   }
-  injector_ = injector;
+  {
+    std::lock_guard in(inject_mu_);  // TypeText may run on the input method's thread
+    injector_ = injector;
+  }
   rda_host* host = nullptr;
   rda_status hs = rda_host_create(transport, &cfg, &host);  // takes the transport
   if (hs == RDA_OK) {
@@ -905,7 +931,10 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     Log(std::string("rdaccel host failed: ") + rda_last_error());
   }
   if (!host) {
-    injector_ = nullptr;
+    {
+      std::lock_guard in(inject_mu_);
+      injector_ = nullptr;
+    }
     if (injector) rda_injector_destroy(injector);
     clipboard_.reset();
     extras_.clear();
@@ -946,7 +975,6 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
   }
   {
     std::lock_guard im(ime_mu_);
-    ime_state_ = ImeState{};
     ime_last_sent_ = ImeState{};
     ime_sent_ = false;
     ime_mode_ = false;
@@ -954,11 +982,15 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     ime_prev_source_.clear();
     ime_displays_ = {display_index};
     // A text field that got the focus before this session: RDMachine Input
-    // says so only when that changes.
-    if (options_.ime && options_.ime->client_active()) {
-      ime_state_.client = true;
-      ime_state_.app = options_.ime->client_app();
+    // says so only when that changes. The client numbers its messages from 1
+    // again.
+    if (options_.ime) {
+      ime_.Reset(options_.ime->client_active(), options_.ime->client_app(), options_.ime->client_ctl());
+      options_.ime->NewSession();
+    } else {
+      ime_.Reset(false, "", 0);
     }
+    ime_last_input_ = 0;
     ime_debug_ = options_.ime && ImeDebugLogWanted();
     if (ime_debug_) Log("ime debug: on (ImeDebugLog)");
     // Not at the login window (no third-party input method there), not view only.
@@ -1447,8 +1479,11 @@ void MediaHost::EndSession() {
     // Destroy the host under the lock so StartSession cannot bind the port
     // before it is free again.
     rda_host_destroy(host);
-    injector = injector_;
-    injector_ = nullptr;
+    {
+      std::lock_guard in(inject_mu_);  // TypeText may run on the input method's thread
+      injector = injector_;
+      injector_ = nullptr;
+    }
     clipboard_.reset();  // no on_message after rda_host_destroy
     desktop = std::move(desktop_);
     awake_.reset();

@@ -5,16 +5,20 @@
 // setMarkedText / insertText, and reports back where the composition is, so
 // the client can put its candidate window there. Keys always pass through.
 //
-// The agent's messages (4-byte length + JSON, as AgentChannel):
-//   {"type":"mark","seq":1,"text":"ni'hao","sel":[6,0]}
-//   {"type":"commit","seq":2,"text":"你好"}   -> {"type":"ack","seq":2,"ok":true}
-//   {"type":"cancel","seq":3}
+// The agent's messages (4-byte length + JSON, as AgentChannel); "seq" is the
+// client's number, "id" the agent's own (rising while the agent runs):
+//   {"type":"mark","seq":1,"id":7,"text":"ni'hao","sel":[6,0]}
+//   {"type":"commit","seq":2,"id":8,"text":"你好"} -> {"type":"ack","seq":2,"id":8,"ok":true}
+//   {"type":"cancel","seq":3,"id":9}
 //   {"type":"report","delay":60}   -> a state after that many ms (a click or
 //                                     a key may have moved the caret)
-// Ours: {"type":"hello","version":1}, {"type":"client","active":true,"app":"..."},
-//   {"type":"state","seq":1,"active":true,"app":"...","marked":[0,6],"sel":[6,0],"rect":[x,y,w,h]} (points,
-//   top left of the primary display), {"type":"ended","seq":1} (the system
-//   ended the composition: a click elsewhere, another app).
+// Ours: {"type":"hello","version":2}, {"type":"client","active":true,"app":"...","ctl":3},
+//   {"type":"state","seq":1,"after":7,"ctl":3,"active":true,"app":"...","marked":[0,6],"sel":[6,0],
+//   "rect":[x,y,w,h]} (points, top left of the primary display; "after": the
+//   last id put in when the report was made, by any controller),
+//   {"type":"ended","seq":1,"id":7} (the system ended the composition of mark
+//   7: a click elsewhere, another app). "ctl" tells controllers apart: one per
+//   text field, and macOS activates and deactivates them in no fixed order.
 // Nothing typed is ever logged.
 #import <Cocoa/Cocoa.h>
 #import <InputMethodKit/InputMethodKit.h>
@@ -65,39 +69,82 @@ nlohmann::json FromRange(NSRange r) {
 
 @interface RemoteController : IMKInputController
 - (void)agentMessage:(const nlohmann::json&)m;
+- (uint64_t)ctl;
 @end
 
 // The controller of the text field that has the focus (one per field).
 static __weak RemoteController* gCurrent;
+// The same, not zeroed when it goes away (a weak reference is zeroed before
+// dealloc runs): who has to say that no field has the focus now.
+static const void* gCurrentId;
+// The last agent id put in (by whichever controller, or dropped for want of
+// one): what a report made now reflects. Main thread; 0 when a new agent
+// connects (its ids start again).
+static uint64_t gAppliedId;
+static uint64_t gNextCtl = 1;
 
 @implementation RemoteController {
   NSUInteger _markedLength;  // UTF-16 length of what we marked, 0 = no composition
   NSString* _markedText;     // what we marked
-  uint64_t _seq;             // the last agent message applied here
+  uint64_t _markId;          // the agent's id of that mark
+  uint64_t _seq;             // the last agent message applied here (the client's number)
+  uint64_t _ctl;             // this controller, for the agent
   uint64_t _reportGen;       // later reports supersede earlier ones
   uint64_t _requestGen;      // the same for the agent's report requests
 }
 
 - (instancetype)initWithServer:(IMKServer*)server delegate:(id)delegate client:(id)client {
   self = [super initWithServer:server delegate:delegate client:client];
-  os_log(Log(), "new controller %p app=%{public}s", self, [[client bundleIdentifier] ?: @"" UTF8String]);
+  if (self) _ctl = gNextCtl++;
+  os_log(Log(), "new controller %llu app=%{public}s", _ctl, [[client bundleIdentifier] ?: @"" UTF8String]);
   return self;
 }
 
 - (void)dealloc {
-  os_log(Log(), "controller gone %p", self);
+  os_log(Log(), "controller gone %llu", _ctl);
+  if (gCurrentId == (__bridge const void*)self) {
+    // Gone while it had the focus: no deactivate came, but no field is there.
+    gCurrentId = nullptr;
+    SendToAgent({{"type", "client"}, {"active", false}, {"app", ""}, {"ctl", _ctl}});
+  }
+}
+
+- (uint64_t)ctl {
+  return _ctl;
+}
+
+// This controller's field has the focus now.
+- (void)becomeCurrent:(id)sender {
+  gCurrent = self;
+  gCurrentId = (__bridge const void*)self;
+  // A composition it remembers that the field no longer has (it was ended
+  // or replaced while another controller had the focus) is over.
+  if (_markedLength > 0) {
+    NSRange mk = NSMakeRange(NSNotFound, 0);
+    @try {
+      mk = [sender markedRange];
+    } @catch (NSException*) {
+    }
+    if (mk.location == NSNotFound || mk.length == 0) {
+      _markedLength = 0;
+      _markedText = nil;
+      _markId = 0;
+    }
+  }
+  SendToAgent({{"type", "client"}, {"active", true}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]},
+               {"ctl", _ctl}});
+  // Where the caret is before anything is typed: the client's candidate
+  // window then starts in the right place on the first character.
+  [self reportAfter:30];
 }
 
 - (void)activateServer:(id)sender {
   // Which controller, for which app, and which one was current: the order
   // macOS calls these in is what decides "a field has the focus" (no text).
-  os_log(Log(), "activate %p app=%{public}s current=%p", self, [[sender bundleIdentifier] ?: @"" UTF8String],
-         gCurrent);
-  gCurrent = self;
-  SendToAgent({{"type", "client"}, {"active", true}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]}});
-  // Where the caret is before anything is typed: the client's candidate
-  // window then starts in the right place on the first character.
-  [self reportAfter:30];
+  RemoteController* cur = gCurrent;
+  os_log(Log(), "activate %llu app=%{public}s current=%llu", _ctl, [[sender bundleIdentifier] ?: @"" UTF8String],
+         cur ? [cur ctl] : 0);
+  [self becomeCurrent:sender];
 }
 
 // A report `ms` from now; a later request replaces one still waiting.
@@ -117,11 +164,14 @@ static __weak RemoteController* gCurrent;
 }
 
 - (void)deactivateServer:(id)sender {
-  os_log(Log(), "deactivate %p app=%{public}s current=%p", self, [[sender bundleIdentifier] ?: @"" UTF8String],
-         gCurrent);
-  if (gCurrent == self) {
+  RemoteController* cur = gCurrent;
+  os_log(Log(), "deactivate %llu app=%{public}s current=%llu", _ctl, [[sender bundleIdentifier] ?: @"" UTF8String],
+         cur ? [cur ctl] : 0);
+  if (cur == self) {
     gCurrent = nil;
-    SendToAgent({{"type", "client"}, {"active", false}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]}});
+    gCurrentId = nullptr;
+    SendToAgent(
+        {{"type", "client"}, {"active", false}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]}, {"ctl", _ctl}});
   }
 }
 
@@ -131,28 +181,49 @@ static __weak RemoteController* gCurrent;
 
 // Keys are the client's own business: what its input method did not take
 // arrives here as a plain key and goes on to the app.
+//
+// Only the controller of the field the keys go to gets them. macOS sometimes
+// ends a burst of activations with a deactivate of the field that still has
+// the focus (Claude, after a reconnect or an app switch: docs/ime.md), and no
+// activate follows until the focus moves; a key coming here says this
+// controller has the focus after all (a typed commit, an arrow, Return).
 - (BOOL)handleEvent:(NSEvent*)event client:(id)sender {
+  if (gCurrent != self) {
+    os_log(Log(), "a key came to %llu while it was not current: it has the focus", _ctl);
+    [self becomeCurrent:sender];
+  }
   return NO;
 }
 
 // The system ends the composition (focus moves, the app changes): it goes in
 // as it stands, and the client hears that it is over.
 - (void)commitComposition:(id)sender {
-  os_log(Log(), "commitComposition %p marked=%lu", self, static_cast<unsigned long>(_markedLength));
+  os_log(Log(), "commitComposition %llu marked=%lu", _ctl, static_cast<unsigned long>(_markedLength));
   if (_markedLength == 0) return;
-  // What we marked ourselves, not what the app says its marked range holds:
-  // Chromium's marked range can be made up (docs/ime.md), and the text there
-  // was then typed a second time (6.3.10).
-  if (_markedText.length) [sender insertText:_markedText replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+  // Only while the field still holds a composition: Chromium may already have
+  // kept it as plain text (losing the focus), and putting it in again would
+  // have it twice. Then what we marked ourselves, not what the app says its
+  // marked range holds: Chromium's marked range can be made up (docs/ime.md).
+  NSRange mk = NSMakeRange(NSNotFound, 0);
+  @try {
+    mk = [sender markedRange];
+  } @catch (NSException*) {
+  }
+  if (mk.location != NSNotFound && mk.length > 0 && _markedText.length) {
+    [sender insertText:_markedText replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+  }
+  const uint64_t mark = _markId;
   _markedLength = 0;
   _markedText = nil;
-  SendToAgent({{"type", "ended"}, {"seq", _seq}});
+  _markId = 0;
+  SendToAgent({{"type", "ended"}, {"seq", _seq}, {"id", mark}});
 }
 
 - (void)agentMessage:(const nlohmann::json&)m {
   id client = self.client;
   const std::string type = m.value("type", "");
   if (m.contains("seq")) _seq = m.value("seq", uint64_t{0});
+  const uint64_t id = m.value("id", uint64_t{0});
   const NSRange none = NSMakeRange(NSNotFound, NSNotFound);
   if (type == "mark") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
@@ -164,13 +235,15 @@ static __weak RemoteController* gCurrent;
          replacementRange:none];
     _markedLength = text.length;
     _markedText = text;
+    _markId = id;
     [self reportSoon];
   } else if (type == "commit") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
     [client insertText:text replacementRange:none];
     _markedLength = 0;
     _markedText = nil;
-    SendToAgent({{"type", "ack"}, {"seq", _seq}, {"ok", true}});
+    _markId = 0;
+    SendToAgent({{"type", "ack"}, {"seq", _seq}, {"id", id}, {"ok", true}});
     [self reportSoon];  // where the next composition will start
   } else if (type == "report") {
     [self reportAfter:std::clamp(m.value("delay", 0), 0, 1000)];
@@ -178,6 +251,7 @@ static __weak RemoteController* gCurrent;
     [client setMarkedText:@"" selectionRange:NSMakeRange(0, 0) replacementRange:none];
     _markedLength = 0;
     _markedText = nil;
+    _markId = 0;
   }
 }
 
@@ -210,7 +284,7 @@ static __weak RemoteController* gCurrent;
 // before the caret, the caret itself.
 - (nlohmann::json)report {
   id client = self.client;
-  nlohmann::json r{{"type", "state"}, {"seq", _seq}};
+  nlohmann::json r{{"type", "state"}, {"seq", _seq}, {"after", gAppliedId}, {"ctl", _ctl}};
   // Whether this is the field that has the focus, each time: the agent's
   // sessions come and go, and the "client" message is sent only on a change.
   r["active"] = gCurrent == self;
@@ -282,12 +356,14 @@ void AgentLoop() {
       std::lock_guard lock(gChannelMu);
       gChannel = ch;
     }
-    ch->Send({{"type", "hello"}, {"version", 1}});
+    ch->Send({{"type", "hello"}, {"version", 2}});
     dispatch_async(dispatch_get_main_queue(), ^{
+      gAppliedId = 0;  // this agent's ids start again
       if (RemoteController* c = gCurrent) {
         SendToAgent({{"type", "client"},
                      {"active", true},
-                     {"app", [[c.client bundleIdentifier] ?: @"" UTF8String]}});
+                     {"app", [[c.client bundleIdentifier] ?: @"" UTF8String]},
+                     {"ctl", [c ctl]}});
       }
     });
     os_log(Log(), "connected to the agent");
@@ -296,11 +372,16 @@ void AgentLoop() {
       if (in.status != rdm::AgentChannel::Received::kMessage) break;
       auto m = std::make_shared<nlohmann::json>(std::move(in.message));
       dispatch_async(dispatch_get_main_queue(), ^{
+        // Before it is applied: a report made while applying it reflects it.
+        if (auto it = m->find("id"); it != m->end() && it->is_number_unsigned()) gAppliedId = it->get<uint64_t>();
         if (RemoteController* c = gCurrent) {
           [c agentMessage:*m];
         } else if (m->value("type", "") == "commit") {
           // No text field takes input methods now: the agent types it otherwise.
-          SendToAgent({{"type", "ack"}, {"seq", m->value("seq", uint64_t{0})}, {"ok", false}});
+          SendToAgent({{"type", "ack"},
+                       {"seq", m->value("seq", uint64_t{0})},
+                       {"id", m->value("id", uint64_t{0})},
+                       {"ok", false}});
         }
       });
     }

@@ -20,6 +20,7 @@
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
 #include "rdmachine/session/ime_bridge.h"
+#include "rdmachine/session/ime_state_tracker.h"
 #include "rdmachine/session/login_screen.h"
 #include "rdmachine/session/virtual_desktop.h"
 
@@ -172,6 +173,9 @@ class MediaHost : public ServerDelegate {
   // Tells the client what changed (all of it when `force`), on the message
   // channel of the main picture.
   void SendImeState(bool force);
+  // Types text as characters (no text field takes input methods, or the
+  // input method refused it).
+  void TypeText(const std::string& text);
   // Leaves the input method mode: the input source from before comes back.
   void EndImeMode(const char* why);
   // While in that mode: RDMachine Input again when the system put another
@@ -228,15 +232,22 @@ class MediaHost : public ServerDelegate {
   // The client's input method. Its own lock: the transport thread and the
   // bridge's thread both use it, and neither may wait for mu_.
   std::mutex ime_mu_;
-  ImeState ime_state_;           // what is known now
+  ImeStateTracker ime_;          // what is known now
+  uint64_t ime_last_input_ = 0;  // the client's last ImeInput (for an input method that does not say)
   ImeState ime_last_sent_;       // what the client was last told
   bool ime_sent_ = false;        // something went out this session
   bool ime_available_ = false;   // this session can take the client's input method
   bool ime_mode_ = false;        // the client types with its input method now
   std::atomic<bool> ime_mode_on_{false};
-  std::atomic<bool> ime_debug_{false};  // ImeDebugLog: positions and composition messages to the log  // the same, for the input path without the lock
+  std::atomic<bool> ime_debug_{false};  // ImeDebugLog: positions and composition messages to the log
   std::string ime_prev_source_;  // the input source before ime_mode_
-  bool ime_keep_failed_ = false;  // under ime_mu_: KeepImeSource said it could not
+  // Held while the input source is changed for the mode (selecting RDMachine
+  // Input, putting the one from before back, selecting it again): those
+  // calls wait for the main thread, which takes ime_mu_ for the menu, so
+  // they must not run under ime_mu_. Never taken on the main thread while a
+  // session runs. Taken before ime_mu_.
+  std::mutex ime_source_mu_;
+  bool ime_keep_failed_ = false;  // under ime_source_mu_: KeepImeSource said it could not
   std::vector<int32_t> ime_displays_;  // rdaccel's display index of each session display (0 = main)
   std::atomic<bool> media_connected_{false};
   std::unique_ptr<VirtualDesktop> desktop_;  // guarded by mu_; outlives host_

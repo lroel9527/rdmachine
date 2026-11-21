@@ -82,6 +82,7 @@ std::optional<ImeInput> DecodeImeInput(const std::string& payload) {
 std::string EncodeImeState(const ImeState& s) {
   json j{{"available", s.available}, {"client", s.client}, {"secure", s.secure}, {"seq", s.seq}};
   if (!s.app.empty()) j["app"] = s.app;
+  if (s.field) j["field"] = s.field;
   if (s.caret) {
     j["caret"] = {{"display", s.caret->display}, {"x", s.caret->x}, {"y", s.caret->y},
                   {"w", s.caret->width},       {"h", s.caret->height}};
@@ -105,6 +106,10 @@ std::optional<ImeState> DecodeImeState(const std::string& payload) {
   flag("ended", &s.ended);
   if (auto it = j.find("app"); it != j.end() && it->is_string()) s.app = it->get<std::string>();
   if (auto it = j.find("seq"); it != j.end() && it->is_number_unsigned()) s.seq = it->get<uint64_t>();
+  if (auto it = j.find("field"); it != j.end() && it->is_number_unsigned() &&
+                                 it->get<uint64_t>() <= UINT32_MAX) {
+    s.field = static_cast<uint32_t>(it->get<uint64_t>());
+  }
   if (auto it = j.find("caret"); it != j.end() && it->is_object()) {
     ImeRect r;
     bool ok = true;

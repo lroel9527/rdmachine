@@ -42,6 +42,7 @@ TEST(ImeWire, StateRoundTrips) {
   s.client = true;
   s.app = "com.apple.TextEdit";
   s.seq = 12;
+  s.field = 3;
   s.caret = rdm::ImeRect{1, 1312, 384, 2, 48};
   s.marked = rdm::ImeRange{0, 6};
   s.selected = rdm::ImeRange{6, 0};

@@ -240,6 +240,12 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   NSRect _imeLastCaret;         // screen coordinates; empty = none yet
   NSPoint _imeLastClick;        // screen point of the last click in the picture; valid if _imeClicked
   BOOL _imeClicked;
+  uint32_t _imeField;           // the server's field number _imeLastCaret belongs to (0 = not said)
+  std::string _imeLastApp;      // ... or, from a server that does not say, the last app named
+  // This Mac's input method may answer "drop the composition" by putting it
+  // in: that commit is not sent (it was sent already, or dropped on purpose),
+  // until the next key goes to the input method.
+  BOOL _imeDropInsert;
   // Where the caret will be once the text just committed is in, until the
   // server says (a round trip: the next composition starts before that).
   // Stream pixels; the committed text's width is guessed from its width in
@@ -878,6 +884,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeTaken.clear();
   _imeLastCaret = NSZeroRect;
   _imeClicked = NO;
+  _imeField = 0;
+  _imeLastApp.clear();
+  _imeDropInsert = NO;
   _imeAhead.reset();
   _imePixelsPerUnit = 0;
   [self imeShowOverlay];
@@ -941,6 +950,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   RemoteView* view = window->_view;
   if (_imeView && _imeView != view && _imeMarked) [self imeUnmark];
   _imeView = view;
+  _imeDropInsert = NO;  // what the input method puts in from here on is this key's
   _imeEvent = e;
   _imeEventRaw = NO;
   const BOOL handled = [view.inputContext handleEvent:e];
@@ -953,6 +963,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 - (void)imeMark:(NSString*)text selected:(NSRange)sel {
   RemoteWindowController* root = [self imeRoot];
   if (root != self) return [root imeMark:text selected:sel];
+  if (text.length > 0) _imeDropInsert = NO;  // a new composition: the input method moved on
   if (text.length == 0) {
     if (_imeMarked) [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
     _imeMarked = nil;
@@ -974,6 +985,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 - (void)imeInsert:(NSString*)text {
   RemoteWindowController* root = [self imeRoot];
   if (root != self) return [root imeInsert:text];
+  if (_imeDropInsert) return;  // its answer to discardMarkedText (see _imeDropInsert)
   _imeMarked = nil;
   if (text.length) {
     [self imeSend:{rdm::ImeInput::Kind::kCommit, ++_imeSeq, text.UTF8String ?: ""}];
@@ -1016,8 +1028,13 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (root != self) return [root imeUnmark];
   if (!_imeMarked) return;
   NSString* text = _imeMarked;
+  // Dropped over here, put in by us: once, whether or not the input method
+  // also answers the discard by putting it in.
+  _imeDropInsert = YES;
   [_imeView.inputContext discardMarkedText];
+  _imeDropInsert = NO;
   [self imeInsert:text];
+  _imeDropInsert = YES;  // its answer may also come a little later
 }
 
 // A click: the composition is dropped on both sides first (the click may
@@ -1029,6 +1046,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeLastClick = NSEvent.mouseLocation;
   _imeClicked = YES;
   if (!_imeMarked) return;
+  _imeDropInsert = YES;  // dropped on both sides: nothing of it goes in
   [_imeView.inputContext discardMarkedText];
   _imeMarked = nil;
   [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
@@ -1092,17 +1110,14 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
       return;
     }
     std::optional<rdm::ImeRect> before = me->_imeState ? me->_imeState->caret : std::nullopt;
-    const std::optional<std::string> before_app =
-        me->_imeState ? std::optional<std::string>(me->_imeState->app) : std::nullopt;
-    bool answered_ahead = false;
     if (me->_imeAhead) {
-      // The server's answer to the commits: after them, or the caret moved
-      // from where it was before them. Their real width teaches the guess.
-      const bool answered = copy.seq > me->_imeAheadSeq ||
-                            (copy.seq == me->_imeAheadSeq && copy.caret && copy.caret != before);
+      // The server's answer to the commits: a caret that already reflects
+      // them (seq is what the server's input method had put in when it found
+      // that caret, 6.4.0). Their real width teaches the guess.
+      const bool answered = copy.caret && copy.seq >= me->_imeAheadSeq;
       if (answered || !copy.client) {
-        if (answered && copy.caret && copy.caret->display == me->_imeAhead->display &&
-            copy.caret->y == me->_imeAhead->y && me->_imeAheadUnits > 0) {
+        if (answered && copy.caret->display == me->_imeAhead->display && copy.caret->y == me->_imeAhead->y &&
+            me->_imeAheadUnits > 0) {
           const double dx = copy.caret->x - me->_imeAheadFromX;
           const double guess = copy.caret->height * 0.8 / 100.0;
           if (dx > 0 && dx / me->_imeAheadUnits > guess / 3 && dx / me->_imeAheadUnits < guess * 3) {
@@ -1111,22 +1126,32 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
         }
         before = me->_imeAhead;  // what the input method was given
         me->_imeAhead.reset();
-        answered_ahead = answered;
       }
     }
-    // Another app has the field: where the last one's caret was means nothing.
-    if (!before_app || *before_app != copy.app) me->_imeLastCaret = NSZeroRect;
+    // Another text field over there: where the last one's caret was means
+    // nothing for it. The same field let go and taken again (macOS does that
+    // within a millisecond) keeps it; a server before 6.4.0 does not number
+    // fields, then only another app named counts.
+    if (copy.field != 0) {
+      if (copy.field != me->_imeField) me->_imeLastCaret = NSZeroRect;
+      me->_imeField = copy.field;
+    } else if (!copy.app.empty()) {
+      if (copy.app != me->_imeLastApp) me->_imeLastCaret = NSZeroRect;
+      me->_imeLastApp = copy.app;
+    }
     me->_imeState = copy;
     if (copy.ended && me->_imeMarked) {
-      // Ended over there (a click, another app): this Mac's input method lets go too.
+      // Ended over there (a click, another app): this Mac's input method lets
+      // go too, and what it may put in for that is not sent.
+      me->_imeDropInsert = YES;
       [me->_imeView.inputContext discardMarkedText];
       me->_imeMarked = nil;
     }
     [me imeUpdateMode];
-    // A new position for the composition under way: the candidate window moves.
-    // The answer to the commit just before this composition counts too: it
-    // is where this composition starts, and it carries the commit's number.
-    if (me->_imeMarked && copy.caret != before && (copy.seq >= me->_imeComposingSeq || answered_ahead)) {
+    // A new position for the composition under way: the candidate window
+    // moves. A caret that reflects everything before the composition's first
+    // mark (the commit just before it, say) is where it starts.
+    if (me->_imeMarked && copy.caret != before && copy.seq + 1 >= me->_imeComposingSeq) {
       [me->_imeView.inputContext invalidateCharacterCoordinates];
     }
     [me imeShowOverlay];

@@ -61,7 +61,14 @@ struct ImeState {
   bool client = false;     // a text field that takes input methods has the focus there
   bool secure = false;     // secure input (a password field): the client sends plain keys
   std::string app;         // bundle id of that field's app
-  uint64_t seq = 0;        // the last ImeInput this state follows
+  // The last ImeInput the caret below already reflects: all of them before
+  // the first one the server's input method had not put in when it found
+  // that caret (6.4.0; before, merely the last message received).
+  uint64_t seq = 0;
+  // Changes when another text field takes the focus over there (not when the
+  // same one is let go and taken again): what was known about the last
+  // field's caret is no use for this one. 0 = not said (before 6.4.0).
+  uint32_t field = 0;
   // Where the composition starts (the caret when there is none); absent when
   // not known.
   std::optional<ImeRect> caret;
