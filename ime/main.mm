@@ -70,6 +70,7 @@ nlohmann::json FromRange(NSRange r) {
 @interface RemoteController : IMKInputController
 - (void)agentMessage:(const nlohmann::json&)m;
 - (uint64_t)ctl;
+- (BOOL)takesText;
 @end
 
 // The controller of the text field that has the focus (one per field).
@@ -87,11 +88,14 @@ static uint64_t gNextCtl = 1;
   NSUInteger _markedLength;  // UTF-16 length of what we marked, 0 = no composition
   NSString* _markedText;     // what we marked
   uint64_t _markId;          // the agent's id of that mark
-  // Its field does not hold the compositions put into it (Claude's other
-  // view, say): the agent hears that no field takes input methods, so the
-  // client shows the composition itself and the text goes in as typed.
-  BOOL _refusing;
+  // Its field has shown that it takes text since it got the focus: it says
+  // where its selection is, or holds the composition put into it. Until then
+  // (Claude's other view never does), the agent hears that no field takes
+  // input methods, and the client sends keys as keys, as a keyboard would
+  // where nothing takes text: no input method composes there (6.5.3).
+  BOOL _takesText;
   uint64_t _markGen;         // later marks supersede the check of an earlier one
+  uint64_t _checkGen;        // the same for the checks while it has not shown it
   uint64_t _seq;             // the last agent message applied here (the client's number)
   uint64_t _ctl;             // this controller, for the agent
   uint64_t _reportGen;       // later reports supersede earlier ones
@@ -118,6 +122,10 @@ static uint64_t gNextCtl = 1;
   return _ctl;
 }
 
+- (BOOL)takesText {
+  return _takesText;
+}
+
 // Whether the field holds a composition now (what we marked, or one it made
 // up: Chromium's marked range can be).
 - (BOOL)holdsComposition:(id)client {
@@ -129,21 +137,50 @@ static uint64_t gNextCtl = 1;
   return mk.location != NSNotFound && mk.length > 0;
 }
 
-// The field turned out not to hold compositions, or to hold them after all.
-- (void)setRefusing:(BOOL)refusing client:(id)client {
-  if (refusing == _refusing) return;
-  _refusing = refusing;
-  os_log(Log(), "%llu %{public}s", _ctl,
-         refusing ? "does not hold the composition: no field that takes input methods" : "holds compositions again");
-  SendToAgent({{"type", "client"}, {"active", !refusing}, {"app", [[client bundleIdentifier] ?: @"" UTF8String]},
+// Whether the field says where its selection is: a text field does, a view
+// with nothing to type into does not.
+- (BOOL)answersSelection:(id)client {
+  NSRange sel = NSMakeRange(NSNotFound, 0);
+  @try {
+    sel = [client selectedRange];
+  } @catch (NSException*) {
+  }
+  return sel.location != NSNotFound;
+}
+
+// The field showed that it takes text, or turned out not to: the agent hears
+// whether a field that takes input methods has the focus.
+- (void)setTakesText:(BOOL)takes client:(id)client {
+  if (takes == _takesText) return;
+  _takesText = takes;
+  os_log(Log(), "%llu %{public}s", _ctl, takes ? "takes text" : "takes no text: keys go as keys");
+  SendToAgent({{"type", "client"}, {"active", takes}, {"app", [[client bundleIdentifier] ?: @"" UTF8String]},
                {"ctl", _ctl}});
+  if (!takes) [self checkTakesTextAfter:500 gen:++_checkGen];
+}
+
+// While it has the focus and has not shown that it takes text: asked again
+// (web content answers from a cache its renderer fills in a little later,
+// and the focus may move to something to type into within the same view).
+- (void)checkTakesTextAfter:(int)ms gen:(uint64_t)gen {
+  __weak RemoteController* weakSelf = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    RemoteController* me = weakSelf;
+    if (!me || me->_checkGen != gen || gCurrent != me || me->_takesText) return;
+    id client = me.client;
+    if ([me answersSelection:client] || [me holdsComposition:client]) {
+      [me setTakesText:YES client:client];
+      [me reportSoon];  // where its caret is
+      return;
+    }
+    [me checkTakesTextAfter:(ms < 250 ? 250 : 500) gen:gen];
+  });
 }
 
 // This controller's field has the focus now.
 - (void)becomeCurrent:(id)sender {
   gCurrent = self;
   gCurrentId = (__bridge const void*)self;
-  _refusing = NO;  // a field that just took the focus is given the benefit of the doubt
   // A composition it remembers that the field no longer has (it was ended
   // or replaced while another controller had the focus) is over.
   if (_markedLength > 0) {
@@ -158,8 +195,13 @@ static uint64_t gNextCtl = 1;
       _markId = 0;
     }
   }
-  SendToAgent({{"type", "client"}, {"active", true}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]},
+  _takesText = [self answersSelection:sender] || [self holdsComposition:sender];
+  SendToAgent({{"type", "client"}, {"active", _takesText}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]},
                {"ctl", _ctl}});
+  if (!_takesText) {
+    [self checkTakesTextAfter:30 gen:++_checkGen];
+    return;
+  }
   // Where the caret is before anything is typed: the client's candidate
   // window then starts in the right place on the first character.
   [self reportAfter:30];
@@ -263,7 +305,7 @@ static uint64_t gNextCtl = 1;
     _markedLength = text.length;
     _markedText = text;
     _markId = agent_id;
-    if (_refusing && [self holdsComposition:client]) [self setRefusing:NO client:client];
+    if (!_takesText && [self holdsComposition:client]) [self setTakesText:YES client:client];
     [self reportSoon];
     // Still nothing marked a little later (web content answers from a cache
     // its renderer fills in shortly after): this field does not take it.
@@ -273,7 +315,7 @@ static uint64_t gNextCtl = 1;
       RemoteController* me = weakSelf;
       if (!me || me->_markGen != gen || me->_markedLength == 0 || gCurrent != me) return;
       id c = me.client;
-      if (![me holdsComposition:c]) [me setRefusing:YES client:c];
+      if (![me holdsComposition:c]) [me setTakesText:NO client:c];
     });
   } else if (type == "commit") {
     NSString* text = [NSString stringWithUTF8String:m.value("text", "").c_str()] ?: @"";
@@ -287,7 +329,7 @@ static uint64_t gNextCtl = 1;
       _markedText = nil;
       _markId = 0;
       ++_markGen;
-      [self setRefusing:YES client:client];
+      [self setTakesText:NO client:client];
       SendToAgent({{"type", "ack"}, {"seq", _seq}, {"id", agent_id}, {"ok", false}});
       return;
     }
@@ -339,11 +381,11 @@ static uint64_t gNextCtl = 1;
   nlohmann::json r{{"type", "state"}, {"seq", _seq}, {"after", gAppliedId}, {"ctl", _ctl}};
   // Whether this is the field that has the focus, each time: the agent's
   // sessions come and go, and the "client" message is sent only on a change.
-  r["active"] = gCurrent == self && !_refusing;
   r["app"] = [[client bundleIdentifier] ?: @"" UTF8String];
+  NSRange mk = NSMakeRange(NSNotFound, 0), sel = NSMakeRange(NSNotFound, 0);
   @try {
-    const NSRange mk = [client markedRange];
-    const NSRange sel = [client selectedRange];
+    mk = [client markedRange];
+    sel = [client selectedRange];
     r["marked"] = FromRange(mk);
     r["sel"] = FromRange(sel);
     NSRect rect = NSZeroRect;
@@ -385,6 +427,13 @@ static uint64_t gNextCtl = 1;
   } @catch (NSException* e) {
     os_log_error(Log(), "position query failed: %{public}@", e.reason);
   }
+  // A click moved the focus to something with nothing to type into, within
+  // the same view (no deactivation): keys go as keys from now on.
+  if (gCurrent == self && _takesText && _markedLength == 0 && sel.location == NSNotFound &&
+      (mk.location == NSNotFound || mk.length == 0)) {
+    [self setTakesText:NO client:client];
+  }
+  r["active"] = gCurrent == self && _takesText;
   return r;
 }
 
@@ -411,7 +460,7 @@ void AgentLoop() {
     ch->Send({{"type", "hello"}, {"version", 2}});
     dispatch_async(dispatch_get_main_queue(), ^{
       gAppliedId = 0;  // this agent's ids start again
-      if (RemoteController* c = gCurrent) {
+      if (RemoteController* c = gCurrent; c && [c takesText]) {
         SendToAgent({{"type", "client"},
                      {"active", true},
                      {"app", [[c.client bundleIdentifier] ?: @"" UTF8String]},

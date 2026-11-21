@@ -258,8 +258,6 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   int32_t _imeAheadFromX;       // the caret the server last gave, before those commits
   double _imeAheadUnits;        // their width at 100 pt
   double _imePixelsPerUnit;     // learned; 0 = not yet
-  NSPanel* _imeOverlay;         // the composition, when no remote field shows it
-  NSTextField* _imeOverlayText;
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -907,7 +905,6 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeDropInsert = NO;
   _imeAhead.reset();
   _imePixelsPerUnit = 0;
-  [self imeShowOverlay];
 }
 
 - (void)imeSend:(const rdm::ImeInput&)m {
@@ -931,12 +928,11 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // observing does not, as each change of the mode switches the server's
   // input source (6.5.0).
   const BOOL want = UseLocalInputMethod() && _viewer && _imeState && _imeState->available;
-  if (_imeMarked && (!want || _imeState->secure)) {
+  if (_imeMarked && (!want || !_imeState->client || _imeState->secure)) {
     _imeDropInsert = YES;
     [_imeView.inputContext discardMarkedText];
     [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
     _imeMarked = nil;
-    [self imeShowOverlay];
   }
   // Said once per session even when it is off: a server an earlier session
   // left on RDMachine Input puts the input source from before back.
@@ -960,10 +956,11 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 - (BOOL)imeTakes:(NSEvent*)e from:(RemoteWindowController*)window {
   if (!_imeMode || (e.type != NSEventTypeKeyDown && e.type != NSEventTypeKeyUp)) return NO;
   if (gObserveOnly) return NO;  // observing: nothing is typed over there (rawKey sends nothing either)
-  // A password field over there (secure input): keys go as keys. The server
-  // stays on RDMachine Input, which passes them through; macOS uses no input
-  // method in such a field anyway.
-  if (_imeState && _imeState->secure && e.type == NSEventTypeKeyDown) return NO;
+  // Keys go as keys where nothing over there takes text, or in a password
+  // field (secure input), as with a keyboard on that Mac: no input method
+  // composes there. The server stays on RDMachine Input, which passes them
+  // through (6.5.3).
+  if (e.type == NSEventTypeKeyDown && (!_imeState || !_imeState->client || _imeState->secure)) return NO;
   if (!_imeLocalIsIM && e.type == NSEventTypeKeyDown) return NO;  // ABC here: a key as a key
   if (e.type == NSEventTypeKeyUp) {
     if (!_imeTaken.count(e.keyCode)) return NO;
@@ -1008,7 +1005,6 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     }
     [self imeSend:m];
   }
-  [self imeShowOverlay];
 }
 
 - (void)imeInsert:(NSString*)text {
@@ -1020,7 +1016,6 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     [self imeSend:{rdm::ImeInput::Kind::kCommit, ++_imeSeq, text.UTF8String ?: ""}];
     [self imeGuessAhead:text];
   }
-  [self imeShowOverlay];
 }
 
 // The caret after `text`, for the composition that may start before the
@@ -1079,7 +1074,6 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   [_imeView.inputContext discardMarkedText];
   _imeMarked = nil;
   [self imeSend:{rdm::ImeInput::Kind::kCancel, ++_imeSeq}];
-  [self imeShowOverlay];
 }
 
 - (BOOL)imeHasMarked {
@@ -1183,42 +1177,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     if (me->_imeMarked && copy.caret != before && copy.seq + 1 >= me->_imeComposingSeq) {
       [me->_imeView.inputContext invalidateCharacterCoordinates];
     }
-    [me imeShowOverlay];
   });
 }
 
-// The composition in a small window of its own, for when no remote text
-// field shows it (a game, an app without input method support): there is
-// nothing over there to underline.
-- (void)imeShowOverlay {
-  const BOOL show = _imeMarked && _imeState && !_imeState->client;
-  if (!show) {
-    [_imeOverlay orderOut:nil];
-    return;
-  }
-  if (!_imeOverlay) {
-    _imeOverlay = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 100, 24)
-                                             styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-                                               backing:NSBackingStoreBuffered
-                                                 defer:YES];
-    _imeOverlay.level = NSPopUpMenuWindowLevel;
-    _imeOverlay.backgroundColor = NSColor.textBackgroundColor;
-    _imeOverlay.hasShadow = YES;
-    _imeOverlay.ignoresMouseEvents = YES;
-    _imeOverlayText = [NSTextField labelWithString:@""];
-    _imeOverlayText.font = [NSFont systemFontOfSize:15];
-    [_imeOverlay.contentView addSubview:_imeOverlayText];
-  }
-  NSDictionary* attrs = @{NSUnderlineStyleAttributeName : @(NSUnderlineStyleSingle),
-                          NSFontAttributeName : [NSFont systemFontOfSize:15]};
-  _imeOverlayText.attributedStringValue = [[NSAttributedString alloc] initWithString:_imeMarked attributes:attrs];
-  [_imeOverlayText sizeToFit];
-  const NSSize sz = NSMakeSize(_imeOverlayText.frame.size.width + 12, _imeOverlayText.frame.size.height + 6);
-  _imeOverlayText.frameOrigin = NSMakePoint(6, 3);
-  const NSRect caret = [self imeCaretRect];
-  [_imeOverlay setFrame:NSMakeRect(caret.origin.x, caret.origin.y - sz.height, sz.width, sz.height) display:YES];
-  [_imeOverlay orderFront:nil];
-}
 
 // Main thread. Tells the server which input source this Mac uses, unless it
 // already knows (`force`: say it anyway, e.g. when the session starts).
