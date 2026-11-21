@@ -78,7 +78,21 @@ static __weak RemoteController* gCurrent;
   uint64_t _requestGen;      // the same for the agent's report requests
 }
 
+- (instancetype)initWithServer:(IMKServer*)server delegate:(id)delegate client:(id)client {
+  self = [super initWithServer:server delegate:delegate client:client];
+  os_log(Log(), "new controller %p app=%{public}s", self, [[client bundleIdentifier] ?: @"" UTF8String]);
+  return self;
+}
+
+- (void)dealloc {
+  os_log(Log(), "controller gone %p", self);
+}
+
 - (void)activateServer:(id)sender {
+  // Which controller, for which app, and which one was current: the order
+  // macOS calls these in is what decides "a field has the focus" (no text).
+  os_log(Log(), "activate %p app=%{public}s current=%p", self, [[sender bundleIdentifier] ?: @"" UTF8String],
+         gCurrent);
   gCurrent = self;
   SendToAgent({{"type", "client"}, {"active", true}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]}});
   // Where the caret is before anything is typed: the client's candidate
@@ -103,6 +117,8 @@ static __weak RemoteController* gCurrent;
 }
 
 - (void)deactivateServer:(id)sender {
+  os_log(Log(), "deactivate %p app=%{public}s current=%p", self, [[sender bundleIdentifier] ?: @"" UTF8String],
+         gCurrent);
   if (gCurrent == self) {
     gCurrent = nil;
     SendToAgent({{"type", "client"}, {"active", false}, {"app", [[sender bundleIdentifier] ?: @"" UTF8String]}});
@@ -122,6 +138,7 @@ static __weak RemoteController* gCurrent;
 // The system ends the composition (focus moves, the app changes): it goes in
 // as it stands, and the client hears that it is over.
 - (void)commitComposition:(id)sender {
+  os_log(Log(), "commitComposition %p marked=%lu", self, static_cast<unsigned long>(_markedLength));
   if (_markedLength == 0) return;
   // What we marked ourselves, not what the app says its marked range holds:
   // Chromium's marked range can be made up (docs/ime.md), and the text there
