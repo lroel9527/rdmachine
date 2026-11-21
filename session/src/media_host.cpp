@@ -95,6 +95,25 @@ InputSourceState FromRda(const rda_input_source_info& i) {
   return InputSourceState{i.id, i.name, i.language, i.input_method != 0, i.ascii_capable != 0};
 }
 
+// The input source indicator macOS shows by the caret (when a field gets the
+// focus, and again after 8 minutes without a key: each scroll then hides it
+// and brings it back). While the client types with its own input method it
+// would show RDMachine Input, which nobody types with, over the client's own
+// indicator; and the keys the client's input method takes never reach this
+// Mac, so it would come up while the user types too (docs/ime.md, 6.6.1).
+// Off for good, as this Mac stays on RDMachine Input: nothing puts either
+// back. Returns whether it was on (the user's global preference).
+bool TurnOffInputSourceIndicator() {
+  const CFStringRef key = CFSTR("TSMLanguageIndicatorEnabled");
+  Boolean valid = false;
+  const Boolean on = CFPreferencesGetAppBooleanValue(key, kCFPreferencesAnyApplication, &valid);
+  if (valid && !on) return false;
+  CFPreferencesSetValue(key, kCFBooleanFalse, kCFPreferencesAnyApplication, kCFPreferencesCurrentUser,
+                        kCFPreferencesAnyHost);
+  CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+  return true;
+}
+
 }  // namespace
 
 MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
@@ -581,6 +600,9 @@ void MediaHost::TakeImeMessage(const ImeInput& in) {
       Log("the client types with its own input method (this Mac " +
           (prev == kImeInputSourceId ? std::string("already on RDMachine Input, nothing switched)")
                                      : "on RDMachine Input" + (prev.empty() ? std::string(")") : ", was " + prev + ")")));
+      if (TurnOffInputSourceIndicator()) {
+        Log("this Mac's input source indicator: off for good (it would show RDMachine Input over the client's own)");
+      }
       SendImeState(false);
       // Where the caret is before the first letter. Nothing else asks now:
       // the field kept the focus (no input source switch, so no activation
