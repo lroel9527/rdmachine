@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <iterator>
+#include <map>
 
 using namespace rdmclient;
 
@@ -325,6 +326,11 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // come back: the keys typed meanwhile wait, to go in after it.
   BOOL _imeHolding;
   std::vector<ImeHeldKey> _imeHeld;
+  // A server that shows the input source this Mac types with on its menu bar
+  // icon (7.1.0, ImeState badge; the icons: ImeIcons). The server keeps the
+  // images it was sent: an image goes only when it asks for it.
+  std::string _imeSourceSaid;           // the id and fingerprint this session's server last heard
+  std::set<std::string> _imeIconsSent;  // the images this session's server was sent
 }
 
 - (instancetype)initWithTitle:(NSString*)title {
@@ -981,6 +987,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _imeJudgedSeen = 0;
   _imeHolding = NO;
   _imeHeld.clear();
+  _imeSourceSaid.clear();
+  _imeIconsSent.clear();
   [self imeOfferChanged];  // no session's field any more: not a text field for macOS
 }
 
@@ -1022,11 +1030,13 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (want == _imeMode && (_imeModeSaid || !_imeState)) {
     [self imeOfferChanged];
     if (_imeHolding && ![self imeJudged]) [self imeLetHeldGo];
+    [self imeSaySource];
     return;
   }
   _imeModeSaid = YES;
   _imeMode = want;
   _imeTaken.clear();
+  _imeSourceSaid.clear();  // the server let go of it with the mode: said again once it is on
   rdm::ImeInput m{rdm::ImeInput::Kind::kMode, ++_imeSeq};
   m.mode_on = want;
   [self imeSend:m];
@@ -1038,6 +1048,57 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   }
   [self imeOfferChanged];
   if (_imeHolding && ![self imeJudged]) [self imeLetHeldGo];
+  [self imeSaySource];  // after the mode: the server shows it only in the mode
+}
+
+// This Mac's input source icons by input source id, drawn once in this
+// process: fingerprint and PNG (empty: it has none). Main thread.
+static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeIcons() {
+  static auto* icons = new std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>();
+  return *icons;
+}
+
+// 7.1.0 (docs/ime.md): which input source this Mac types with, for the
+// server's menu bar icon. Said by its icon's fingerprint when it changes;
+// the image goes once the server asks for it (imeSendIcon:).
+- (void)imeSaySource {
+  if (_extraIndex >= 0 || !_session || !_imeMode || !_imeState || !_imeState->badge || gObserveOnly) return;
+  const std::string sid = CurrentInputSourceId();
+  if (sid.empty()) return;
+  auto& icons = ImeIcons();
+  auto it = icons.find(sid);
+  if (it == icons.end()) {
+    std::vector<uint8_t> png = InputSourceIconPng(sid);
+    std::string fp = png.empty() ? std::string() : rdm::ImeIconFingerprint(png);
+    it = icons.emplace(sid, std::make_pair(std::move(fp), std::move(png))).first;
+  }
+  const std::string said = sid + "\n" + it->second.first;
+  if (said == _imeSourceSaid) return;
+  _imeSourceSaid = said;
+  rdm::ImeInput m;
+  m.kind = rdm::ImeInput::Kind::kSource;
+  m.seq = _imeSeq;  // not one of the numbered messages
+  m.source_id = sid;
+  m.icon = it->second.first;
+  [self imeSend:m];
+}
+
+// The server does not have this icon (ImeState need_icon): its image, once
+// in the session (one it refused is not sent again).
+- (void)imeSendIcon:(const std::string&)fingerprint {
+  if (_extraIndex >= 0 || !_session || _imeIconsSent.count(fingerprint)) return;
+  for (const auto& [sid, icon] : ImeIcons()) {
+    if (icon.first != fingerprint || icon.second.empty()) continue;
+    _imeIconsSent.insert(fingerprint);
+    rdm::ImeInput m;
+    m.kind = rdm::ImeInput::Kind::kSource;
+    m.seq = _imeSeq;
+    m.source_id = sid;
+    m.icon = fingerprint;
+    m.png = icon.second;
+    [self imeSend:m];
+    return;
+  }
 }
 
 // From the key monitor (any of the session's windows): YES when the input
@@ -1432,6 +1493,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     }
     [me imeUpdateMode];
     [me imeHeard:copy];
+    if (!copy.need_icon.empty()) [me imeSendIcon:copy.need_icon];
     // A new position for the composition under way: the candidate window
     // moves. A caret that reflects everything before the composition's first
     // mark (the commit just before it, say) is where it starts.

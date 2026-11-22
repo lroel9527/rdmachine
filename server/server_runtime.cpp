@@ -92,6 +92,7 @@ bool ServerRuntime::StartLocked(const ServerSettings& saved, std::string* error)
   // window, where no third-party input method runs.
   if (!options_.login_window && !ime_) ime_ = SystemImeBridge(options_.log);
   mo.ime = options_.login_window ? nullptr : ime_;
+  mo.input_icon_badge = options_.menu_bar && !options_.login_window;
   mo.log = options_.log;
   if (!options_.test_password.empty() && !agent_mode()) {
     mo.check_password = [pw = options_.test_password](const std::string& user, const std::string& password,

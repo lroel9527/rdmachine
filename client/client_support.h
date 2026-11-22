@@ -89,6 +89,12 @@ NSScreen* ScreenAt(NSScreen* home, int32_t x, int32_t y);
 pid_t SecureInputHolder();
 pid_t ReleaseSecureInput();
 NSString* DescribeProcess(pid_t pid);
+// The input source this Mac types with now (Text Input Sources id), and its
+// icon as the server's menu bar shows it (docs/ime.md, 7.1.0): what macOS
+// shows in its own menu bar, drawn at 32x32 pixels as a template (its shapes
+// opaque black, the rest clear), PNG. Empty when it has none.
+std::string CurrentInputSourceId();
+std::vector<uint8_t> InputSourceIconPng(const std::string& source_id);
 // View > 输入 (docs/ime.md): this Mac's input method, keyboard language
 // sync, or neither.
 enum class InputMode { kLocal = 0, kSync = 1, kOff = 2 };

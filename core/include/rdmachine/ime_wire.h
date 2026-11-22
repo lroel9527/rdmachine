@@ -36,7 +36,7 @@ struct ImeKeyEvent {
 
 // Client to server. UTF-16 indices, as NSTextInputClient counts.
 struct ImeInput {
-  enum class Kind { kMark, kCommit, kCancel, kMode, kKey };
+  enum class Kind { kMark, kCommit, kCancel, kMode, kKey, kSource };
   Kind kind = Kind::kMark;
   uint64_t seq = 0;
   std::string text;          // kMark: the composition; kCommit: what goes in
@@ -64,17 +64,34 @@ struct ImeInput {
   // commits, cancels), in order: they go in before `events`.
   std::vector<ImeInput> then{};
 
+  // kSource (7.1.0, to a server that says badge): the input source the
+  // client types with now, for the server's menu bar icon. Not one of the
+  // numbered messages: seq is the last one sent, unchanged.
+  std::string source_id{};     // its Text Input Sources id (for the log)
+  std::string icon{};          // ImeIconFingerprint of its icon; empty: it has none
+  std::vector<uint8_t> png{};  // the icon itself, once the server asked for it (ImeState need_icon)
+
   bool operator==(const ImeInput&) const = default;
 };
 
 // {"seq":1,"mark":"ni'hao","sel":[6,0]}, {"seq":2,"commit":"你好"},
 // {"seq":3,"cancel":true}, {"seq":4,"mode":"on"|"off"},
-// {"seq":4,"key":{"id":7,"im":true,"field":true,"ev":[[5,17,0]],"then":[{"seq":5,"mark":"n"}]}};
+// {"seq":4,"key":{"id":7,"im":true,"field":true,"ev":[[5,17,0]],"then":[{"seq":5,"mark":"n"}]}},
+// {"seq":5,"source":{"id":"com.apple.inputmethod.SCIM.ITABC","icon":"<32 hex>","png":"<base64>"}};
 // any of them with "ack":N.
 std::string EncodeImeInput(const ImeInput& m);
 // nullopt for anything that is not exactly one of those (a key's "then"
 // holds only marks, commits and cancels).
 std::optional<ImeInput> DecodeImeInput(const std::string& payload);
+
+// The fingerprint both sides know an input source icon by (7.1.0): 32
+// lowercase hex digits, the first 16 bytes of SHA-256 of its PNG. The server
+// keeps the icons it was sent by it, so each one crosses the network once.
+std::string ImeIconFingerprint(const std::vector<uint8_t>& png);
+bool IsImeIconFingerprint(const std::string& s);
+// The largest icon image the server takes: base64 and the JSON around it
+// still fit rdaccel's 64 KiB input message (an icon is about 1 KB).
+inline constexpr size_t kImeIconMaxBytes = 32 * 1024;
 
 struct ImeRange {
   uint32_t location = 0, length = 0;
@@ -125,6 +142,14 @@ struct ImeState {
   // none): later ones were still on their way. Not a change of its own (the
   // state is not sent for it alone).
   uint64_t judged = 0;
+  // 7.1.0: this server shows the input source the client types with on its
+  // menu bar icon (while the client types with its own input method this
+  // Mac is on RDMachine Input, and in full screen the client's own menu bar
+  // is hidden): the client says which one (ImeInput kSource).
+  bool badge = false;
+  // The icon (fingerprint) the server does not have: the client sends it
+  // once, with its image. Empty: none wanted.
+  std::string need_icon;
 
   bool operator==(const ImeState&) const = default;
 };

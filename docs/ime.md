@@ -302,10 +302,21 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 - 实测启用必须用户手动做一次：服务端菜单里显示 “Client input method: not enabled — Open Keyboard Settings…”，点了打开系统设置的键盘页并说明加哪一项；启用后显示 “ready”。
 - 没启用时一切照旧，不影响现有用户。
 
+### 7.6 菜单栏图标上的客户端输入法（7.1.0）
+
+用客户端输入法时，被控端的输入源一直是 RDMachine Input；客户端全屏时把自己的菜单栏完全藏起来（`NSApplicationPresentationHideMenuBar`，好让远程的菜单栏能用），眼前唯一的菜单栏是 Mac mini 的，输入法菜单写着 RDMachine Input，看不出客户端现在是拼音还是 ABC。所以服务端在自己的菜单栏图标左下角放一个缩小的客户端输入法图标，和那台 Mac 菜单栏里的一样：拼、A、US、あ、한……
+
+- **什么时候有**：客户端在用自己的输入法（`mode:"on"`）时；模式关掉、会话结束、新会话开始时去掉。只有带菜单栏图标的服务端有（不是 `--headless`、不是登录窗口的 agent），它在 ime state 里说 `badge`，客户端才发。
+- **图标从哪来**：客户端取 macOS 自己菜单栏里显示的那个：输入法的图标文件（`kTISPropertyIconImageURL`；扩展名可能不对，韩文写的是 .png、实际是 .tiff，就换着试）；没有文件的键盘布局，用系统给它画的文字标签（未公开的 `TISPropertyInputSourceIconLabels`：ABC 是 “A”，美式 “US”，德文 “DE”），照系统的样子镂空在圆角方块里；再没有，用布局自己的图标（`kTISPropertyIconRef`）。画成 32×32 像素的模板图（深色部分不透明、浅色透明，菜单栏只看透明度），PNG 约 0.6 到 1 KB。
+- **只传一次**：客户端切换输入法时只发输入源 ID 和图标指纹（PNG 的 SHA-256 前 16 字节，32 位小写十六进制），几十个字节；服务端有这个指纹就直接显示，没有就在状态里带 `need_icon`，客户端把图片发一次（一次会话里同一个指纹只发一次，服务端拒收的也不重发）。服务端核对图片确实是这个指纹的 PNG，存进 `~/Library/Caches/org.rdmachine.server/input-icons`（最多 64 个，旧的先删），之后的会话、服务端重启后都不用再传。磁盘只在服务端启动时读一次，写在自己的队列上：收消息的线程也在注入按键，不能等磁盘。要来的图片若已经不是客户端最后说的那个（要图的这一个来回里又切了），只存不显示。客户端每个输入源的图标在本进程里只画一次。
+- **不影响打字**：`source` 消息不占编号（`seq` 是最后一条，不变），服务端不按 `ack` 丢弃，和按键、组字的判定无关；不切换输入源，不碰 RDMachine Input。
+- **测试**：`core/tests/test_ime_wire.cpp`（`SourceRoundTrips`、`SourceMustBeWellFormed`、`IconFingerprintIsTheStartOfItsSha256`、`StateRoundTrips`），`session/tests/test_input_icon_cache.cpp`（按指纹存取、跨进程从磁盘取回、拒收不符的图片和路径、损坏的文件重新要、超过上限删最旧的）。实机：用客户端输入法时按 Caps Lock 切换，被控端菜单栏图标左下角一个来回内跟着变；服务端日志里 `the client's input source icon … : kept` 每个图标只出现第一次。
+
 ## 8. 怎么验证
 
 - **顺序**：rdaccel 的 `tests/test_link.cpp`（第 4 节）。
 - **服务端那一半**：查看 RDMachine Input 的系统日志（控制器的创建、释放、激活、停用、按键接管，不含文字）：`/usr/bin/log show --predicate 'subsystem == "org.rdmachine.inputmethod"'`。客户端和服务端的调试日志（`ImeDebugLog`）记每条状态、每条报告反映到哪条（`answers`）和控制器（`ctl`）；6.3.x 到 6.6.x 的问题都是靠这两份日志和 lroel 的描述对上的。
 - **候选窗位置**：在第 2 节列出的应用里打字，看候选窗是否贴在组字起点；空输入框的第一个字、上屏后马上打下一个词、切换应用后第一段拼音、滚动后再打字，是出过问题的几种情况（6.3、6.6）。
 - **数值**：输入到画面的响应时间客户端已有（`_responseMs`）。可以再量按键到本机候选窗更新的时间、一段组字开始到候选窗挪到位的时间，对比同一段文字在“同步键盘语言”和“用这台 Mac 的输入法”下的数值。到 6.6.1 这些数值还没有量；lroel 实际用过，评价“正常，跟手”（6.2.1，2026-11-20）。
+- **菜单栏上的客户端输入法**（7.6）：服务端日志打开 `ImeDebugLog` 时，每次切换有一行 `client source <id> icon=<指纹> -> shown|asked for`。
 - 注入按键或点击的测试先问 lroel：lroel 常通过 RDMachine 连着这台 Mac。

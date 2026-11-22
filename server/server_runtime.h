@@ -57,6 +57,9 @@ class ServerRuntime {
     // account this server runs as logs in with it instead of its real
     // password (which no test should know). Empty: the system's check.
     std::string test_password;
+    // A menu bar icon (not --headless): it shows the input source the
+    // client types with (docs/ime.md, 7.1.0).
+    bool menu_bar = false;
     std::function<void(const std::string&)> log;
   };
 

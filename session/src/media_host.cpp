@@ -117,6 +117,7 @@ bool TurnOffInputSourceIndicator() {
 }  // namespace
 
 MediaHost::MediaHost(MediaHostOptions options) : options_(std::move(options)) {
+  if (options_.input_icon_badge) ime_icons_ = std::make_unique<InputIconCache>(InputIconCacheDir());
   if (options_.ime) {
     ImeBridge::Events ev;
     ev.on_connection = [this](bool connected) {
@@ -449,7 +450,7 @@ std::vector<uint32_t> CodePoints(const std::string& s) {
 }
 
 const char* ImeKindName(ImeInput::Kind kind) {
-  static const char* kKinds[] = {"mark", "commit", "cancel", "mode", "key"};
+  static const char* kKinds[] = {"mark", "commit", "cancel", "mode", "key", "source"};
   return kKinds[static_cast<int>(kind)];
 }
 
@@ -459,6 +460,10 @@ void MediaHost::OnImeInput(const ImeInput& in) {
   if (!options_.ime) return;
   if (in.kind == ImeInput::Kind::kKey) {
     OnImeKey(in);
+    return;
+  }
+  if (in.kind == ImeInput::Kind::kSource) {
+    OnImeSource(in);  // nothing to do with the keys or the text
     return;
   }
   bool takes = true;
@@ -538,6 +543,45 @@ void MediaHost::OnImeKey(const ImeInput& in) {
       InjectInput(ev);
     }
   }
+}
+
+// 7.1.0 (docs/ime.md): the input source the client types with, in a corner
+// of this Mac's menu bar icon. The client says its icon's fingerprint; one
+// this Mac does not have is asked for (need_icon) and comes once, then stays
+// in the cache, also for later sessions.
+void MediaHost::OnImeSource(const ImeInput& in) {
+  if (!options_.input_icon_badge || !ime_icons_) return;
+  // An image the client was asked for. It may be for a source the client has
+  // moved on from meanwhile (asked for, then switched again before it heard):
+  // kept for later, but shown only if it is still the one it said last.
+  const bool image = !in.png.empty();
+  if (image) {
+    Log("the client's input source icon " + in.icon + " (" + std::to_string(in.png.size()) + " bytes): " +
+        (ime_icons_->Put(in.icon, in.png) ? "kept" : "refused (not that fingerprint's PNG)"));
+  }
+  std::optional<std::vector<uint8_t>> png;
+  if (!in.icon.empty()) png = ime_icons_->Get(in.icon);
+  const char* outcome;
+  {
+    std::lock_guard lock(ime_mu_);
+    if (!ime_mode_on_) return;  // the mode ended meanwhile: nothing is shown
+    if (!image) ime_said_icon_ = in.icon;
+    if (in.icon == ime_said_icon_) {
+      // One this Mac does not have: asked for, and the last one stays until it comes.
+      const bool here = in.icon.empty() || png;
+      ime_need_icon_ = here ? std::string() : in.icon;
+      if (here) SetClientInputIcon(in.icon.empty() ? ClientInputIcon{} : ClientInputIcon{in.icon, std::move(*png)});
+      outcome = here ? "shown" : "asked for";
+    } else {
+      if (ime_need_icon_ == in.icon) ime_need_icon_.clear();
+      outcome = "kept, not shown (the client is on another one now)";
+    }
+  }
+  if (ime_debug_) {
+    Log("ime debug " + Millis() + " client source " + in.source_id + " icon=" + (in.icon.empty() ? "-" : in.icon) +
+        (image ? " with its image" : "") + " -> " + outcome);
+  }
+  SendImeState(false);
 }
 
 void MediaHost::DropImeMessage(const ImeInput& in) {
@@ -635,7 +679,8 @@ void MediaHost::TakeImeMessage(const ImeInput& in) {
       ime_.OnCompositionDone();
       break;
     }
-    case ImeInput::Kind::kKey: break;  // OnImeKey
+    case ImeInput::Kind::kKey: break;     // OnImeKey
+    case ImeInput::Kind::kSource: break;  // OnImeSource
   }
 }
 
@@ -664,6 +709,10 @@ void MediaHost::EndImeMode(const char* why, bool restore) {
     if (!ime_mode_ && !(restore && !ime_prev_source_.empty())) return;
     ime_mode_ = false;
     ime_mode_on_ = false;
+    // The client's input source is no longer what types here.
+    ime_need_icon_.clear();
+    ime_said_icon_.clear();
+    SetClientInputIcon({});
     if (!restore) {
       // Selecting an input method from this background process does not
       // reliably reach the app in front (macOS activates RDMachine Input
@@ -758,6 +807,8 @@ void MediaHost::SendImeState(bool force) {
     s.keys = true;
     s.back = ime_keys_.back();
     s.typed = ime_keys_.typed();
+    s.badge = options_.input_icon_badge;
+    s.need_icon = ime_need_icon_;
     // Not a change of its own: it goes with whatever is sent.
     s.judged = ime_last_sent_.judged;
     if (!force && ime_sent_ && s == ime_last_sent_) return;
@@ -1108,6 +1159,9 @@ std::optional<SessionGrant> MediaHost::StartSession(const SessionRequest& reques
     ime_sent_ = false;
     ime_mode_ = false;
     ime_mode_on_ = false;
+    ime_need_icon_.clear();
+    ime_said_icon_.clear();
+    SetClientInputIcon({});
     ime_displays_ = {display_index};
     // A text field that got the focus before this session: RDMachine Input
     // says so only when that changes. The client numbers its messages from 1

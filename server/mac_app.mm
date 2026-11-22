@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "mac_app.h"
+#include "rdmachine/session/client_input_icon.h"
 #include "rdmachine/session/file_progress.h"
 
 namespace {
@@ -249,6 +250,36 @@ static NSView* WithHint(NSView* field, NSString* hint) {
 
 // ---- menu bar ----------------------------------------------------------------
 
+// The menu bar icon with the input source the client types with in its lower
+// left corner (docs/ime.md, 7.1.0), standing out a little past the picture
+// and apart from it, so the symbol's person stays whole on the right. A
+// template, as the symbol: the client sends its icon as one.
+static NSImage* RDMWithInputSource(NSImage* symbol, NSImage* badge) {
+  const NSSize s = symbol.size;
+  const CGFloat side = std::round(s.height * 0.62);
+  const CGFloat out = std::round(side * 0.4);
+  const NSSize size = NSMakeSize(s.width + out, s.height);
+  NSImage* img = [NSImage imageWithSize:size
+                                flipped:NO
+                         drawingHandler:^BOOL(NSRect) {
+                           [symbol drawInRect:NSMakeRect(out, 0, s.width, s.height)];
+                           const NSRect r = NSMakeRect(0, 0, side, side);
+                           NSGraphicsContext* g = NSGraphicsContext.currentContext;
+                           g.compositingOperation = NSCompositingOperationClear;
+                           [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r, -1.5, -1.5)
+                                                            xRadius:side * 0.3
+                                                            yRadius:side * 0.3] fill];
+                           g.compositingOperation = NSCompositingOperationSourceOver;
+                           [badge drawInRect:r
+                                    fromRect:NSZeroRect
+                                   operation:NSCompositingOperationSourceOver
+                                    fraction:1];
+                           return YES;
+                         }];
+  [img setTemplate:YES];  // not img.template: a C++ keyword in Objective-C++
+  return img;
+}
+
 @interface RDMMenuBarController : NSObject <NSMenuDelegate>
 - (instancetype)initWithRuntime:(rdm::ServerRuntime*)runtime info:(const rdm::MenuBarAppInfo&)info;
 @end
@@ -262,6 +293,7 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   NSTimer* _timer;
   bool _menuOpen;
   NSString* _symbol;  // the icon now shown
+  std::string _inputIcon;  // ... and the client's input source on it (fingerprint; empty: none)
   int _ringStep;      // the receive ring now shown (-1: none; 0..40, or 41 when the size is unknown)
 }
 
@@ -290,11 +322,20 @@ static NSView* WithHint(NSView* field, NSString* hint) {
                                          selector:@selector(receiveChanged:)
                                              name:@(rdm::kFileReceiveChangedNotification)
                                            object:nil];
+  // The input source the client types with: on the icon as soon as it changes.
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(clientInputIconChanged:)
+                                             name:@(rdm::kClientInputIconChangedNotification)
+                                           object:nil];
   [self tick];
   // Common modes: keep updating while the menu is open.
   _timer = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(tick) userInfo:nil repeats:YES];
   [NSRunLoop.mainRunLoop addTimer:_timer forMode:NSRunLoopCommonModes];
   return self;
+}
+
+- (void)clientInputIconChanged:(NSNotification*)note {
+  [self tick];
 }
 
 - (void)receiveChanged:(NSNotification*)note {
@@ -326,10 +367,20 @@ static NSView* WithHint(NSView* field, NSString* hint) {
   // Only when it changes: setting the image relays out the status item,
   // which can swallow a click that is in progress.
   NSString* symbol = st.running ? @"rectangle.inset.filled.and.person.filled" : @"display";
-  if (![symbol isEqualToString:_symbol]) {
+  const rdm::ClientInputIcon input = st.running ? rdm::CurrentClientInputIcon() : rdm::ClientInputIcon{};
+  if (![symbol isEqualToString:_symbol] || input.fingerprint != _inputIcon) {
+    if (input.fingerprint != _inputIcon) {
+      NSLog(@"menu bar icon: the client's input source %s",
+            input.fingerprint.empty() ? "no longer shown" : input.fingerprint.c_str());
+    }
     _symbol = symbol;
+    _inputIcon = input.fingerprint;
     NSImage* img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:@"RDMachine Server"];
     [img setTemplate:YES];  // not img.template: a C++ keyword in Objective-C++
+    if (img && !input.png.empty()) {
+      NSImage* badge = [[NSImage alloc] initWithData:[NSData dataWithBytes:input.png.data() length:input.png.size()]];
+      if (badge) img = RDMWithInputSource(img, badge);
+    }
     _item.button.image = img;
     _item.button.title = img ? @"" : (st.running ? @"RD●" : @"RD");
   }

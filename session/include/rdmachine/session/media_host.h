@@ -20,6 +20,7 @@
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/server_session.h"
 #include "rdmachine/session/ime_bridge.h"
+#include "rdmachine/session/client_input_icon.h"
 #include "rdmachine/session/ime_key_judge.h"
 #include "rdmachine/session/ime_state_tracker.h"
 #include "rdmachine/session/login_screen.h"
@@ -76,6 +77,9 @@ struct MediaHostOptions {
   // Typing with the client's input method (docs/ime.md): the link to
   // RDMachine Input. Null: not offered (the login window, tests).
   std::shared_ptr<ImeBridge> ime;
+  // This process has a menu bar icon: it shows the input source the client
+  // types with in a corner of it (docs/ime.md, 7.1.0; SetClientInputIcon).
+  bool input_icon_badge = false;
   std::function<void(const std::string&)> log;  // may be empty
 };
 
@@ -172,6 +176,8 @@ class MediaHost : public ServerDelegate {
   void OnImeInput(const ImeInput& in);
   // A key the client numbered (6.6.0): judged as it arrives (ImeKeyJudge).
   void OnImeKey(const ImeInput& in);
+  // The input source the client types with (7.1.0): on the menu bar icon.
+  void OnImeSource(const ImeInput& in);
   // A mark, commit, cancel or mode change that goes in.
   void TakeImeMessage(const ImeInput& in);
   // One that does not (ImeKeyJudge): it changes nothing over there.
@@ -243,6 +249,10 @@ class MediaHost : public ServerDelegate {
   std::mutex ime_mu_;
   ImeStateTracker ime_;          // what is known now
   ImeKeyJudge ime_keys_;         // the client's keys as they arrive (6.6.0)
+  std::string ime_need_icon_;    // the client's input source icon this Mac does not have (7.1.0)
+  std::string ime_said_icon_;    // ... and the one it last said it is on (empty: none)
+  // The icons the client has sent (7.1.0), with options_.input_icon_badge. Its own lock, not ime_mu_.
+  std::unique_ptr<InputIconCache> ime_icons_;
   uint64_t ime_last_input_ = 0;  // the client's last ImeInput (for an input method that does not say)
   ImeState ime_last_sent_;       // what the client was last told
   bool ime_sent_ = false;        // something went out this session

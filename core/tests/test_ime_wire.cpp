@@ -102,9 +102,58 @@ TEST(ImeWire, StateRoundTrips) {
   judged.judged = 44;
   EXPECT_EQ(*rdm::DecodeImeState(rdm::EncodeImeState(judged)), judged);
 
+  ImeState badge = judged;  // 7.1.0
+  badge.badge = true;
+  badge.need_icon = "0123456789abcdef0123456789abcdef";
+  EXPECT_EQ(*rdm::DecodeImeState(rdm::EncodeImeState(badge)), badge);
+  // Only a fingerprint is wanted.
+  EXPECT_TRUE(rdm::DecodeImeState(R"({"badge":true,"need_icon":"../x"})")->need_icon.empty());
+
   ImeState bare;
   EXPECT_EQ(rdm::EncodeImeState(bare), R"({"available":false,"client":false,"secure":false,"seq":0})");
   EXPECT_EQ(*rdm::DecodeImeState(rdm::EncodeImeState(bare)), bare);
+}
+
+// 7.1.0: the input source the client types with, for the server's menu bar.
+TEST(ImeWire, SourceRoundTrips) {
+  const std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 13, 10, 26, 10, 0, 1, 2, 255};
+  ImeInput said;
+  said.kind = ImeInput::Kind::kSource;
+  said.seq = 9;
+  said.ack = 3;
+  said.source_id = "com.apple.inputmethod.SCIM.ITABC";
+  said.icon = rdm::ImeIconFingerprint(png);
+  EXPECT_EQ(*rdm::DecodeImeInput(rdm::EncodeImeInput(said)), said);
+  ImeInput sent = said;  // with the image, once asked
+  sent.png = png;
+  EXPECT_EQ(*rdm::DecodeImeInput(rdm::EncodeImeInput(sent)), sent);
+  ImeInput none = said;  // a source without an icon
+  none.icon.clear();
+  EXPECT_EQ(*rdm::DecodeImeInput(rdm::EncodeImeInput(none)), none);
+}
+
+TEST(ImeWire, SourceMustBeWellFormed) {
+  const std::string fp = "0123456789abcdef0123456789abcdef";
+  EXPECT_TRUE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":")" + fp + R"("}})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x"}})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"icon":")" + fp + R"("}})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":"../../etc"}})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":"0123456789ABCDEF0123456789ABCDEF"}})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":")" + fp + R"(","png":"not base64!"}})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":"","png":"iVBO"}})"));  // an image of no icon
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":")" + fp + R"("},"mode":"on"})"));
+  EXPECT_FALSE(rdm::DecodeImeInput(  // not inside a key's "then"
+      R"({"seq":1,"key":{"id":1,"then":[{"seq":1,"source":{"id":"x","icon":""}}]}})"));
+  const std::string big((rdm::kImeIconMaxBytes / 3 + 2) * 4, 'A');  // valid base64, more than the largest image taken
+  EXPECT_FALSE(rdm::DecodeImeInput(R"({"seq":1,"source":{"id":"x","icon":")" + fp + R"(","png":")" + big + R"("}})"));
+}
+
+TEST(ImeWire, IconFingerprintIsTheStartOfItsSha256) {
+  // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+  EXPECT_EQ(rdm::ImeIconFingerprint({'a', 'b', 'c'}), "ba7816bf8f01cfea414140de5dae2223");
+  EXPECT_TRUE(rdm::IsImeIconFingerprint(rdm::ImeIconFingerprint({})));
+  EXPECT_FALSE(rdm::IsImeIconFingerprint("ba7816bf8f01cfea414140de5dae222"));
+  EXPECT_FALSE(rdm::IsImeIconFingerprint("ba7816bf8f01cfea414140de5dae2223/"));
 }
 
 TEST(ImeWire, StateToleratesWhatItDoesNotKnow) {

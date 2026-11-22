@@ -406,6 +406,7 @@ int main(int argc, char** argv) {
   rda_set_log(&RdaLog, nullptr, RDA_LOG_WARN);
   ropts.config_dir = config_dir;
   ropts.server_name = HostName();
+  ropts.menu_bar = !headless;
   ropts.log = &Log;
   rdm::ServerRuntime runtime(ropts, *identity);
   // Started by launchd (rdmachine-service): never stop at a dialog no one
