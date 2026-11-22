@@ -7,6 +7,7 @@
 //                     [--save-frame=PATH.bmp] [--send-input-source=JSON]
 //                     [--desktop=WxH[@SCALE]] [--resize-desktop=WxH[@SCALE]] [--move=X,Y]
 //                     [--text-mode] [--set-text-mode=on|off] [--copy-files=PATH[,PATH...]] [--audio]
+//                     [--ime-sources=ID[,ID...]]
 //
 // The password comes from $RDMACHINE_PASSWORD, or is asked on the terminal.
 // A first-time server fingerprint is shown and must be confirmed (or
@@ -29,6 +30,11 @@
 // click, if any): what a client would show.
 // --send-input-source=JSON sends a keyboard input source sync message (as
 // the window client does when the input source changes) once connected.
+// --ime-sources=ID[,ID...] types with "this Mac's input method" once the
+// pictures arrived and says these input sources in turn, as the window
+// client does when its input source changes (docs/ime.md, 7.6): the server's
+// menu bar icon shows each one's icon, and an icon the server does not have
+// yet is asked for and sent once. Prints, for each, whether its image went.
 // --desktop=2880x1800@2 asks the server for a desktop of that many pixels at
 // that scale (pixels per point) instead of its display as it is: what the
 // window client does with its window's size. --resize-desktop asks for
@@ -51,7 +57,9 @@
 
 #include <rdaccel/rdaccel.h>
 
+#include "input_source_icon.h"
 #include "rdmachine/desktop.h"
+#include "rdmachine/ime_wire.h"
 #include "rdmachine/input_source_sync.h"
 #include "rdmachine/picture_mode.h"
 #include "rdmachine/protocol.h"
@@ -93,6 +101,9 @@ class CopyingClipboard : public rdm::Clipboard {
 };
 
 struct Stats {
+  // --ime-sources: the server's input method state as last told (ImeState).
+  std::mutex ime_mu;
+  std::optional<rdm::ImeState> ime;
   std::atomic<int> frames{0};
   std::atomic<int> width{0}, height{0};
   std::atomic<bool> ended{false};
@@ -198,6 +209,7 @@ int main(int argc, char** argv) {
   std::optional<rdm::DesktopSpec> resize_desktop;
   std::optional<bool> set_text_mode;  // --set-text-mode: change it once frames arrive
   std::vector<std::string> copy_files;
+  std::vector<std::string> ime_sources;
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     if (Flag(a, "--user", &v)) user = v;
@@ -248,6 +260,13 @@ int main(int argc, char** argv) {
       if (!m) return Usage();
       opts.clipboard_mode = *m;
     }
+    else if (Flag(a, "--ime-sources", &v)) {
+      for (size_t start = 0; start <= v.size();) {
+        const size_t comma = std::min(v.find(',', start), v.size());
+        if (comma > start) ime_sources.push_back(v.substr(start, comma - start));
+        start = comma + 1;
+      }
+    }
     else if (Flag(a, "--version", nullptr)) {
       std::printf("rdmachine-connect %s (protocol %d, rdaccel %s)\n", rdm::VersionString(), rdm::kProtocolVersion,
                   rda_version_string());
@@ -296,6 +315,14 @@ int main(int argc, char** argv) {
   opts.viewer.user = &stats;
   opts.viewer.on_stream_info = &OnStreamInfo;
   opts.viewer.on_frame = &OnFrame;
+  opts.viewer.on_message = [](void* user, uint32_t type, const uint8_t* payload, size_t n) {
+    if (type != rdm::kImeStateMessageType) return;
+    auto s = rdm::DecodeImeState(std::string(reinterpret_cast<const char*>(payload), n));
+    if (!s) return;
+    auto* stats = static_cast<Stats*>(user);
+    std::lock_guard lock(stats->ime_mu);
+    stats->ime = std::move(*s);
+  };
   opts.clipboard = rdm::SystemClipboard();
   opts.clipboard_fetch_on_announce = true;  // no run loop here to answer at paste time
   std::shared_ptr<CopyingClipboard> copying;
@@ -384,6 +411,62 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  bool ime_failed = false;
+  if (!ime_sources.empty() && stats.frames > 0) {
+    auto state = [&] {
+      std::lock_guard lock(stats.ime_mu);
+      return stats.ime;
+    };
+    // Waits up to `ms` for the server's state to say `what`.
+    auto wait_for = [&](auto what, int ms) {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+      while (std::chrono::steady_clock::now() < until && !stats.ended) {
+        if (auto s = state(); s && what(*s)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      return false;
+    };
+    auto send = [&](const rdm::ImeInput& m) {
+      const std::string p = rdm::EncodeImeInput(m);
+      return session->SendInputMessage(rdm::kImeMessageType, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+    };
+    if (!wait_for([](const rdm::ImeState& s) { return s.available && s.badge; }, 5000)) {
+      const auto s = state();
+      std::printf("the server does not show the client's input source (available %d, badge %d)\n",
+                  s ? s->available : 0, s ? s->badge : 0);
+      ime_failed = true;
+    } else {
+      rdm::ImeInput mode{rdm::ImeInput::Kind::kMode, 1};
+      mode.mode_on = true;
+      send(mode);
+      for (const std::string& id : ime_sources) {
+        const std::vector<uint8_t> png = rdmclient::InputSourceIconPng(id);
+        const std::string fp = png.empty() ? std::string() : rdm::ImeIconFingerprint(png);
+        rdm::ImeInput said;
+        said.kind = rdm::ImeInput::Kind::kSource;
+        said.seq = 1;  // not numbered
+        said.source_id = id;
+        said.icon = fp;
+        send(said);
+        // A new icon is asked for within a round trip; one it has is just shown.
+        const bool asked = !fp.empty() && wait_for([&](const rdm::ImeState& s) { return s.need_icon == fp; }, 1500);
+        bool taken = true;
+        if (asked) {
+          rdm::ImeInput sent = said;
+          sent.png = png;
+          send(sent);
+          taken = wait_for([&](const rdm::ImeState& s) { return s.need_icon.empty(); }, 3000);
+        }
+        std::printf("input source %s: icon %s, %s\n", id.c_str(), fp.empty() ? "none" : fp.c_str(),
+                    asked ? (taken ? ("asked for, its image sent (" + std::to_string(png.size()) + " bytes)").c_str()
+                                   : "asked for, its image not taken")
+                          : "shown without sending its image");
+        std::fflush(stdout);
+        ime_failed |= !taken;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // time to look at the menu bar
+      }
+    }
+  }
   if (click_x >= 0 && stats.frames > 0) {
     auto send = [&](rda_input_kind kind) {
       rda_input_event ev;
@@ -427,5 +510,5 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
   }
   session->Close();
-  return stats.frames >= want_frames && !resize_failed ? 0 : 1;
+  return stats.frames >= want_frames && !resize_failed && !ime_failed ? 0 : 1;
 }
