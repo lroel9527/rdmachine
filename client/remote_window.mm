@@ -266,6 +266,9 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   std::vector<rda_rect> _redo;        // changed since the enlarged picture was brought up to date
   int _upscaleDone;                   // what made the enlarged picture (-1: nothing yet)
   BOOL _refineOwed;                   // the model was wanted but MetalFX did parts of it
+  int32_t _refineRow;                 // the model's pass over it has done the rows above this
+  uint64_t _refineGen;                // counts the passes started: an older pass stops
+  std::atomic<int> _framesWaiting;    // decode threads waiting for _surfMu: the pass steps aside
   double _modelNsPerPixel;            // the model's GPU time per 1x pixel, as measured
   dispatch_source_t _refineTimer;
   std::atomic<int> _upscaleWanted;  // -1: the picture as it came; else an Upscaler (main thread sets it)
@@ -390,6 +393,7 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   // A layer, not a window or view: it takes no mouse events, so clicks reach
   // the remote screen under it.
   _lastFrameUs = 0;
+  _framesWaiting = 0;
   _inputPendingUs = 0;
   _responseMs = -1;
   _statsLayer = [CALayer layer];
@@ -765,6 +769,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   _redo.clear();
   _upscaleDone = -1;
   _refineOwed = NO;
+  _refineRow = 0;
+  ++_refineGen;
 }
 
 // Under _surfMu. Brings the enlarged picture up to date from _surf[src] (the
@@ -800,6 +806,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (how == Upscaler::kModel && !settled && area * _modelNsPerPixel > 4e6) {
     run = Upscaler::kMetalFX;
     _refineOwed = YES;
+    _refineRow = 0;  // MetalFX redoes all of it: the model's pass starts over
+    ++_refineGen;
   }
   if (run == Upscaler::kMetalFX) _redo.assign(1, all);
   int dst = -1;
@@ -828,8 +836,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   return dst;
 }
 
-// Under _surfMu: the model goes over the whole picture once nothing has
-// changed for 150 ms (each call starts the wait again).
+// Under _surfMu: the model's pass over the whole picture starts once nothing
+// has changed for 150 ms (each call starts the wait again).
 - (void)scheduleRefine {
   if (!_refineTimer) {
     _refineTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
@@ -847,9 +855,33 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 
 // Timer queue.
 - (void)refinePicture {
+  [self refineStep:0 timer:YES];
+}
+
+// The model goes over the whole picture after MetalFX stood in for it, a band
+// of rows of about 2 ms at a time. Between bands the surfaces are free, and a
+// picture waiting for them goes first, so it waits for one band at most (the
+// whole picture at once held a keystroke up to 36 ms on this M6) and shows
+// the bands done so far. Shown when the last band is done. The timer starts a
+// pass (or takes over the one under way); each band queues the next.
+- (void)refineStep:(uint64_t)gen timer:(BOOL)timer {
+  __weak RemoteWindowController* weakSelf = self;
+  if (_framesWaiting.load() > 0) {  // a picture first: a mutex does not queue its waiters
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                   ^{
+                     [weakSelf refineStep:gen timer:timer];
+                   });
+    return;
+  }
   std::lock_guard<std::mutex> lock(_surfMu);
   if (!_refineOwed) return;
-  if (_upscaleWanted.load() != static_cast<int>(Upscaler::kModel) || _front < 0 || !_surf[_front]) {
+  if (timer) {
+    gen = ++_refineGen;
+  } else if (gen != _refineGen) {
+    return;  // MetalFX did it all again, or the timer took over
+  }
+  if (_upscaleWanted.load() != static_cast<int>(Upscaler::kModel) || _front < 0 || !_surf[_front] || !_upscaler ||
+      !_big[0]) {
     _refineOwed = NO;
     return;
   }
@@ -857,10 +889,41 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     [self scheduleRefine];
     return;
   }
+  int dst = -1;
+  for (int i = 0; i < 3 && dst < 0; ++i) {
+    if (i != _bigShown && _bigSent[i] == 0) dst = i;
+  }
+  if (dst < 0) return;
+  const int32_t reach = upscaler::kReach;
+  if (_refineRow < _surfH) {
+    const auto rows = static_cast<int32_t>(2e6 / (_modelNsPerPixel * _surfW));
+    const int32_t y = _refineRow, n = std::min(std::max(rows, 8), _surfH - y);
+    const rda_rect band{0, y, _surfW, n};
+    const int32_t y0 = std::max(0, y - reach), y1 = std::min(_surfH, y + n + reach);
+    for (auto& o : _bigOwed) Owe(o, rda_rect{0, y0, _surfW, y1 - y0}, _surfW, _surfH);
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!_upscaler->Run(Upscaler::kModel, _surf[_front], {band}, _big[dst], {})) {
+      _refineOwed = NO;
+      return;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const double area = static_cast<double>(_surfW) * (y1 - y0);
+    if (area >= 20000) _modelNsPerPixel = 0.7 * _modelNsPerPixel + 0.3 * (ms * 1e6 / area);
+    _refineRow = y + n;
+    if (_refineRow < _surfH) {  // the next band after a millisecond with the surfaces free
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                     ^{
+                       [weakSelf refineStep:gen timer:NO];
+                     });
+      return;
+    }
+  }
   _refineOwed = NO;
-  _redo.assign(1, rda_rect{0, 0, _surfW, _surfH});
-  const int big = [self enlargeFrom:_front how:Upscaler::kModel settled:YES];
-  if (big >= 0) [self present:_big[big] back:-1 big:big];
+  _refineRow = 0;
+  if (!_upscaler->Run(Upscaler::kModel, _surf[_front], {}, _big[dst], _bigOwed[dst])) return;
+  _bigOwed[dst].clear();
+  _upscaleUsed = static_cast<int>(Upscaler::kModel);
+  [self present:_big[dst] back:-1 big:dst];
 }
 
 // Under _surfMu: hands `s` to the main thread to show. `back`: the 1x surface
@@ -2071,13 +2134,10 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
 // and hands it to the main thread; while the main thread is still busy with
 // the previous one, only remembers what changed.
 - (void)frame:(const rda_image*)img changed:(const rda_rect*)changed count:(size_t)count {
-  {
-    const uint64_t now = rda_now_us();
-    const uint64_t pending = _inputPendingUs.exchange(0);
-    if (pending != 0 && now > pending) _responseMs = static_cast<double>(now - pending) / 1000.0;
-    _lastFrameUs = now;
-  }
+  _lastFrameUs = rda_now_us();
+  ++_framesWaiting;  // the model's pass lets a picture go first (refineStep)
   std::unique_lock<std::mutex> lock(_surfMu);
+  --_framesWaiting;
   if (img->width != _surfW || img->height != _surfH || !_surf[0]) {
     for (auto& s : _surf) {
       if (s) CFRelease(s);
@@ -2144,7 +2204,13 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
       _bigShown = big;
     }
   }
-  if (back >= 0) _presentPending = false;
+  if (back >= 0) {
+    _presentPending = false;
+    // Input to screen counts until the picture is in the layer: its copy and
+    // enlargement included (7.2.0; it used to stop when the picture arrived).
+    const uint64_t pending = _inputPendingUs.exchange(0), now = rda_now_us();
+    if (pending != 0 && now > pending) _responseMs = static_cast<double>(now - pending) / 1000.0;
+  }
 }
 
 + (CGImageRef)makeCursorImage:(const rda_cursor_image*)c {

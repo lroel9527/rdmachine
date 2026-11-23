@@ -6,6 +6,9 @@
 #import <Metal/Metal.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -193,6 +196,64 @@ TEST_F(WindowUpscaleTest, OtherRatiosShowThePictureAsItCame) {
   Feed(b, {});
   Spin(0.1);
   EXPECT_EQ(Worst(Shown(), b), 0);
+}
+
+// RDM_UPSCALER_TIMING=1: how long a picture takes on the decode thread, from
+// rdaccel's callback until it goes to the main thread (copying it in and
+// enlarging it): what the client adds before the picture can be on screen.
+TEST_F(WindowUpscaleTest, Latency) {
+  if (!std::getenv("RDM_UPSCALER_TIMING")) GTEST_SKIP() << "set RDM_UPSCALER_TIMING=1";
+  const int w = 1728, h = 1117;  // a 16-inch MacBook Pro's screen at 1x
+  Open(w, h);
+  Pic pic = Make(w, h, 1);
+  const Pic ink = Make(w, h, 4);
+  auto timed = [&](const std::vector<rda_rect>& changed) {
+    const auto t0 = std::chrono::steady_clock::now();
+    Feed(pic, changed);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    Spin(0.02);  // the main thread shows it, as at 50 pictures a second
+    return ms;
+  };
+  auto report = [](const char* what, std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    std::printf("  %-34s median %6.2f ms   max %6.2f ms\n", what, v[v.size() / 2], v.back());
+  };
+  const struct {
+    Upscaler how;
+    const char* name;
+  } ways[] = {{Upscaler::kPixels, "pixels repeated"}, {Upscaler::kMetalFX, "MetalFX"}, {Upscaler::kModel, "text model"}};
+  for (const auto& way : ways) {
+    SetUpscaler(way.how);
+    [NSNotificationCenter.defaultCenter postNotificationName:kUpscalerChanged object:nil];
+    Feed(pic, {});
+    Spin(0.6);  // settled, the model's pass included
+    std::vector<double> keys, wholes;
+    for (int i = 0; i < 40; ++i) {  // a keystroke: a glyph's cell changes
+      const int x = (i * 97) % (w - 24), y = (i * 61) % (h - 24);
+      for (int r = y; r < y + 24; ++r) std::memcpy(&pic.px[(r * w + x) * 4], &ink.px[(r * w + x) * 4], 24 * 4);
+      keys.push_back(timed({rda_rect{x, y, 24, 24}}));
+    }
+    for (int i = 0; i < 10; ++i) {  // scrolling, a video, another app: everything changes
+      pic = Make(w, h, 10 + i);
+      wholes.push_back(timed({}));
+    }
+    std::printf("%s, %dx%d:\n", way.name, w, h);
+    report("keystroke (24 x 24 changed)", keys);
+    report("whole picture changed", wholes);
+  }
+  // The model goes over the whole picture 150 ms after a big change, holding
+  // the surfaces: a keystroke arriving then waits for it.
+  double worst = 0;
+  for (int at = 140; at <= 190; at += 5) {
+    pic = Make(w, h, at);
+    Feed(pic, {});
+    Spin(at / 1000.0);
+    const int x = 300, y = 200;
+    for (int r = y; r < y + 24; ++r) std::memcpy(&pic.px[(r * w + x) * 4], &ink.px[(r * w + x) * 4], 24 * 4);
+    worst = std::max(worst, timed({rda_rect{x, y, 24, 24}}));
+    Spin(0.3);
+  }
+  std::printf("text model, a keystroke during its pass after a big change: at most %.2f ms\n", worst);
 }
 
 }  // namespace
