@@ -1,6 +1,6 @@
 # 客户端输入法
 
-2026-11-19 和 lroel 一起定下，6.2.0 起有（rdaccel 3.2.0），这里写的是 6.6.1 的样子。客户端和服务端都要 6.2.0 以上才生效，任何一边是旧的都照旧工作。依据是同一天在 Mac mini（macOS 27.2，Apple 芯片）上做的探测程序，探测程序没有放进仓库。
+2026-11-19 和 lroel 一起定下，6.2.0 起有（rdaccel 3.2.0），这里写的是 7.2.3 的样子。客户端和服务端都要 6.2.0 以上才生效，任何一边是旧的都照旧工作。依据是同一天在 Mac mini（macOS 27.2，Apple 芯片）上做的探测程序，探测程序没有放进仓库。
 
 ## 是什么
 
@@ -27,7 +27,7 @@
 
 | RemoteTextInput | InputMethodKit（`IMKTextInput`） |
 | --- | --- |
-| `caretRectInWindow` | `attributesForCharacterIndex:lineHeightRectangle:`，屏幕坐标，带行高 |
+| `caretRectInWindow` | `attributesForCharacterIndex:lineHeightRectangle:`，屏幕坐标，带行高；序号从组字起点数（没有组字时从光标数），问 0 就是组字起点或光标（7.1） |
 | `selectedTextRange`、`markedTextRange` | `selectedRange`、`markedRange` |
 | `documentState`（光标前后的文字） | `attributedSubstringFromRange:` |
 | `RTITextOperations` | `setMarkedText:selectionRange:replacementRange:`、`insertText:replacementRange:` |
@@ -47,7 +47,7 @@
 
 - 选区在所有应用里都对，包括退格。
 - 光标矩形：VS Code、Safari 网页输入框、邮件每个字符都跟着动（约 7 px 一个字符）；Safari 地址栏、访达和系统设置的搜索框只有第一个字符对，之后为空；Claude 前 3 个字符对，之后停住。
-- 原因：没有组字文字时，光标在文字末尾，“光标处的字符”不存在，系统就不给；Chromium 只在组字时有每个字的位置（见下文的源码）。
+- 原因（7.2.3 才查清，见 7.1）：探测程序问的是光标在全文里的序号，而系统把这个序号从光标往后数，问到的是光标后面同样远的地方。光标在文字末尾时那里已经超出文字：原生文本框不给；VS Code、网页把超出的位置算到文字末尾，正好是光标，所以跟着动。当时以为是“光标处没有字符，系统就不给”。Chromium 只在组字时有每个字的位置（见下文的源码）。
 - `firstRectForCharacterRange:actualRange:` 经过输入法连接返回的是垃圾值，不能用；`attributesForCharacterIndex:lineHeightRectangle:` 可以用。
 - `length` 在 Electron 和网页里是 0，不能用。
 
@@ -59,7 +59,7 @@
 | 访达搜索框 | 准（第一版第一个字母之后为空） |
 | Safari 网页输入框、邮件 | 准 |
 | 文本编辑，第一个词 | 准 |
-| 文本编辑，第二个词 | 为空（4 个字母 16 ms 内一起到，原因未明） |
+| 文本编辑，第二个词 | 为空（问的是组字在全文里的序号，系统再从组字起点往后数，超出了组字；7.2.3 查清） |
 | Claude | 3 个字母都准（第 4 个以后未测） |
 
 组字和上屏在这 5 个应用里都正常，没有异常。
@@ -72,8 +72,8 @@
   - 组字时：`GetCachedFirstRectForCharacterRange` 把请求换算到组字范围里，用渲染进程送来的 `character_bounds`。代码检查它的个数等于组字长度，所以**组字的每个字都有位置，长度不限**。请求组字起点给第一个字的左边缘，请求组字末尾给最后一个字的右边缘（`GetFirstRectForCompositionRange`）。所以 Claude 长词不会停住。
   - 没有组字时：只有请求正好从光标开始才用缓存的 `caret_rect`；别的位置用选区的矩形，或者落到 `SyncGetFirstRectForRange`，同步等渲染进程回答。这就是第一版停住、以及刚组字后立即查询要几十毫秒的原因。
   - 缓存是渲染进程异步送来的，刚 `setMarkedText` 后可能还是旧的，所以第 5 节在 16 ms、60 ms 后再查。
-- **iTerm2**：`sources/TerminalView/PTYTextView.m` 的 `firstRectForCharacterRange:actualRange:` 按字符网格算：列 × 字宽、行 × 行高，换成屏幕坐标，任何时候都准。系统终端不开源，没法从源码确认；它支持带下划线的组字，系统拼音的候选窗在里面位置正确，所以按同样的路子处理。
-- **文本编辑第二个词为空**：文本编辑就是 `NSTextView`，它是 `NSTextInputClient` 的标准实现，系统拼音在里面位置正确，所以更可能是探测程序问法的问题（只问了 `attributesForCharacterIndex:`、只问了组字起点）。RDMachine Input 按第 7.1 节的顺序多问几处，都为空才算拿不到。
+- **iTerm2**：`sources/TerminalView/PTYTextView.m` 的 `firstRectForCharacterRange:actualRange:` 按字符网格算：列 × 字宽、行 × 行高，换成屏幕坐标，任何时候都准。系统终端不开源，没法从源码确认；它支持带下划线的组字，系统拼音的候选窗在里面位置正确，所以按同样的路子处理。7.2.3 的日志显示它对超出文字的位置什么也不给（不像网页那样算到末尾），所以旧的问法在里面几乎总是落空（见 7.1）。
+- **文本编辑第二个词为空**：文本编辑就是 `NSTextView`，它是 `NSTextInputClient` 的标准实现，系统拼音在里面位置正确，所以是探测程序问法的问题：它问的是组字在全文里的序号（7.2.3 查清，见 7.1）。
 - **信息**：不开源，是 AppKit 文本控件。拿不到时走第 6.3 节的退路。
 
 ## 3. 总览
@@ -195,8 +195,8 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 - 收到对应当前 `seq` 的新 `caret` 后调用 `[inputContext invalidateCharacterCoordinates]`，本机输入法立即把候选窗挪过去：第一个字母后约一个来回内候选窗挪到位，之后的字母不动（组字起点不变）。
 - 光标位置在打第一个字母**之前**就有（6.3.0；lroel 发现空输入框打第一个字时候选窗位置不对：系统拼音只在下一个按键时才重新问位置，`invalidateCharacterCoordinates` 不会立刻挪动第一个字的候选窗）。所以服务端不等组字就报：输入框获得焦点时（RDMachine Input 的 `activateServer:`，30 ms 后）、每次鼠标抬起和按键抬起后（agent 让它 60 ms 后报，后来的请求取代还在等的）。空输入框问字符 0 也有位置（探测第一版：Safari、Claude 都有）。
 - 还是没有远程位置时，先用上一次的 `caret`；也没有的话用鼠标所在的位置。
-- 组字期间只报组字起点，查不到就不报（6.3.3）。lroel 发现候选窗在 Claude 里抖，调试日志（`ImeDebugLog`，6.3.2）显示：Chromium 的 `markedRange` 有时是编的（报成第 5774 个字符，光标在第 2 个），按它查不到，6.3.0 的顺序就退到“光标前一个字”，候选窗跟着光标一格格右移；148 次上报里 112 次组字时什么也查不到。现在组字起点查不到时再用“光标 − 组字长度”算一次，都没有就让客户端保持原位。
-- 不组字时先查光标本身，再查前一个字的右边缘（6.3.3）：Chromium 只有从光标开始的查询走光标缓存，其余走选区缓存，点鼠标后那里还是旧位置（日志里光标点回第 59 个字，报的还是第 84 个字的位置，整段组字的候选窗停在旧处）。点鼠标或按键后除了 60 ms 那次，250 ms 时再确认一次。
+- 组字期间只报组字起点，查不到就不报（6.3.3；下面说的“查不到”其实是问法错了，7.2.3 查清，补查的两处随之去掉，见下）。lroel 发现候选窗在 Claude 里抖，调试日志（`ImeDebugLog`，6.3.2）显示：Chromium 的 `markedRange` 有时是编的（报成第 5774 个字符，光标在第 2 个），按它查不到，6.3.0 的顺序就退到“光标前一个字”，候选窗跟着光标一格格右移；148 次上报里 112 次组字时什么也查不到。现在组字起点查不到时再用“光标 − 组字长度”算一次，都没有就让客户端保持原位。
+- 不组字时先查光标本身，再查前一个字的右边缘（6.3.3；7.2.3 起只问光标，见下）：Chromium 只有从光标开始的查询走光标缓存，其余走选区缓存，点鼠标后那里还是旧位置（日志里光标点回第 59 个字，报的还是第 84 个字的位置，整段组字的候选窗停在旧处）。点鼠标或按键后除了 60 ms 那次，250 ms 时再确认一次。
 - 模式里的输入源被系统换掉时再选回 RDMachine Input（6.3.4）。会话从锁屏开始时，被控端在解锁前后选了 RDMachine Input，系统随后又把它换成 ABC，被控端仍以为在 RDMachine Input：客户端收不到可输入的字段，打字只剩英文。当时每秒检查一次，模式里当前输入源不是 RDMachine Input 且没有安全输入（密码框、锁屏）时就再选一次，并记一行日志；与关模式在同一把锁下，不会在恢复原输入源之后又选回来。（6.5.0 删掉了这个检查，见下。）
 - 模式里打文字不再切走 RDMachine Input（6.3.5，rdaccel 3.3.0）。上屏找不到能接的输入框时退回 `RDA_INPUT_TEXT`，rdaccel 打文字前会从输入法切到 ASCII 布局，要等之后有按键才切回；这个模式里字母都在客户端组字，被控端只收到上屏，于是一直停在 ABC（6.3.4 之后变成每秒来回切：探针记到 08:53:29–37 每秒一次）。现在进入模式时用 `rda_injector_set_text_leaves_input_method(0)` 关掉这一步，退出时打开；RDMachine Input 不接任何按键，文字原样进去。
 - 每次上报都带上“这个输入框有没有焦点”（6.3.6）。被控端每次开会话都把“有输入框”清成否，RDMachine Input 只在焦点变化时才发 `client`，会话开始前已经点进输入框就一直是否：lroel 在 Claude 里打字的整段调试日志，128 条状态全是 `client:false`。客户端于是当成不支持输入法的应用，另开一个小窗显示拼音（旧版的样子），候选窗跟着乱动。现在每条 `state` 带 `active` 和 `app`，有焦点的那条就把状态改成有；会话开始时也先按桥上记着的状态填好。
@@ -244,6 +244,8 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 
 6.6.1：**被控端不显示自己的输入源提示**（服务端）。lroel：指针在输入框里、滚动 Claude 的对话时，输入法的小提示一直弹。日志里那一分钟被控端没给客户端发过一条输入法消息（每次发送前都记一行）；弹的是 Mac mini 上 macOS 画在 Claude 里的提示（TextInputUI），随画面传过来：最后一个按键之后整 8 分钟，macOS 在光标下再显示一次当前输入源，此后每次滚动它收起、停下约半秒再出现，直到下一个按键。2026-11-21 六次都对得上（误差 0.1 秒内），包括 09:17 没有客户端连着的那次；鼠标和滚动不算按键。指针在对话上滚动时 Claude 会把焦点移走（6.5.4 查到的），提示也就没了，所以是指针留在输入框里时反复出现。它显示的是 RDMachine Input，可用户打字用的是客户端的输入法，一台 Mac 只显示正在组字的那个输入法的提示；客户端输入法吃掉的键也到不了 Mac mini，连续打中文时它同样会冒出来，继续打中文也不让它消失。所以进入客户端输入法模式时关掉 Mac mini 的提示（7.3）。lroel 不要恢复：会话结束后输入源都不切回，提示也不恢复。
 
+7.2.3：**位置只问字符 0**（服务端，RDMachine Input）。lroel：在终端里用 opencode 时，候选窗的位置不对。日志：Terminal 里 opencode 组字时的 145 次报告，一次也没问到位置（`global=-`）；被控端只能接着发之前问到的：先是在 shell 里问到的 (253,85)，后来是一次点击后问到的 (640,339)，候选窗就停在那些地方，不在 opencode 的输入框旁。之前在 shell 提示符下也是：要么问不到，要么问到的位置一个字一行地往下跳。原因是问法：RDMachine Input 从 6.2.0 起拿输入框自己报的序号（组字的起点、光标）去问 `attributesForCharacterIndex:`，而系统把这个序号从组字起点（没有组字时从光标）往后数（7.1），问到的是后面同样远的地方。Terminal 对超出文字的位置什么也不给，组字时超出组字的序号 AppKit 直接报错。Claude 也一样，只是不明显：今天的日志里 Claude 组字时的 2420 次报告，2134 次没问到位置；问到的 286 次全是组字起点的序号小于组字长度、碰巧落在组字里的情况。不组字时的光标查询在 Chromium、网页里能对，是因为它们把超出文字的位置算到文字末尾，打字时光标正好在末尾。6.3.2、6.3.3 把“查不到”归到 Chromium 的 `markedRange` 是编的，并补了两处查询（光标 − 组字长度、光标前一个字的右边缘），用的是同样错误的序号。现在不论什么应用都只问 0：组字时是组字起点，否则是光标；补查去掉。光标查询仍在输入框答得出选区时才做；16、60、250 ms 的复查不变（Chromium 的位置缓存是异步来的）。还要在 opencode 里实际看：位置现在是 Terminal 对自己组字范围的回答，和本机输入法拿到的一样。没有组字时，Terminal 的选区会停在鼠标点过的地方，AppKit 这时按选区算，所以在 Terminal 里点过别处后，打第一个字母前报的光标可能在点击处，开始组字后就是组字起点。
+
 ### 6.4 远程没有输入框时
 
 状态里 `client` 为假（游戏、某些不支持输入法的应用、焦点不在文字上）：客户端不用本机输入法组字，按键原样发过去，和本机 Mac 一样：lroel 在 Mac 上实测，点到不能输入的地方，任何输入法都不出组字和候选窗。服务端停在 RDMachine Input，它把按键原样放过。（6.5.3 以前这里仍用本机输入法组字、客户端画一个小浮层显示组字文字、上屏按文字注入；那和本机行为不一致，已去掉。）
@@ -272,10 +274,11 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 - `RDMachine Input.app`，装在 `/Library/Input Methods`（pkg 以 root 安装），bundle id `org.rdmachine.inputmethod.Remote`，`InputMethodServerControllerClass`、`InputMethodConnectionName` 按 InputMethodKit 的要求写；用 rdmachine Local Signing 签名，和服务端一样。
 - 控制器（每个输入框一个实例）：
   - `handleEvent:client:`：一律返回 `NO`。组字和上屏不经过按键，经过 agent 的消息。
-  - 收到 agent 的 `mark`：`setMarkedText:` 到当前客户端（系统的下划线样式用 `markForStyle:`）；然后按第 5 节的时机查询 `markedRange`、`selectedRange` 和位置，报给 agent。位置依次问，拿到非空的就停：组字起点的 `attributesForCharacterIndex:lineHeightRectangle:`；组字最后一个字的同一查询（用它的右边缘）；光标前一个字（右边缘）。
+  - 收到 agent 的 `mark`：`setMarkedText:` 到当前客户端（系统的下划线样式用 `markForStyle:`）；然后按第 5 节的时机查询 `markedRange`、`selectedRange` 和位置，报给 agent。位置只问一处（`ime/composition_anchor.mm`）：`attributesForCharacterIndex:0 lineHeightRectangle:`，组字时是组字起点，没有组字时是光标（输入框答得出选区时才问）。
   - 收到 `commit`：`insertText:replacementRange:`，回执给 agent；收到 `cancel`：`setMarkedText:@""`。
   - `activateServer:` / `deactivateServer:`：报给 agent（远程有没有输入框、是哪个应用）。
   - `commitComposition:`（系统在切应用、点别处时调用）：输入框里还有组字时，把自己标记的组字上屏（6.4.0），告诉 agent “组字被远程结束了”，agent 转告客户端，客户端 `discardMarkedText`。
+- 位置查询的序号不是全文里的位置（7.2.3 查清）。InputMethodKit 在应用那边把序号乘 2 当字节偏移，放进 `kEventTextInputOffsetToPos` 事件交给应用的 `NSTextInputContext`（macOS 27 的 HIToolbox：`-[IMKInputSession_Modern _createAndSendOffsetToPointEvent:completionHandler:]`，反汇编看到的）；AppKit 再加上输入框自己的 `markedRange` 的起点，组字为空时加 `selectedRange` 的起点，才去问输入框的 `firstRectForCharacterRange:actualRange:`（处理它的方法就叫 `tryHandleTSMEvent_offsetToPos_markedOrSelRange…`），超出组字的序号直接报错。所以问 0 就是组字起点或光标；问输入框自己的序号，问到的是它后面同样远的地方。`ime/tests/test_composition_anchor.mm` 让查询走 AppKit 自己的这一步（输入框是测试里的，像 Terminal 一样超出文字就什么也不给）。
 - 不记文字内容到日志。
 
 ### 7.2 agent 和输入法之间
@@ -316,6 +319,7 @@ RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, c
 
 - **顺序**：rdaccel 的 `tests/test_link.cpp`（第 4 节）。
 - **服务端那一半**：查看 RDMachine Input 的系统日志（控制器的创建、释放、激活、停用、按键接管，不含文字）：`/usr/bin/log show --predicate 'subsystem == "org.rdmachine.inputmethod"'`。客户端和服务端的调试日志（`ImeDebugLog`）记每条状态、每条报告反映到哪条（`answers`）和控制器（`ctl`）；6.3.x 到 6.6.x 的问题都是靠这两份日志和 lroel 的描述对上的。
+- **位置查询**：`ime/tests/test_composition_anchor.mm`（组字时问到组字起点、不组字时问到光标、输入框不给就没有；旧的序号在同样的输入框里问不到）。服务端调试日志每条报告都有 `marked=`、`sel=`、`global=`，组字时 `global=-` 连成一片就是问不到。
 - **候选窗位置**：在第 2 节列出的应用里打字，看候选窗是否贴在组字起点；空输入框的第一个字、上屏后马上打下一个词、切换应用后第一段拼音、滚动后再打字，是出过问题的几种情况（6.3、6.6）。
 - **数值**：输入到画面的响应时间客户端已有（`_responseMs`）。可以再量按键到本机候选窗更新的时间、一段组字开始到候选窗挪到位的时间，对比同一段文字在“同步键盘语言”和“用这台 Mac 的输入法”下的数值。到 6.6.1 这些数值还没有量；lroel 实际用过，评价“正常，跟手”（6.2.1，2026-11-20）。
 - **菜单栏上的客户端输入法**（7.6）：服务端日志打开 `ImeDebugLog` 时，每次切换有一行 `client source <id> icon=<指纹> -> shown|asked for`。

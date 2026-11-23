@@ -31,6 +31,7 @@
 #include <string>
 #include <thread>
 
+#include "composition_anchor.h"
 #include "rdmachine/agent_link.h"
 #include "rdmachine/ime_wire.h"
 
@@ -368,9 +369,8 @@ static uint64_t gNextCtl = 1;
   }
 }
 
-// Where the composition starts: the first non-empty answer of its first
-// character, the right edge of its last one, the right edge of the character
-// before the caret, the caret itself.
+// The field's state, and where the client's candidate window goes: where the
+// composition starts, or the caret before anything is composed.
 - (nlohmann::json)report {
   id client = self.client;
   nlohmann::json r{{"type", "state"}, {"seq", _seq}, {"after", gAppliedId}, {"ctl", _ctl}};
@@ -383,36 +383,16 @@ static uint64_t gNextCtl = 1;
     sel = [client selectedRange];
     r["marked"] = FromRange(mk);
     r["sel"] = FromRange(sel);
-    NSRect rect = NSZeroRect;
-    auto ask = [&](NSUInteger index, bool right_edge) {
-      NSRect line = NSZeroRect;
-      [client attributesForCharacterIndex:index lineHeightRectangle:&line];
-      if (line.size.height <= 0) return false;
-      rect = line;
-      if (right_edge) rect.origin.x += rect.size.width;
-      rect.size.width = 1;
-      return true;
-    };
-    bool found = false;
-    if (_markedLength > 0) {
-      // Composing: only where the composition starts, the client's candidate
-      // window's anchor. Nothing found: no position, and the client keeps the
-      // one it has. Never the caret's (it moves right with every letter, and
-      // the window would follow it). Chromium's markedRange can be made up
-      // (docs/ime.md, 2): the start is also the caret minus the composition
-      // when the caret is at its end, as it is while typing.
-      if (mk.location != NSNotFound) found = ask(mk.location, false);
-      if (!found && sel.location != NSNotFound && sel.location >= _markedLength) {
-        found = ask(sel.location - _markedLength, false);
-      }
-    } else if (sel.location != NSNotFound) {
-      // The caret itself first: Chromium answers a query that starts at the
-      // caret from its caret cache, anything else from a selection cache that
-      // may still be where the caret was before a click. At the end of the
-      // text (no character there) the right edge of the one before it.
-      found = ask(sel.location, false) || (sel.location > 0 && ask(sel.location - 1, true));
-    }
+    // Composing: where the composition starts, never the caret (it moves
+    // right with every letter, and the window would follow it). Otherwise
+    // the caret, while the field says where it is. Nothing found: no
+    // position, and the client keeps the one it has. Never an index of the
+    // field's own (mk, sel): AppKit counts the index from the composition or
+    // the caret (composition_anchor.h).
+    std::optional<NSRect> found;
+    if (_markedLength > 0 || sel.location != NSNotFound) found = rdm::CompositionAnchor(client);
     if (found) {
+      const NSRect rect = *found;
       // Cocoa's screen coordinates (origin bottom left of the primary
       // display) to the top-left origin everything else uses.
       const CGFloat primary_height = NSScreen.screens.count ? NSScreen.screens[0].frame.size.height : 0;
