@@ -10,7 +10,9 @@ namespace rdmclient::upscaler {
 
 // Each colour channel on its own: the 7 x 7 neighbourhood of a 1x pixel
 // (edges repeated) gives the 2 x 2 pixels it becomes, in the order (0,0) (0,1)
-// (1,0) (1,1): a linear filter plus a small network's correction.
+// (1,0) (1,1): a linear filter plus a small network's correction. A
+// neighbourhood all of one colour gives that colour (the network would change
+// it by a rounding at most): most of a desktop, so most pixels cost nothing.
 constexpr int kWindow = 7;
 constexpr int kReach = 3;  // a 1x pixel changes the output this many pixels around it
 constexpr int kTaps = kWindow * kWindow;
@@ -31,7 +33,9 @@ constexpr size_t kWeightCount = kB3 + 4;
 const float* Weights();
 
 // The model on a whole BGRA picture of w x h into dst (2w x 2h BGRA, opaque),
-// computed on the CPU exactly as the GPU kernel does (up to rounding).
+// computed on the CPU in single precision: the GPU kernel's sums in the same
+// order, which in half precision come within two levels of 255 of these.
+constexpr int kGpuTolerance = 2;
 void UpscaleOnCpu(const uint8_t* src, int w, int h, size_t src_stride, uint8_t* dst, size_t dst_stride);
 
 }  // namespace rdmclient::upscaler

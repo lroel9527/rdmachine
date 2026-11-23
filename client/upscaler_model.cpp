@@ -20,6 +20,25 @@ void UpscaleOnCpu(const uint8_t* src, int w, int h, size_t src_stride, uint8_t* 
   const float* wt = kData;
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {
+      const uint8_t* centre = src + static_cast<size_t>(y) * src_stride + static_cast<size_t>(x) * 4;
+      bool flat = true;
+      for (int dy = -kReach; dy <= kReach && flat; ++dy) {
+        const int yy = std::clamp(y + dy, 0, h - 1);
+        for (int dx = -kReach; dx <= kReach && flat; ++dx) {
+          const uint8_t* q = src + static_cast<size_t>(yy) * src_stride + static_cast<size_t>(std::clamp(x + dx, 0, w - 1)) * 4;
+          flat = q[0] == centre[0] && q[1] == centre[1] && q[2] == centre[2];
+        }
+      }
+      if (flat) {
+        for (int k = 0; k < 4; ++k) {
+          uint8_t* o = dst + static_cast<size_t>(2 * y + k / 2) * dst_stride + static_cast<size_t>(2 * x + k % 2) * 4;
+          o[0] = centre[0];
+          o[1] = centre[1];
+          o[2] = centre[2];
+          o[3] = 255;
+        }
+        continue;
+      }
       for (int c = 0; c < 3; ++c) {
         float in[kTaps];
         for (int dy = -kReach, i = 0; dy <= kReach; ++dy) {

@@ -24,8 +24,9 @@ class PictureUpscaler {
   bool HasMetalFX() const;
 
   // Brings the enlarged picture up to date from `src` (the whole current
-  // picture, w x h BGRA): kModel and kPixels redo `rects` (1x pixels; kModel
-  // also kReach around them), kMetalFX redoes the whole picture. Then copies
+  // picture, w x h BGRA) where it changed: `rects` (1x pixels) and kReach
+  // around them are redone with `how` (kMetalFX enlarges the whole picture and
+  // takes only those parts of it, so the rest keeps what made it). Then copies
   // `copy` (1x rects) of it into `dst` (2w x 2h BGRA) and waits for the GPU.
   // A new size starts the enlarged picture over: redo all of it then.
   bool Run(Upscaler how, IOSurfaceRef src, const std::vector<rda_rect>& rects, IOSurfaceRef dst,

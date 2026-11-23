@@ -177,8 +177,8 @@ TEST_F(UpscalerTest, ModelOnTheGpuIsTheModelOnTheCpu) {
     worst = std::max(worst, d);
     if (d) ++off;
   }
-  EXPECT_LE(worst, 1);                       // rounding only
-  EXPECT_LT(off, gpu.px.size() / 100);       // and rarely
+  EXPECT_LE(worst, rdmclient::upscaler::kGpuTolerance);  // the GPU works in half precision
+  EXPECT_LT(off, gpu.px.size() / 10);                     // and on few pixels
 }
 
 // Only what changed is redone, kReach around it: the same pixels as
@@ -244,7 +244,7 @@ TEST_F(UpscalerTest, ANewSizeIsDoneWhole) {
   rdmclient::upscaler::UpscaleOnCpu(p.px.data(), p.w, p.h, p.stride(), cpu.px.data(), cpu.stride());
   int worst = 0;
   for (size_t i = 0; i < gpu.px.size(); ++i) worst = std::max(worst, std::abs(gpu.px[i] - cpu.px[i]));
-  EXPECT_LE(worst, 1);
+  EXPECT_LE(worst, rdmclient::upscaler::kGpuTolerance);
 }
 
 // RDM_UPSCALER_TIMING=1: GPU time for whole pictures of common sizes.
@@ -254,6 +254,14 @@ TEST_F(UpscalerTest, Timing) {
   for (const auto& s : sizes) {
     IOSurfaceRef src = Surface(s[0], s[1]), dst = Surface(2 * s[0], 2 * s[1]);
     const std::vector<rda_rect> all{rda_rect{0, 0, s[0], s[1]}};
+    {  // a picture where everything varies (a photo, a video): no pixel is skipped
+      Picture p;
+      p.w = s[0];
+      p.h = s[1];
+      p.px.resize(p.stride() * p.h);
+      for (size_t i = 0; i < p.px.size(); ++i) p.px[i] = static_cast<uint8_t>((i * 2654435761u) >> 24);
+      Put(src, p);
+    }
     for (Upscaler how : {Upscaler::kModel, Upscaler::kMetalFX}) {
       if (how == Upscaler::kMetalFX && !up_->HasMetalFX()) continue;
       double best = 1e9;

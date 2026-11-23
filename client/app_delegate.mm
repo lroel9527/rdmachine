@@ -1272,7 +1272,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     NSString* tip;
   } ups[] = {
       {Upscaler::kModel, @"文字模型",
-       @"用一个按 macOS 文字训练的小模型放大，字的边缘最清楚（笔画特别多的字补不回来）。画面大面积变化时先用 MetalFX，停下后再用模型。"},
+       @"用一个按 macOS 文字训练的小模型放大，字的边缘最清楚（笔画特别多的字补不回来）。"},
       {Upscaler::kMetalFX, @"MetalFX", @"用系统自带的 MetalFX 空间超分放大：没有方块，边缘比平滑放大锐。"},
       {Upscaler::kPixels, @"像素重复", @"每个像素原样放大成 2 × 2：和服务端画的一模一样，但有方块感。"},
   };
