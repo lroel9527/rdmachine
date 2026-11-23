@@ -199,7 +199,7 @@ rdmachine 的客户端和服务端之间有两条连接：
 - **会话开始时**：`session_request.text_mode`（可省略，默认 false）。
 - **会话中途**：rdaccel 应用消息，类型 `0x10004`（`RDA_MSG_USER_FIRST + 4`，`kPictureModeMessageType`），客户端到服务端，内容是 JSON `{"text_mode":true}`。服务端调用 `rda_host_set_text_mode`，下一帧生效；没有单独的应答。关掉时服务端整屏刷新一次（换回原色）。不认识的字段忽略，以后的画面模式加在这个对象里。
 - **客户端知道当前状态**：会话统计（见下）里的 `text_mode`；Mac 客户端的浮窗打开时多显示一行 “Data saver”。
-- **桌面的分辨率**：文字模式下 Mac 客户端默认请求 1 倍的桌面（“请求桌面”的 `scale` 为 1，像素数 = 窗口的点数），即使窗口在 Retina 屏上：要发的像素是 2 倍桌面的四分之一。被控端按 1 倍渲染文字，客户端在窗口正好是画面整数倍大时用最近邻放大（每个像素变成 2 × 2，不做平滑）。切换文字模式时客户端重新请求桌面（开：1 倍；关：回到窗口的缩放系数）。菜单 View → Data Saver at Standard Resolution (1x) 可以关掉，默认开。服务端不需要知道这件事。
+- **桌面的分辨率**：文字模式下 Mac 客户端默认请求 1 倍的桌面（“请求桌面”的 `scale` 为 1，像素数 = 窗口的点数），即使窗口在 Retina 屏上：要发的像素是 2 倍桌面的四分之一。被控端按 1 倍渲染文字，客户端在画面正好按 2 倍显示时在 GPU 上放大（默认用按 macOS 文字训练的小模型，见[1 倍画面放大](upscaler.md)；7.2 以前是每个像素变成 2 × 2 的最近邻）。切换文字模式时客户端重新请求桌面（开：1 倍；关：回到窗口的缩放系数）。菜单 View → Data Saver at Standard Resolution (1x) 可以关掉，默认开。服务端不需要知道这件事。
 - Mac 客户端：菜单 View → Data Saver (Sharp Text)，选择会记住，下次连接直接用。命令行客户端：`rdmachine-connect --text-mode`（开始时），`--set-text-mode=on|off`（收到画面后切换）。
 - 控制协议只加了可选字段，版本仍是 0；旧服务端忽略 `text_mode` 和这条消息（画面照常，只是不省），旧客户端不发。
 

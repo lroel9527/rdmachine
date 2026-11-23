@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "input_source_icon.h"
+#include "picture_upscaler.h"
 #include "rdmachine/desktop.h"
 #include "rdmachine/ime_wire.h"
 #include "rdmachine/input_source_sync.h"
@@ -81,6 +82,13 @@ extern bool gObserveOnly;  // main thread
 extern NSString* const kTextModeStandardResolutionKey;
 bool TextModeStandardResolution();
 double DesktopScale(double backing);
+// View > 1 倍画面放大 (docs/upscaler.md): how a 1x picture shown at exactly
+// 2x is enlarged. The text model unless chosen otherwise.
+extern NSString* const kUpscalerKey;
+extern NSString* const kUpscalerChanged;
+Upscaler CurrentUpscaler();
+void SetUpscaler(Upscaler u);
+NSString* UpscalerName(int how);  // an Upscaler, as the menu says it
 extern NSString* const kUseAllDisplaysKey;
 extern NSString* const kUseAllDisplaysChanged;
 bool UseAllDisplays();

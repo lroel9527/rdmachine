@@ -9,7 +9,7 @@ if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.2" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(rdmachine VERSION 7.1.0 LANGUAGES C CXX)
+project(rdmachine VERSION 7.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,4 +92,5 @@ if(RDM_BUILD_TESTS)
   enable_testing()
   add_subdirectory(core/tests)
   add_subdirectory(session/tests)
+  add_subdirectory(client/tests)
 endif()

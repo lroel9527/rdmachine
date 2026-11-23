@@ -1,5 +1,7 @@
 #include "remote_window.h"
 
+#include "upscaler_model.h"
+
 #include <deque>
 #include <iterator>
 #include <map>
@@ -250,6 +252,25 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   std::vector<rda_rect> _owed[2];
   int _front;
   std::atomic<bool> _presentPending;
+  // View > 1 倍画面放大 (docs/upscaler.md): a 1x picture shown at exactly 2x
+  // is enlarged on the GPU into three surfaces of its own (one on screen, one
+  // on its way there, one to fill); _surf keeps the picture as it came.
+  // Under _surfMu, except the three atomics.
+  std::unique_ptr<PictureUpscaler> _upscaler;  // made on first use; none if this Mac cannot
+  BOOL _upscalerTried;
+  IOSurfaceRef _big[3];
+  std::vector<rda_rect> _bigOwed[3];  // what each lacks of the enlarged picture
+  int _bigShown;                      // the one on screen (-1: the picture as it came, or none)
+  int _bigSent[3];                    // shows on their way to the main thread
+  uint64_t _bigGen;                   // counts dropBig: shows of older surfaces count for nothing
+  std::vector<rda_rect> _redo;        // changed since the enlarged picture was brought up to date
+  int _upscaleDone;                   // what made the enlarged picture (-1: nothing yet)
+  BOOL _refineOwed;                   // the model was wanted but MetalFX did parts of it
+  double _modelNsPerPixel;            // the model's GPU time per 1x pixel, as measured
+  dispatch_source_t _refineTimer;
+  std::atomic<int> _upscaleWanted;  // -1: the picture as it came; else an Upscaler (main thread sets it)
+  std::atomic<int> _upscaleUsed;    // what enlarged the last picture, for the statistics
+  std::atomic<double> _upscaleMs;   // and its GPU time
   NSView* _statusDim;               // darkens the frozen picture behind the card
   NSVisualEffectView* _statusView;  // the card
   NSImageView* _statusIcon;
@@ -336,6 +357,16 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 - (instancetype)initWithTitle:(NSString*)title {
   if (!(self = [super init])) return nil;
   _front = -1;
+  _bigShown = -1;
+  _upscaleDone = -1;
+  _modelNsPerPixel = 10;  // about an M1's; replaced by what is measured
+  _upscaleWanted = -1;
+  _upscaleUsed = -1;
+  _upscaleMs = -1;
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(updatePictureFilter)
+                                             name:kUpscalerChanged
+                                           object:nil];
   _extraIndex = -1;
   _extras = [NSMutableArray array];
   _extraConnects = dispatch_group_create();
@@ -675,6 +706,8 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
 // desktop on a Retina screen: text mode) gets every pixel repeated, which
 // keeps the text's edges as the server drew them; smoothing a 2x
 // enlargement blurs every glyph. Any other ratio is smoothed as before.
+// At exactly 2x the GPU enlarges it instead, as View > 1 倍画面放大 says
+// (docs/upscaler.md), unless that says pixels repeated.
 - (void)updatePictureFilter {
   const double backing = _window.backingScaleFactor > 0 ? _window.backingScaleFactor : 1;
   const double ratio = _streamW > 0 ? _view.bounds.size.width * backing / _streamW : 1;
@@ -685,6 +718,163 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
     NSLog(@"picture %dx%d in a view of %.0fx%.0f points at %.0fx: %@", _streamW, _streamH, _view.bounds.size.width,
           _view.bounds.size.height, backing, whole ? @"pixels repeated" : @"smoothed");
   }
+  const Upscaler how = CurrentUpscaler();
+  const int wanted = std::abs(ratio - 2) < 0.01 && how != Upscaler::kPixels ? static_cast<int>(how) : -1;
+  if (_upscaleWanted.exchange(wanted) != wanted) {
+    NSLog(@"picture at 2x enlarged with: %@", wanted < 0 ? @"nothing (as it came)" : UpscalerName(wanted));
+    [self repaintPicture:3];
+  }
+}
+
+// Main thread: the picture on screen is shown again the way now wanted
+// (the menu changed, or the window left or reached exactly 2x), without
+// waiting for the next picture. A picture on its way first: try again.
+- (void)repaintPicture:(int)tries {
+  __weak RemoteWindowController* weakSelf = self;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    RemoteWindowController* me = weakSelf;
+    if (!me || [me repaintNow] || tries <= 1) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      [weakSelf repaintPicture:tries - 1];
+    });
+  });
+}
+
+// Any thread. NO: a picture is on its way, or one came and is not on screen.
+- (BOOL)repaintNow {
+  std::lock_guard<std::mutex> lock(_surfMu);
+  if (_front < 0 || !_surf[_front]) return YES;  // nothing to show yet
+  if (_presentPending.load() || !_redo.empty()) return NO;
+  const int wanted = _upscaleWanted.load();
+  int big = -1;
+  if (wanted >= 0) big = [self enlargeFrom:_front how:static_cast<Upscaler>(wanted) settled:YES];
+  [self present:big >= 0 ? _big[big] : _surf[_front] back:-1 big:big];
+  return YES;
+}
+
+// Under _surfMu: the enlarged surfaces go (a new picture size, the session's end).
+- (void)dropBig {
+  for (auto& b : _big) {
+    if (b) CFRelease(b);
+    b = nullptr;
+  }
+  for (auto& o : _bigOwed) o.clear();
+  for (auto& n : _bigSent) n = 0;
+  _bigShown = -1;
+  ++_bigGen;
+  _redo.clear();
+  _upscaleDone = -1;
+  _refineOwed = NO;
+}
+
+// Under _surfMu. Brings the enlarged picture up to date from _surf[src] (the
+// whole current picture) and fills an enlarged surface that is neither on
+// screen nor on its way there: its index, or -1 (show the picture as it came).
+// The model does what changed if it can in about 4 ms (`settled`: all of
+// it); more than that (scrolling, a video, another app) MetalFX does the
+// whole picture at once and the model goes over it 150 ms after the last
+// change.
+- (int)enlargeFrom:(int)src how:(Upscaler)how settled:(BOOL)settled {
+  if (!_upscalerTried) {
+    _upscalerTried = YES;
+    _upscaler = PictureUpscaler::Create();
+    if (!_upscaler) NSLog(@"upscaler: not available on this Mac: pixels repeated");
+  }
+  if (!_upscaler || _surfW <= 0 || _surfH <= 0) return -1;
+  const rda_rect all{0, 0, _surfW, _surfH};
+  if (!_big[0]) {
+    for (auto& b : _big) b = MakeSurface(2 * _surfW, 2 * _surfH);
+    if (!_big[0] || !_big[1] || !_big[2]) {
+      [self dropBig];
+      return -1;
+    }
+    for (auto& o : _bigOwed) o.assign(1, all);
+    _upscaleDone = -1;
+  }
+  if (_upscaleDone != static_cast<int>(how)) _redo.assign(1, all);  // made some other way, or not yet
+  if (how != Upscaler::kModel) _refineOwed = NO;
+  Upscaler run = how;
+  const int32_t reach = upscaler::kReach;
+  double area = 0;
+  for (const auto& r : _redo) area += static_cast<double>(r.w + 2 * reach) * (r.h + 2 * reach);
+  if (how == Upscaler::kModel && !settled && area * _modelNsPerPixel > 4e6) {
+    run = Upscaler::kMetalFX;
+    _refineOwed = YES;
+  }
+  if (run == Upscaler::kMetalFX) _redo.assign(1, all);
+  int dst = -1;
+  for (int i = 0; i < 3 && dst < 0; ++i) {
+    if (i != _bigShown && _bigSent[i] == 0) dst = i;
+  }
+  if (dst < 0) return -1;  // one on screen and at most one on its way: never
+  const int32_t grow = run == Upscaler::kModel ? reach : 0;
+  for (auto& o : _bigOwed) {
+    for (const auto& r : _redo) {
+      const int32_t x0 = std::max(0, r.x - grow), y0 = std::max(0, r.y - grow);
+      const int32_t x1 = std::min(_surfW, r.x + r.w + grow), y1 = std::min(_surfH, r.y + r.h + grow);
+      if (x1 > x0 && y1 > y0) Owe(o, rda_rect{x0, y0, x1 - x0, y1 - y0}, _surfW, _surfH);
+    }
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!_upscaler->Run(run, _surf[src], _redo, _big[dst], _bigOwed[dst])) return -1;
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (run == Upscaler::kModel && area >= 20000) _modelNsPerPixel = 0.7 * _modelNsPerPixel + 0.3 * (ms * 1e6 / area);
+  _upscaleMs = ms;
+  _upscaleUsed = static_cast<int>(run);
+  _bigOwed[dst].clear();
+  _redo.clear();
+  _upscaleDone = static_cast<int>(how);
+  if (_refineOwed) [self scheduleRefine];
+  return dst;
+}
+
+// Under _surfMu: the model goes over the whole picture once nothing has
+// changed for 150 ms (each call starts the wait again).
+- (void)scheduleRefine {
+  if (!_refineTimer) {
+    _refineTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                          dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+    __weak RemoteWindowController* weakSelf = self;
+    dispatch_source_set_event_handler(_refineTimer, ^{
+      [weakSelf refinePicture];
+    });
+    dispatch_source_set_timer(_refineTimer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+    dispatch_resume(_refineTimer);
+  }
+  dispatch_source_set_timer(_refineTimer, dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), DISPATCH_TIME_FOREVER,
+                            10 * NSEC_PER_MSEC);
+}
+
+// Timer queue.
+- (void)refinePicture {
+  std::lock_guard<std::mutex> lock(_surfMu);
+  if (!_refineOwed) return;
+  if (_upscaleWanted.load() != static_cast<int>(Upscaler::kModel) || _front < 0 || !_surf[_front]) {
+    _refineOwed = NO;
+    return;
+  }
+  if (_presentPending.load() || !_redo.empty()) {  // a picture on its way, or one not on screen: after it
+    [self scheduleRefine];
+    return;
+  }
+  _refineOwed = NO;
+  _redo.assign(1, rda_rect{0, 0, _surfW, _surfH});
+  const int big = [self enlargeFrom:_front how:Upscaler::kModel settled:YES];
+  if (big >= 0) [self present:_big[big] back:-1 big:big];
+}
+
+// Under _surfMu: hands `s` to the main thread to show. `back`: the 1x surface
+// just filled (-1: a picture shown again); `big`: the enlarged surface `s` is.
+- (void)present:(IOSurfaceRef)s back:(int)back big:(int)big {
+  if (big >= 0) ++_bigSent[big];
+  CFRetain(s);
+  const uint64_t gen = _bigGen;
+  __weak RemoteWindowController* weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    RemoteWindowController* me = weakSelf;
+    if (me) [me show:s back:back big:big gen:gen];
+    CFRelease(s);
+  });
 }
 
 - (void)requestDesktop {
@@ -839,10 +1029,17 @@ static NSString* PlainString(id s) { return [s isKindOfClass:NSAttributedString.
   if (_cursorImage) CGImageRelease(_cursorImage);
   _cursorImage = nullptr;
   std::lock_guard<std::mutex> lock(_surfMu);
+  if (_refineTimer) {
+    dispatch_source_cancel(_refineTimer);
+    _refineTimer = nil;
+  }
   for (auto& s : _surf) {
     if (s) CFRelease(s);
     s = nullptr;
   }
+  [self dropBig];
+  if (_upscaler) _upscaler->Reset();
+  _upscaleUsed = -1;
 }
 
 - (void)dealloc {
@@ -1665,6 +1862,12 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   // Not a field to pick: whoever sees soft photos should see why.
   if (shown && r.text_mode) [lines addObject:@"省流量"];
+  // Nor this: how the 1x picture on this Retina screen is enlarged.
+  if (shown && _upscaleWanted.load() >= 0 && _upscaleUsed.load() >= 0) {
+    const bool waiting = _upscaleUsed.load() != _upscaleWanted.load();  // MetalFX until the picture settles
+    [lines addObject:[NSString stringWithFormat:@"放大 %@ %.1f ms%@", UpscalerName(_upscaleUsed.load()),
+                                                _upscaleMs.load(), waiting ? @"（画面在动）" : @""]];
+  }
   // Nor this: the input menu is greyed out and nothing here says why.
   _secureInputHolder = SecureInputHolder() == getpid() ? ReleaseSecureInput() : SecureInputHolder();
   if (shown && _secureInputHolder != 0) {
@@ -1885,6 +2088,7 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
     _owed[0].assign(1, rda_rect{0, 0, img->width, img->height});
     _owed[1] = _owed[0];
     _front = -1;
+    [self dropBig];
     if (!_surf[0] || !_surf[1]) return;
   } else {
     for (auto& o : _owed) {
@@ -1892,6 +2096,8 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
       for (size_t i = 0; i < count; ++i) Owe(o, changed[i], img->width, img->height);
     }
   }
+  if (count == 0) Owe(_redo, rda_rect{0, 0, img->width, img->height}, img->width, img->height);
+  for (size_t i = 0; i < count; ++i) Owe(_redo, changed[i], img->width, img->height);
   if (_presentPending.exchange(true)) return;
   const int back = _front == 0 ? 1 : 0;
   IOSurfaceRef s = _surf[back];
@@ -1910,26 +2116,35 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
   }
   _owed[back].clear();
   IOSurfaceUnlock(s, 0, nullptr);
-  CFRetain(s);
-  lock.unlock();
-  __weak RemoteWindowController* weakSelf = self;
-  dispatch_async(dispatch_get_main_queue(), ^{
-    RemoteWindowController* me = weakSelf;
-    if (me) [me show:s back:back];
-    CFRelease(s);
-  });
+  // The surface just filled is the whole current picture: enlarge it if wanted.
+  const int wanted = _upscaleWanted.load();
+  int big = -1;
+  if (wanted >= 0) {
+    big = [self enlargeFrom:back how:static_cast<Upscaler>(wanted) settled:NO];
+  } else {
+    _redo.clear();
+    _upscaleDone = -1;
+    _refineOwed = NO;
+  }
+  [self present:big >= 0 ? _big[big] : s back:back big:big];
 }
 
-- (void)show:(IOSurfaceRef)s back:(int)back {
+// Main thread. `back`: the 1x surface the decode thread filled (-1 for a
+// picture shown again); `big`: which enlarged surface `s` is (-1: none).
+- (void)show:(IOSurfaceRef)s back:(int)back big:(int)big gen:(uint64_t)gen {
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
   _layer.contents = (__bridge id)s;
   [CATransaction commit];
   {
     std::lock_guard<std::mutex> l(_surfMu);
-    _front = back;
+    if (back >= 0) _front = back;
+    if (gen == _bigGen) {
+      if (big >= 0) --_bigSent[big];
+      _bigShown = big;
+    }
   }
-  _presentPending = false;
+  if (back >= 0) _presentPending = false;
 }
 
 + (CGImageRef)makeCursorImage:(const rda_cursor_image*)c {

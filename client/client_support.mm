@@ -70,6 +70,30 @@ double DesktopScale(double backing) {
   return TextMode() && TextModeStandardResolution() ? 1.0 : backing;
 }
 
+NSString* const kUpscalerKey = @"StandardResolutionUpscaler";
+NSString* const kUpscalerChanged = @"RDMUpscalerChanged";
+
+Upscaler CurrentUpscaler() {
+  NSString* v = [NSUserDefaults.standardUserDefaults stringForKey:kUpscalerKey];
+  if ([v isEqualToString:@"metalfx"]) return Upscaler::kMetalFX;
+  if ([v isEqualToString:@"pixels"]) return Upscaler::kPixels;
+  return Upscaler::kModel;
+}
+
+void SetUpscaler(Upscaler u) {
+  NSString* v = u == Upscaler::kMetalFX ? @"metalfx" : u == Upscaler::kPixels ? @"pixels" : @"model";
+  [NSUserDefaults.standardUserDefaults setObject:v forKey:kUpscalerKey];
+}
+
+NSString* UpscalerName(int how) {
+  switch (static_cast<Upscaler>(how)) {
+    case Upscaler::kModel: return @"文字模型";
+    case Upscaler::kMetalFX: return @"MetalFX";
+    case Upscaler::kPixels: return @"像素重复";
+  }
+  return @"?";
+}
+
 // View > Use All Displays in Full Screen: an extended desktop (docs/protocol.md,
 // "扩展桌面"). While the remote window is full screen, each other screen of
 // this Mac gets a display of its own on the server, next to the main one as

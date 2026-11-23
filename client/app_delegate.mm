@@ -1055,6 +1055,8 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   } else if (item.action == @selector(toggleTextModeStandardResolution:)) {
     item.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
     return TextMode();
+  } else if (item.action == @selector(setUpscaler:)) {
+    item.state = item.tag == static_cast<NSInteger>(CurrentUpscaler()) ? NSControlStateValueOn : NSControlStateValueOff;
   }
   return YES;
 }
@@ -1083,6 +1085,11 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   [NSUserDefaults.standardUserDefaults setBool:on forKey:kTextModeStandardResolutionKey];
   item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
   [NSNotificationCenter.defaultCenter postNotificationName:kTextModeChanged object:nil];
+}
+
+- (void)setUpscaler:(NSMenuItem*)item {
+  SetUpscaler(static_cast<Upscaler>(item.tag));
+  [NSNotificationCenter.defaultCenter postNotificationName:kUpscalerChanged object:nil];
 }
 
 - (void)toggleUseAllDisplays:(NSMenuItem*)item {
@@ -1255,6 +1262,28 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   textRes.indentationLevel = 1;
   textRes.state = TextModeStandardResolution() ? NSControlStateValueOn : NSControlStateValueOff;
   textRes.toolTip = @"开着省流量时，用 1 倍的桌面代替 Retina（2 倍）：像素只有四分之一，流量少很多；字会粗糙一些。";
+  // How that 1x desktop is enlarged on a Retina screen (docs/upscaler.md).
+  NSMenuItem* upItem = [view addItemWithTitle:@"1 倍画面放大" action:nil keyEquivalent:@""];
+  upItem.indentationLevel = 1;
+  NSMenu* up = [[NSMenu alloc] initWithTitle:@"1 倍画面放大"];
+  const struct {
+    Upscaler how;
+    NSString* title;
+    NSString* tip;
+  } ups[] = {
+      {Upscaler::kModel, @"文字模型",
+       @"用一个按 macOS 文字训练的小模型放大，字的边缘最清楚（笔画特别多的字补不回来）。画面大面积变化时先用 MetalFX，停下后再用模型。"},
+      {Upscaler::kMetalFX, @"MetalFX", @"用系统自带的 MetalFX 空间超分放大：没有方块，边缘比平滑放大锐。"},
+      {Upscaler::kPixels, @"像素重复", @"每个像素原样放大成 2 × 2：和服务端画的一模一样，但有方块感。"},
+  };
+  for (const auto& u : ups) {
+    NSMenuItem* item = [up addItemWithTitle:u.title action:@selector(setUpscaler:) keyEquivalent:@""];
+    item.target = self;
+    item.tag = static_cast<NSInteger>(u.how);
+    item.state = CurrentUpscaler() == u.how ? NSControlStateValueOn : NSControlStateValueOff;
+    item.toolTip = u.tip;
+  }
+  upItem.submenu = up;
   NSMenuItem* sound = [view addItemWithTitle:@"播放远程电脑的声音" action:@selector(togglePlaySound:) keyEquivalent:@""];
   sound.target = self;
   sound.state = PlaySound() ? NSControlStateValueOn : NSControlStateValueOff;
