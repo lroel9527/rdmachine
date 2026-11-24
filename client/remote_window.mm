@@ -1807,12 +1807,12 @@ static std::map<std::string, std::pair<std::string, std::vector<uint8_t>>>& ImeI
   add(@"encoder", r.encoder.empty() ? @"–" : NS(r.encoder));
   // Not a field to pick: whoever sees soft photos should see why.
   if (shown && r.text_mode) [lines addObject:@"省流量"];
-  // Nor this: how the 1x picture on this Retina screen is enlarged, and the
-  // GPU time the last picture took.
-  if (shown && _upscaleWanted.load() >= 0 && _upscaleUsed.load() >= 0) {
-    [lines addObject:[NSString stringWithFormat:@"放大 %@ %.1f ms", UpscalerName(_upscaleWanted.load()), _upscaleMs.load()]];
+  // How the 1x picture on this Retina screen is enlarged, and the GPU time
+  // the last picture took: only while it is enlarged.
+  if (_upscaleWanted.load() >= 0 && _upscaleUsed.load() >= 0) {
+    add(@"upscale", [NSString stringWithFormat:@"放大 %@ %.1f ms", UpscalerName(_upscaleWanted.load()), _upscaleMs.load()]);
   }
-  // Nor this: the input menu is greyed out and nothing here says why.
+  // Not a field either: the input menu is greyed out and nothing here says why.
   _secureInputHolder = SecureInputHolder() == getpid() ? ReleaseSecureInput() : SecureInputHolder();
   if (shown && _secureInputHolder != 0) {
     [lines addObject:[NSString stringWithFormat:@"输入法被 %@ 拦住", DescribeProcess(_secureInputHolder)]];

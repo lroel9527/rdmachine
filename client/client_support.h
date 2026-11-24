@@ -51,6 +51,7 @@ struct StatsField {
   NSString* key;
   NSString* title;
   bool on_by_default;
+  NSString* tip = nil;  // the menu item's tooltip
 };
 
 inline const StatsField kStatsFields[] = {
@@ -58,7 +59,10 @@ inline const StatsField kStatsFields[] = {
     {@"fps", @"帧率", true},        {@"latency", @"延迟", true},
     {@"loss", @"丢包", true},      {@"bitrate", @"码率", false},
     {@"bandwidth", @"带宽", false},  {@"resolution", @"分辨率", false},
-    {@"encoder", @"编码器", false},      {@"input", @"输入法", false},
+    {@"encoder", @"编码器", false},
+    {@"upscale", @"放大方式", true,
+     @"画面放大到正好 2 倍显示时（比如省流量时用标准分辨率）才有这一行：放大用的方式，和最近一帧放大用的时间。选了像素重复时没有。"},
+    {@"input", @"输入法", false},
     {@"response", @"操作到画面", true},  {@"audio", @"声音", false},
     {@"traffic", @"流量累计", true},
 };
@@ -112,6 +116,7 @@ extern NSString* const kStatsOpacityKey;
 extern NSString* const kStatsChanged;
 bool StatsShown();
 NSSet<NSString*>* StatsFieldsOn();
+void SetStatsFieldsOn(NSSet<NSString*>* on);
 int StatsOpacity();
 NSString* StatsKbps(double kbps);
 NSEventModifierFlags FlagOfModifierKey(unsigned short keyCode);

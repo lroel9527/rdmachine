@@ -208,6 +208,11 @@ bool StatsShown() {
   return [d objectForKey:kStatsShownKey] ? [d boolForKey:kStatsShownKey] : true;
 }
 
+// Fields added after people had made their pick, each on by default: 6.0's
+// traffic total, and 7.2.4's way the 1x picture is enlarged (until then shown
+// whatever the pick). Each comes on once; turning it off sticks.
+static NSArray<NSString*>* LateStatsFields() { return @[ @"traffic", @"upscale" ]; }
+
 NSSet<NSString*>* StatsFieldsOn() {
   NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
   NSArray* saved = [d arrayForKey:kStatsFieldsKey];
@@ -219,15 +224,25 @@ NSSet<NSString*>* StatsFieldsOn() {
     return on;
   }
   [on addObjectsFromArray:saved];
-  // A field added after the user made their pick (6.0: the traffic total)
-  // comes on once if it is on by default; turning it off sticks.
   NSArray* known = [d arrayForKey:kStatsFieldsKnownKey];
-  if (!known || ![known containsObject:@"traffic"]) {
-    [on addObject:@"traffic"];
-    [d setObject:on.allObjects forKey:kStatsFieldsKey];
-    [d setObject:@[ @"traffic" ] forKey:kStatsFieldsKnownKey];
+  bool added = false;
+  for (NSString* key in LateStatsFields()) {
+    if (![known containsObject:key]) {
+      [on addObject:key];
+      added = true;
+    }
   }
+  if (added) SetStatsFieldsOn(on);
   return on;
+}
+
+// A pick is made with every field in the menu, so none comes on by itself
+// afterwards. (Until 7.2.4 the first pick did not say so, and turning the
+// traffic total off the first time did not stick.)
+void SetStatsFieldsOn(NSSet<NSString*>* on) {
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  [d setObject:on.allObjects forKey:kStatsFieldsKey];
+  [d setObject:LateStatsFields() forKey:kStatsFieldsKnownKey];
 }
 
 int StatsOpacity() {

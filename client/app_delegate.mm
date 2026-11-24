@@ -1020,7 +1020,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
   } else {
     [on addObject:key];
   }
-  [NSUserDefaults.standardUserDefaults setObject:on.allObjects forKey:kStatsFieldsKey];
+  SetStatsFieldsOn(on);
   [NSNotificationCenter.defaultCenter postNotificationName:kStatsChanged object:nil];
 }
 
@@ -1300,6 +1300,7 @@ static NSTextField* Label(NSString* text, NSRect frame) {
     it.target = self;
     it.representedObject = f.key;
     it.indentationLevel = 1;
+    it.toolTip = f.tip;
   }
   [stats addItem:NSMenuItem.separatorItem];
   [stats addItemWithTitle:@"背景透明度" action:nil keyEquivalent:@""].enabled = NO;

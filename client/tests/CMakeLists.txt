@@ -1,4 +1,4 @@
-add_executable(rdm_client_tests test_upscaler.mm test_window_upscale.mm
+add_executable(rdm_client_tests test_upscaler.mm test_window_upscale.mm test_stats_fields.mm
   ../remote_window.mm ../client_support.mm ../input_source_icon.mm)
 target_compile_options(rdm_client_tests PRIVATE -fobjc-arc)
 target_include_directories(rdm_client_tests PRIVATE ${PROJECT_SOURCE_DIR}/client)
